@@ -1,10 +1,11 @@
 """backend.get() returns None on an empty 2xx body (backend.py get()).
 
-Every REST tool call site must survive that contract: read tools degrade to
-empty results (matching the already-guarded list_conversations/get_file_info
-sites), and the read-modify-write in custom_instructions_set must REFUSE to
-proceed — blind-overwriting with `{}` would silently clear whichever custom
-instructions field the caller did not supply.
+Established lenient REST read tools degrade to empty results (matching the
+already-guarded list_conversations/get_file_info sites). Strict private-schema
+adapters may instead fail closed with a payload-free contract error. The
+read-modify-write in custom_instructions_set must REFUSE to proceed —
+blind-overwriting with `{}` would silently clear whichever custom instructions
+field the caller did not supply.
 
 Also covers load_config: a top-level scalar key in config.toml (a user
 forgetting the [server] header) must raise a clean actionable error, not
@@ -18,7 +19,7 @@ import asyncio
 import pytest
 
 from gpt2agent.tools import account, apps, codex, conversations, gpts, images
-from gpt2agent.tools import instructions, memory, writes
+from gpt2agent.tools import instructions, memory, voice, writes
 
 from tests.test_tools import FakeClient, FakeMCP
 
@@ -92,6 +93,11 @@ def test_codex_list_tools_tolerate_none() -> None:
     mcp = _tools(codex)
     assert _run(mcp.tools["list_codex_envs"]) == []
     assert _run(mcp.tools["list_codex_tasks"]) == []
+
+
+def test_voice_catalog_fails_closed_on_none() -> None:
+    with pytest.raises(RuntimeError, match="^voice catalog contract changed$"):
+        _run(_tools(voice).tools["list_voices"])
 
 
 # ── write tool: None current state → refuse, do NOT clobber ─────────────────

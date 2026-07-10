@@ -249,7 +249,12 @@ def test_list_voices_empty_catalog_is_not_contract_drift() -> None:
         {"voices": {}},
         {"voices": [None]},
         {"voices": [{"voice": "", "name": "Name", "description": "Desc"}]},
+        {"voices": [{"voice": "   ", "name": "Name", "description": "Desc"}]},
+        {"voices": [{"voice": "bad\n", "name": "Name", "description": "Desc"}]},
+        {"voices": [{"voice": "v" * 129, "name": "Name", "description": "Desc"}]},
         {"voices": [{"voice": "v", "name": 3, "description": "Desc"}]},
+        {"voices": [{"voice": "v", "name": "n" * 257, "description": "Desc"}]},
+        {"voices": [{"voice": "v", "name": "Name", "description": "d" * 2_001}]},
         {"voices": [{"voice": "v", "name": "Name", "description": "Desc",
                       "preview_url": 3}]},
         {"voices": [_voice_item("same"), _voice_item("same")]},
@@ -610,6 +615,57 @@ def _build_with_conv(monkeypatch, conv):
     mcp = build_server({"server": {"host": "127.0.0.1", "port": 9000},
                         "models": {"chat": "gpt-5-3", "agent": "agent-mode"}})
     return mcp._tool_manager._tools
+
+
+def test_server_registers_exact_26_tool_surface_and_voice_once(monkeypatch) -> None:
+    calls = 0
+    original_register = voice.register
+
+    def counted_register(mcp, client):
+        nonlocal calls
+        calls += 1
+        return original_register(mcp, client)
+
+    monkeypatch.setattr(voice, "register", counted_register)
+    tools = _build_with_conv(monkeypatch, _RecordConv())
+
+    assert set(tools) == {
+        "account_status",
+        "agent",
+        "canvas_execute",
+        "chat",
+        "code_interpreter",
+        "codex_task_create",
+        "custom_instructions_get",
+        "custom_instructions_set",
+        "deep_research",
+        "deep_research_heavy",
+        "generate_image",
+        "get_conversation",
+        "get_file_download_url",
+        "get_file_info",
+        "gpt_chat",
+        "list_apps",
+        "list_codex_envs",
+        "list_codex_tasks",
+        "list_conversations",
+        "list_custom_gpts",
+        "list_models",
+        "list_tasks",
+        "list_voices",
+        "memory_create_via_chat",
+        "memory_list",
+        "memory_search",
+    }
+    assert len(tools) == 26
+    assert calls == 1
+
+    annotations = tools["list_voices"].annotations
+    assert annotations is not None
+    assert annotations.readOnlyHint is True
+    assert annotations.destructiveHint is False
+    assert annotations.idempotentHint is True
+    assert annotations.openWorldHint is True
 
 
 def test_agent_always_temporary_false(monkeypatch) -> None:

@@ -218,13 +218,22 @@ async def test_custom_instruction_setter_serializes_read_modify_write() -> None:
 
 
 @pytest.mark.asyncio
-async def test_slow_rest_backend_does_not_block_event_loop() -> None:
+@pytest.mark.parametrize(
+    ("module", "tool_name", "response"),
+    [
+        (account, "list_models", {"models": []}),
+        (voice, "list_voices", {"selected": None, "voices": []}),
+    ],
+)
+async def test_slow_rest_backend_does_not_block_event_loop(
+    module, tool_name: str, response: dict[str, Any]
+) -> None:
     class _SlowClient(_Client):
         def get(self, path: str, **kwargs: Any) -> Any:
             sleep(0.30)
-            return {"models": []}
+            return response
 
-    tool = _register(account, _SlowClient()).tools["list_models"]
+    tool = _register(module, _SlowClient()).tools[tool_name]
     tool_task = asyncio.create_task(_invoke(tool))
     heartbeat = asyncio.create_task(asyncio.sleep(0.05))
     try:
