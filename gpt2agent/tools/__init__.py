@@ -11,6 +11,7 @@ from gpt2agent.tools import (
     instructions,
     memory,
     tools_features,
+    voice,
     writes,
 )
 
@@ -24,6 +25,7 @@ def register_all(mcp, client: BackendClient, conv=None) -> None:
     gpts.register(mcp, client)
     conversations.register(mcp, client)
     apps.register(mcp, client)
+    voice.register(mcp, client)
     writes.register(mcp, client)
     images.register(mcp, client, conv)
     tools_features.register(mcp, client, conv)
