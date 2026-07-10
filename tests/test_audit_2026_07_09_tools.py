@@ -22,6 +22,7 @@ from gpt2agent.tools import (
     images,
     instructions,
     memory,
+    voice,
     writes,
 )
 from gpt2agent.tools._redact import redact
@@ -288,6 +289,7 @@ def test_all_registered_rest_handlers_are_async() -> None:
         images: {"generate_image", "get_file_info", "get_file_download_url"},
         instructions: {"custom_instructions_get"},
         memory: {"memory_list", "memory_search"},
+        voice: {"list_voices"},
         writes: {"custom_instructions_set", "codex_task_create"},
     }
 
