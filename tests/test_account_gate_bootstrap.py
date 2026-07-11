@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shlex
 import shutil
 import subprocess
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -25,6 +28,26 @@ EXPECTED_LOCK = {
     "pygments": "2.20.0",
     "rich": "15.0.0",
 }
+
+
+@pytest.fixture
+def tmp_path() -> Iterator[Path]:
+    """Keep trusted-runtime fixtures off world-writable /tmp ancestors."""
+    home = Path.home().resolve(strict=True)
+    directory = Path(tempfile.mkdtemp(prefix=".gpt2agent-runtime-test.", dir=home))
+    directory.chmod(0o700)
+    try:
+        yield directory
+    finally:
+        shutil.rmtree(directory)
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _remove_certifi_hashes(text: str) -> str:
@@ -79,7 +102,10 @@ def _write_executable(path: Path, contents: str) -> None:
     path.chmod(0o700)
 
 
-def _fake_python(tmp_path: Path, *, fail_stage: str = "") -> tuple[Path, Path]:
+def _pretrusted_interpreter_double(
+    tmp_path: Path, *, fail_stage: str = ""
+) -> tuple[Path, Path]:
+    """Exercise command choreography; only the real CI/E2E proves CPython identity."""
     trusted_dir = tmp_path / "trusted-python"
     trusted_dir.mkdir(mode=0o700)
     log = trusted_dir / "commands.log"
@@ -118,6 +144,9 @@ if [[ "${{1-}}" == "-I" && "${{2-}}" == "-S" && "${{3-}}" == "-B" \
   mkdir -p "$destination/bin" "$destination/lib/python3.12/site-packages"
   cp "$0" "$destination/bin/python"
   chmod 700 "$destination/bin/python"
+  if [[ "$fail_stage" == provenance ]]; then
+    printf '# changed after reviewed copy\n' >> "$destination/bin/python"
+  fi
   [[ "$fail_stage" != venv ]]
   exit 0
 fi
@@ -156,11 +185,22 @@ def _run_bootstrap(
     *,
     script: Path = BOOTSTRAP,
     extra_env: dict[str, str] | None = None,
+    python_sha256: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment.update(extra_env or {})
+    if python_sha256 is None:
+        python_sha256 = _sha256(python) if python.is_file() else "0" * 64
     return subprocess.run(
-        [str(script), "--python", str(python), "--venv", str(venv)],
+        [
+            str(script),
+            "--python",
+            str(python),
+            "--python-sha256",
+            python_sha256,
+            "--venv",
+            str(venv),
+        ],
         cwd=ROOT,
         env=environment,
         capture_output=True,
@@ -201,10 +241,15 @@ def test_main_ci_validates_the_fresh_runtime_without_account_auth() -> None:
     step = workflow[step_start:step_end]
 
     assert "scripts/bootstrap_account_gate.sh" in step
-    assert "python -I -S -B -c" in step
-    assert "os.path.realpath(sys.executable)" in step
+    assert "pythonLocation" in step
+    assert 'mktemp -d "$ACCOUNT_GATE_HOME/.gpt2agent-account-gate.' in step
+    assert 'cp -R -- "$ACCOUNT_GATE_SOURCE_BASE/." "$ACCOUNT_GATE_PYTHON_BASE/"' in step
+    assert "SOURCE_PYTHON_SHA256" in step
+    assert "COPIED_PYTHON_SHA256" in step
     assert '--python "$ACCOUNT_GATE_PYTHON"' in step
+    assert '--python-sha256 "$ACCOUNT_GATE_PYTHON_SHA256"' in step
     assert "/usr/bin/python" not in step
+    assert '$RUNNER_TEMP/gpt2agent-account-gate' not in step
     assert "verify_account_receipt.py check-runtime" in step
     assert "--trusted-site-packages" in step
     assert "OPENAI_API_KEY" not in step
@@ -237,7 +282,7 @@ def test_main_ci_pins_the_reviewed_setup_python_patch() -> None:
 def test_bootstrap_rejects_unsafe_lock_before_creating_venv(
     tmp_path: Path, mutation
 ) -> None:
-    python, _log = _fake_python(tmp_path)
+    python, _log = _pretrusted_interpreter_double(tmp_path)
     script = _isolated_bootstrap_tree(tmp_path, mutation(LOCK.read_text(encoding="utf-8")))
     parent = _private_parent(tmp_path)
     venv = parent / "venv"
@@ -251,7 +296,7 @@ def test_bootstrap_rejects_unsafe_lock_before_creating_venv(
 
 
 def test_bootstrap_uses_isolated_hash_locked_commands_in_order(tmp_path: Path) -> None:
-    python, log = _fake_python(tmp_path)
+    python, log = _pretrusted_interpreter_double(tmp_path)
     parent = _private_parent(tmp_path)
     venv = parent / "venv"
 
@@ -300,9 +345,11 @@ def test_bootstrap_uses_isolated_hash_locked_commands_in_order(tmp_path: Path) -
     assert result.stdout == f"{venv}/lib/python3.12/site-packages\n"
 
 
-@pytest.mark.parametrize("fail_stage", ["venv", "install", "pip-check", "runtime-check"])
+@pytest.mark.parametrize(
+    "fail_stage", ["venv", "provenance", "install", "pip-check", "runtime-check"]
+)
 def test_bootstrap_removes_partial_venv_on_failure(tmp_path: Path, fail_stage: str) -> None:
-    python, _log = _fake_python(tmp_path, fail_stage=fail_stage)
+    python, _log = _pretrusted_interpreter_double(tmp_path, fail_stage=fail_stage)
     parent = _private_parent(tmp_path)
     venv = parent / "venv"
 
@@ -314,7 +361,7 @@ def test_bootstrap_removes_partial_venv_on_failure(tmp_path: Path, fail_stage: s
 
 
 def test_bootstrap_refuses_relative_existing_or_unsafe_destinations(tmp_path: Path) -> None:
-    python, _log = _fake_python(tmp_path)
+    python, _log = _pretrusted_interpreter_double(tmp_path)
     private = _private_parent(tmp_path, "private")
     existing = private / "existing"
     existing.mkdir()
@@ -334,7 +381,7 @@ def test_bootstrap_refuses_relative_existing_or_unsafe_destinations(tmp_path: Pa
 
 
 def test_bootstrap_requires_canonical_cpython_31213_linux_x86_64(tmp_path: Path) -> None:
-    python, _log = _fake_python(tmp_path)
+    python, _log = _pretrusted_interpreter_double(tmp_path)
     python.write_text(
         python.read_text(encoding="utf-8").replace(
             "  exit 0\nfi",
@@ -361,7 +408,7 @@ def test_bootstrap_requires_canonical_cpython_31213_linux_x86_64(tmp_path: Path)
 
 
 def test_bootstrap_rejects_non_cpython_implementation(tmp_path: Path) -> None:
-    python, _log = _fake_python(tmp_path)
+    python, _log = _pretrusted_interpreter_double(tmp_path)
     python.write_text(
         python.read_text(encoding="utf-8").replace(
             "  exit 0\nfi",
@@ -413,7 +460,7 @@ def test_bootstrap_rejects_non_reviewed_system_python_patch(tmp_path: Path) -> N
 def test_bootstrap_rejects_group_writable_user_installation(
     tmp_path: Path, unsafe_component: str
 ) -> None:
-    python, _log = _fake_python(tmp_path)
+    python, _log = _pretrusted_interpreter_double(tmp_path)
     if unsafe_component == "tool":
         python.chmod(0o770)
     else:
@@ -426,4 +473,47 @@ def test_bootstrap_rejects_group_writable_user_installation(
     assert result.returncode != 0
     assert "group- or world-writable" in result.stderr
     assert "install or copy CPython into an owner-private base" in result.stderr
+    assert not venv.exists()
+
+
+def test_bootstrap_rejects_python_below_writable_ancestor(tmp_path: Path) -> None:
+    unsafe_ancestor = tmp_path / "unsafe-ancestor"
+    unsafe_ancestor.mkdir(mode=0o770)
+    private_child = unsafe_ancestor / "private-child"
+    private_child.mkdir(mode=0o700)
+    python, _log = _pretrusted_interpreter_double(private_child)
+    parent = _private_parent(tmp_path)
+    venv = parent / "venv"
+
+    result = _run_bootstrap(python, venv)
+
+    assert result.returncode != 0
+    assert "ancestor path" in result.stderr
+    assert not venv.exists()
+
+
+def test_bootstrap_rejects_venv_below_writable_ancestor(tmp_path: Path) -> None:
+    python, _log = _pretrusted_interpreter_double(tmp_path)
+    unsafe_ancestor = tmp_path / "unsafe-venv-ancestor"
+    unsafe_ancestor.mkdir(mode=0o770)
+    parent = _private_parent(unsafe_ancestor)
+    venv = parent / "venv"
+
+    result = _run_bootstrap(python, venv)
+
+    assert result.returncode != 0
+    assert "ancestor path" in result.stderr
+    assert not venv.exists()
+
+
+def test_bootstrap_requires_reviewed_python_executable_digest(tmp_path: Path) -> None:
+    python, log = _pretrusted_interpreter_double(tmp_path)
+    parent = _private_parent(tmp_path)
+    venv = parent / "venv"
+
+    result = _run_bootstrap(python, venv, python_sha256="0" * 64)
+
+    assert result.returncode != 0
+    assert "checksum" in result.stderr
+    assert not log.exists()
     assert not venv.exists()

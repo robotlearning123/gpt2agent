@@ -389,15 +389,27 @@ downloads that exact candidate but treats both files as inert bytes: it never
 installs, imports, builds, or executes them.
 
 Bootstrap the verifier from `requirements-account-gate.txt` into a new
-owner-private CPython 3.12 environment outside the checkout. The bootstrap
-accepts only the reviewed nine-distribution closure, exact hashes, binary wheels,
-and the official PyPI index, then verifies every installed file and import
-origin. It emits only the trusted `site-packages` path on stdout. The live gate
-loads `curl_cffi` from that explicit path under `python -I -S -B`, keeps the
-reviewed local bearer in process, disables environment proxy discovery and
-automatic redirects, and accepts only the exact reviewed `chatgpt.com` GET
-routes with bounded metadata, 4 MiB response bodies, fixed timeouts, and TLS
-verification.
+owner-private CPython 3.12.13 for Linux x86_64 environment outside the checkout.
+Every ancestor from that runtime to `/` must be root- or operator-owned and must
+not be group/world-writable or a symlink. The bootstrap requires the independently
+reviewed SHA-256 of the canonical Python executable; computing that value from an
+unverified ambient installation is self-attestation and is not acceptable.
+
+There are two explicit external provenance boundaries. Hosted CI trusts the
+pinned actions/setup-python action on its isolated runner, immediately copies
+the complete 3.12.13 runtime out of the writable tool cache into an owner-private
+directory below the canonical runner home, and binds the copy to the source
+executable digest. A local operator must start from a separately reviewed full
+runtime artifact, verify its published artifact checksum, and record the
+canonical extracted executable's SHA-256 before making the private copy below.
+The bootstrap then accepts only the reviewed nine-distribution closure, exact
+hashes, binary wheels, and the official PyPI index, and verifies every installed
+file and import origin. It emits only the trusted `site-packages` path on stdout.
+The live gate loads `curl_cffi` from that explicit path under
+`python -I -S -B`, keeps the reviewed local bearer in process, disables
+environment proxy discovery and automatic redirects, and accepts only the exact
+reviewed `chatgpt.com` GET routes with bounded metadata, 4 MiB response bodies,
+fixed timeouts, and TLS verification.
 
 The gate writes one mode-0600, closed-schema sanitized receipt bound to the
 source commit/tree, full CI workflow identity, and exact artifact bytes. It
@@ -433,6 +445,23 @@ ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
 git fetch --no-tags origin +main:refs/remotes/origin/main
 : "${GPT2AGENT_RELEASE_GOVERNANCE_POLICY:?set this to the reviewed policy JSON}"
+: "${GPT2AGENT_TRUSTED_PYTHON_BASE:?set this to the canonical base extracted from the reviewed CPython 3.12.13 Linux x86_64 artifact}"
+: "${GPT2AGENT_TRUSTED_PYTHON_SHA256:?set this to the independently recorded canonical executable SHA-256}"
+case "$GPT2AGENT_TRUSTED_PYTHON_SHA256" in
+  (*[!0-9a-f]*|'') exit 1 ;;
+esac
+test "${#GPT2AGENT_TRUSTED_PYTHON_SHA256}" -eq 64
+TRUSTED_PYTHON_SOURCE_BASE=$(realpath -e -- "$GPT2AGENT_TRUSTED_PYTHON_BASE")
+TRUSTED_PYTHON_SOURCE=$(realpath -e -- \
+  "$TRUSTED_PYTHON_SOURCE_BASE/bin/python3.12")
+case "$TRUSTED_PYTHON_SOURCE" in
+  ("$TRUSTED_PYTHON_SOURCE_BASE"/*) ;;
+  (*) exit 1 ;;
+esac
+test -f "$TRUSTED_PYTHON_SOURCE" && test -x "$TRUSTED_PYTHON_SOURCE"
+SOURCE_PYTHON_SHA256=$(sha256sum -- "$TRUSTED_PYTHON_SOURCE")
+SOURCE_PYTHON_SHA256=${SOURCE_PYTHON_SHA256%% *}
+test "$SOURCE_PYTHON_SHA256" = "$GPT2AGENT_TRUSTED_PYTHON_SHA256"
 unset GH_TOKEN GITHUB_TOKEN GPT2AGENT_RELEASE_APP_TOKEN
 read -r -p "Merged release PR number: " PR_NUMBER
 RELEASE_SHA=$(gh pr view "$PR_NUMBER" --json mergeCommit,state \
@@ -445,6 +474,7 @@ test -z "$(git status --porcelain=v1 --untracked-files=all \
 
 START_BRANCH=$(git symbolic-ref --quiet --short HEAD || true)
 START_COMMIT=$(git rev-parse HEAD)
+TRUSTED_HOME=
 RUNTIME_ROOT=
 cleanup_release_runtime() {
   status=$?
@@ -455,7 +485,17 @@ cleanup_release_runtime() {
     git switch --detach "$START_COMMIT" >/dev/null || status=1
   fi
   if [ -n "$RUNTIME_ROOT" ]; then
-    rm -rf -- "$RUNTIME_ROOT" || status=1
+    case "$RUNTIME_ROOT" in
+      ("$TRUSTED_HOME"/.gpt2agent-account-gate.*)
+        if [ -d "$RUNTIME_ROOT" ] && [ ! -L "$RUNTIME_ROOT" ]; then
+          chmod -R u+w -- "$RUNTIME_ROOT" || status=1
+          rm -rf -- "$RUNTIME_ROOT" || status=1
+        else
+          status=1
+        fi
+        ;;
+      (*) status=1 ;;
+    esac
   fi
   return "$status"
 }
@@ -467,11 +507,28 @@ test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
 test -z "$(git status --porcelain=v1 --untracked-files=all \
   --ignored=matching --ignore-submodules=none)"
 
-RUNTIME_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gpt2agent-account-gate.XXXXXXXX")
+TRUSTED_HOME=$(realpath -e -- "$HOME")
+test "$TRUSTED_HOME" = "$HOME"
+RUNTIME_ROOT=$(mktemp -d "$TRUSTED_HOME/.gpt2agent-account-gate.XXXXXXXX")
 chmod 700 "$RUNTIME_ROOT"
-VENV="$RUNTIME_ROOT/venv"
+TRUSTED_PYTHON_BASE="$RUNTIME_ROOT/cpython-3.12.13-linux-x86_64"
+install -d -m 700 "$TRUSTED_PYTHON_BASE"
+(umask 077; cp -R -- "$TRUSTED_PYTHON_SOURCE_BASE/." "$TRUSTED_PYTHON_BASE/")
+chmod -R go-w -- "$TRUSTED_PYTHON_BASE"
+PYTHON_RELATIVE=${TRUSTED_PYTHON_SOURCE#"$TRUSTED_PYTHON_SOURCE_BASE"/}
+TRUSTED_PYTHON="$TRUSTED_PYTHON_BASE/$PYTHON_RELATIVE"
+test "$TRUSTED_PYTHON" = "$(realpath -e -- "$TRUSTED_PYTHON")"
+test -f "$TRUSTED_PYTHON" && test -x "$TRUSTED_PYTHON" && test ! -L "$TRUSTED_PYTHON"
+COPIED_PYTHON_SHA256=$(sha256sum -- "$TRUSTED_PYTHON")
+COPIED_PYTHON_SHA256=${COPIED_PYTHON_SHA256%% *}
+test "$COPIED_PYTHON_SHA256" = "$GPT2AGENT_TRUSTED_PYTHON_SHA256"
+VENV_PARENT="$RUNTIME_ROOT/account-runtime"
+install -d -m 700 "$VENV_PARENT"
+VENV="$VENV_PARENT/venv"
 SITE_PACKAGES=$(scripts/bootstrap_account_gate.sh \
-  --python /usr/bin/python3.12 --venv "$VENV")
+  --python "$TRUSTED_PYTHON" \
+  --python-sha256 "$GPT2AGENT_TRUSTED_PYTHON_SHA256" \
+  --venv "$VENV")
 VERIFIER_PYTHON="$VENV/bin/python"
 test -x "$VERIFIER_PYTHON"
 
@@ -618,23 +675,56 @@ GitHub Release:
 ```bash
 set -euo pipefail
 umask 077
+: "${GPT2AGENT_TRUSTED_PYTHON_BASE:?set this to the canonical base extracted from the reviewed CPython 3.12.13 Linux x86_64 artifact}"
+: "${GPT2AGENT_TRUSTED_PYTHON_SHA256:?set this to the independently recorded canonical executable SHA-256}"
+AUDIT_PYTHON_SOURCE_BASE=$(realpath -e -- "$GPT2AGENT_TRUSTED_PYTHON_BASE")
+AUDIT_PYTHON_SOURCE=$(realpath -e -- \
+  "$AUDIT_PYTHON_SOURCE_BASE/bin/python3.12")
+SOURCE_PYTHON_SHA256=$(sha256sum -- "$AUDIT_PYTHON_SOURCE")
+SOURCE_PYTHON_SHA256=${SOURCE_PYTHON_SHA256%% *}
+test "$SOURCE_PYTHON_SHA256" = "$GPT2AGENT_TRUSTED_PYTHON_SHA256"
 read -r -p "Release tag (for example v0.0.12): " TAG
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
 case "$TAG" in (v[0-9]*.[0-9]*.[0-9]*) ;; (*) exit 1;; esac
 AUDIT_REF=refs/release-verification/retained-receipt
 if git show-ref --verify --quiet "$AUDIT_REF"; then exit 1; fi
-AUDIT_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/gpt2agent-receipt-audit.XXXXXXXX")
+AUDIT_HOME=$(realpath -e -- "$HOME")
+test "$AUDIT_HOME" = "$HOME"
+AUDIT_ROOT=$(mktemp -d "$AUDIT_HOME/.gpt2agent-receipt-audit.XXXXXXXX")
 chmod 700 "$AUDIT_ROOT"
 cleanup_receipt_audit() {
   status=$?
   trap - EXIT HUP INT TERM
   git update-ref -d "$AUDIT_REF" >/dev/null 2>&1 || status=1
-  rm -rf -- "$AUDIT_ROOT" || status=1
+  case "$AUDIT_ROOT" in
+    ("$AUDIT_HOME"/.gpt2agent-receipt-audit.*)
+      if [ -d "$AUDIT_ROOT" ] && [ ! -L "$AUDIT_ROOT" ]; then
+        chmod -R u+w -- "$AUDIT_ROOT" || status=1
+        rm -rf -- "$AUDIT_ROOT" || status=1
+      else
+        status=1
+      fi
+      ;;
+    (*) status=1 ;;
+  esac
   return "$status"
 }
 trap cleanup_receipt_audit EXIT
 trap 'exit 130' HUP INT TERM
+
+AUDIT_PYTHON_BASE="$AUDIT_ROOT/cpython-3.12.13-linux-x86_64"
+install -d -m 700 "$AUDIT_PYTHON_BASE"
+(umask 077; cp -R -- "$AUDIT_PYTHON_SOURCE_BASE/." "$AUDIT_PYTHON_BASE/")
+chmod -R go-w -- "$AUDIT_PYTHON_BASE"
+PYTHON_RELATIVE=${AUDIT_PYTHON_SOURCE#"$AUDIT_PYTHON_SOURCE_BASE"/}
+AUDIT_PYTHON="$AUDIT_PYTHON_BASE/$PYTHON_RELATIVE"
+test "$AUDIT_PYTHON" = "$(realpath -e -- "$AUDIT_PYTHON")"
+COPIED_PYTHON_SHA256=$(sha256sum -- "$AUDIT_PYTHON")
+COPIED_PYTHON_SHA256=${COPIED_PYTHON_SHA256%% *}
+test "$COPIED_PYTHON_SHA256" = "$GPT2AGENT_TRUSTED_PYTHON_SHA256"
+"$AUDIT_PYTHON" -I -S -B -c \
+  'import os,sys; assert (sys.implementation.name,sys.version_info[:3],sys.platform,os.uname().machine)==("cpython",(3,12,13),"linux","x86_64")'
 
 git fetch --force --no-tags origin "refs/tags/$TAG:$AUDIT_REF"
 test "$(git cat-file -t "$AUDIT_REF")" = tag
@@ -650,7 +740,7 @@ TAG_VERIFIER="$AUDIT_ROOT/release_tag_metadata.py"
 git cat-file tag "$AUDIT_REF" >"$TAG_OBJECT"
 git show "$AUDIT_REF:scripts/release_tag_metadata.py" >"$TAG_VERIFIER"
 REPOSITORY=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
-GITHUB_OUTPUT="$TAG_OUTPUT" /usr/bin/python3.12 -I -S -B "$TAG_VERIFIER" \
+GITHUB_OUTPUT="$TAG_OUTPUT" "$AUDIT_PYTHON" -I -S -B "$TAG_VERIFIER" \
   verify-tag-object --tag-object-file "$TAG_OBJECT" \
   --repository "$REPOSITORY" --tag "$TAG" \
   --commit "$COMMIT" --tree "$TREE"
@@ -658,7 +748,7 @@ test "$(grep -c '^receipt_sha256=' "$TAG_OUTPUT")" -eq 1
 TAG_RECEIPT_SHA256=$(sed -n 's/^receipt_sha256=//p' "$TAG_OUTPUT")
 test "${#TAG_RECEIPT_SHA256}" -eq 64
 case "$TAG_RECEIPT_SHA256" in (*[!0-9a-f]*|'') exit 1;; esac
-LOCAL_RECEIPT_SHA256=$(/usr/bin/python3.12 -I -S -B -c \
+LOCAL_RECEIPT_SHA256=$("$AUDIT_PYTHON" -I -S -B -c \
   'import hashlib,pathlib,sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' \
   "$RECEIPT")
 test "$LOCAL_RECEIPT_SHA256" = "$TAG_RECEIPT_SHA256"

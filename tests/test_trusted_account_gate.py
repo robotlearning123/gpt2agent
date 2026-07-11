@@ -10,7 +10,9 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -605,6 +607,25 @@ def test_trusted_runtime_identity_is_exactly_reviewed_target(
         )
         is expected
     )
+
+
+def test_trusted_runtime_rejects_writable_ancestor_above_private_base() -> None:
+    from scripts.verify_account_receipt import _path_has_secure_ancestors
+
+    root = Path(tempfile.mkdtemp(prefix=".gpt2agent-ancestor-test.", dir=Path.home()))
+    root.chmod(0o700)
+    try:
+        safe = root / "safe"
+        safe.mkdir(mode=0o700)
+        assert _path_has_secure_ancestors(safe, current_uid=os.getuid()) is True
+
+        unsafe = root / "unsafe"
+        unsafe.mkdir(mode=0o770)
+        private_child = unsafe / "private-child"
+        private_child.mkdir(mode=0o700)
+        assert _path_has_secure_ancestors(private_child, current_uid=os.getuid()) is False
+    finally:
+        shutil.rmtree(root)
 
 
 def test_trusted_runtime_rejects_record_hash_tampering(tmp_path: Path) -> None:

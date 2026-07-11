@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 usage() {
-  echo "usage: $0 --python /absolute/path/to/python3.12 --venv /absolute/new/venv" >&2
+  echo "usage: $0 --python /absolute/path/to/python3.12 --python-sha256 REVIEWED_SHA256 --venv /absolute/new/venv" >&2
   exit 2
 }
 
@@ -14,12 +14,18 @@ die() {
 }
 
 PYTHON=
+PYTHON_SHA256=
 VENV=
 while (( $# > 0 )); do
   case "$1" in
     --python)
       (( $# >= 2 )) || usage
       PYTHON=$2
+      shift 2
+      ;;
+    --python-sha256)
+      (( $# >= 2 )) || usage
+      PYTHON_SHA256=$2
       shift 2
       ;;
     --venv)
@@ -32,7 +38,7 @@ while (( $# > 0 )); do
       ;;
   esac
 done
-[[ -n "$PYTHON" && -n "$VENV" ]] || usage
+[[ -n "$PYTHON" && -n "$PYTHON_SHA256" && -n "$VENV" ]] || usage
 
 SCRIPT_ROOT=$(cd -- "$(dirname -- "$0")" && pwd -P)
 REPO_ROOT=$(cd -- "$SCRIPT_ROOT/.." && pwd -P)
@@ -40,12 +46,51 @@ LOCK="$REPO_ROOT/requirements-account-gate.txt"
 VERIFIER="$SCRIPT_ROOT/verify_account_receipt.py"
 CURRENT_UID=$(id -u)
 
+require_secure_ancestor_chain() {
+  local target=$1
+  local target_kind=$2
+  local current=$target
+  local first=1
+  local mode uid parent
+
+  while :; do
+    [[ ! -L "$current" ]] \
+      || die "trusted runtime ancestor path must not contain symlinks"
+    if (( first == 1 )); then
+      if [[ "$target_kind" == file ]]; then
+        [[ -f "$current" ]] \
+          || die "trusted runtime target must be a regular file"
+      else
+        [[ -d "$current" ]] \
+          || die "trusted runtime target must be a directory"
+      fi
+      first=0
+    else
+      [[ -d "$current" ]] \
+        || die "trusted runtime ancestor path must contain only directories"
+    fi
+    uid=$(stat -c '%u' -- "$current")
+    mode=$(stat -c '%a' -- "$current")
+    [[ "$uid" == 0 || "$uid" == "$CURRENT_UID" ]] \
+      || die "trusted runtime ancestor path must be owned by root or the current user"
+    (( (8#$mode & 0022) == 0 )) \
+      || die "trusted runtime ancestor path must not be group- or world-writable; install or copy CPython into an owner-private base"
+    [[ "$current" != / ]] || break
+    parent=$(dirname -- "$current")
+    [[ "$parent" != "$current" ]] \
+      || die "trusted runtime ancestor path is invalid"
+    current=$parent
+  done
+}
+
 [[ "$PYTHON" == /* ]] || die "--python must be an absolute path"
 [[ "$VENV" == /* && "$VENV" != / ]] || die "--venv must be an absolute non-root path"
 [[ -f "$PYTHON" && -x "$PYTHON" && ! -L "$PYTHON" ]] \
   || die "--python must name a regular, executable, non-symlink file"
 [[ "$PYTHON" == "$(realpath -e -- "$PYTHON")" ]] \
   || die "--python must use its canonical path"
+[[ "$PYTHON_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+  || die "--python-sha256 must be one reviewed lowercase SHA-256 checksum"
 [[ ! -e "$VENV" && ! -L "$VENV" ]] || die "--venv must not already exist"
 [[ -f "$LOCK" && ! -L "$LOCK" ]] || die "the account-gate lock file is unavailable"
 [[ -f "$VERIFIER" && ! -L "$VERIFIER" ]] || die "the account-gate verifier is unavailable"
@@ -56,6 +101,11 @@ PYTHON_MODE=$(stat -Lc '%a' -- "$PYTHON")
   || die "--python must be owned by root or the current user"
 (( (8#$PYTHON_MODE & 0022) == 0 )) \
   || die "--python must not be group- or world-writable; install or copy CPython into an owner-private base"
+require_secure_ancestor_chain "$PYTHON" file
+ACTUAL_PYTHON_SHA256=$(sha256sum -- "$PYTHON")
+ACTUAL_PYTHON_SHA256=${ACTUAL_PYTHON_SHA256%% *}
+[[ "$ACTUAL_PYTHON_SHA256" == "$PYTHON_SHA256" ]] \
+  || die "--python does not match the reviewed executable checksum"
 
 VENV_PARENT=$(dirname -- "$VENV")
 [[ -d "$VENV_PARENT" && ! -L "$VENV_PARENT" ]] \
@@ -66,6 +116,7 @@ VENV_PARENT=$(dirname -- "$VENV")
   || die "the --venv parent must be owned by the current user"
 [[ "$(stat -Lc '%a' -- "$VENV_PARENT")" == 700 ]] \
   || die "the --venv parent must have mode 0700"
+require_secure_ancestor_chain "$VENV_PARENT" directory
 
 SCRATCH=$(mktemp -d -- "$VENV_PARENT/.gpt2agent-account-bootstrap.XXXXXXXX")
 PRIVATE_HOME="$SCRATCH/home"
@@ -177,6 +228,10 @@ require_secure_installation_chain() {
 }
 
 require_secure_installation_chain "$PYTHON_BASE" "$PYTHON" "$PYTHON_BASE_UID"
+ACTUAL_PYTHON_SHA256=$(sha256sum -- "$PYTHON")
+ACTUAL_PYTHON_SHA256=${ACTUAL_PYTHON_SHA256%% *}
+[[ "$ACTUAL_PYTHON_SHA256" == "$PYTHON_SHA256" ]] \
+  || die "--python changed after its reviewed checksum was verified"
 
 run_scrubbed "$PYTHON" -I -S -B - "$LOCK_SNAPSHOT" <<'PY'
 from __future__ import annotations
@@ -262,6 +317,13 @@ SITE_PACKAGES="$VENV/lib/python3.12/site-packages"
   || die "the virtual environment did not create a copied Python executable"
 [[ -d "$SITE_PACKAGES" && ! -L "$SITE_PACKAGES" ]] \
   || die "the virtual environment has an unexpected site-packages layout"
+require_secure_ancestor_chain "$VENV" directory
+require_secure_ancestor_chain "$VENV_PYTHON" file
+require_secure_ancestor_chain "$SITE_PACKAGES" directory
+VENV_PYTHON_SHA256=$(sha256sum -- "$VENV_PYTHON")
+VENV_PYTHON_SHA256=${VENV_PYTHON_SHA256%% *}
+[[ "$VENV_PYTHON_SHA256" == "$PYTHON_SHA256" ]] \
+  || die "the copied virtual-environment interpreter changed provenance"
 
 run_scrubbed "$VENV_PYTHON" -I -B -m pip --isolated --disable-pip-version-check install \
   --index-url https://pypi.org/simple \

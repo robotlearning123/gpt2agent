@@ -203,24 +203,66 @@ jobs:
       - name: Validate fresh isolated account-gate runtime without auth
         run: |
           set -euo pipefail
-          ACCOUNT_GATE_PYTHON="$(python -I -S -B -c \
-            'import os, sys; print(os.path.realpath(sys.executable), end="")')"
-          test -n "$ACCOUNT_GATE_PYTHON"
+          ACCOUNT_GATE_HOME="$(realpath -e -- "$HOME")"
+          test "$ACCOUNT_GATE_HOME" = "$HOME"
+          ACCOUNT_GATE_ROOT=
+          cleanup_account_gate() {
+            status=$?
+            trap - EXIT HUP INT TERM
+            if [ -n "$ACCOUNT_GATE_ROOT" ]; then
+              case "$ACCOUNT_GATE_ROOT" in
+                "$ACCOUNT_GATE_HOME"/.gpt2agent-account-gate.*) ;;
+                *) exit 97 ;;
+              esac
+              if [ -d "$ACCOUNT_GATE_ROOT" ] && [ ! -L "$ACCOUNT_GATE_ROOT" ]; then
+                chmod -R u+w -- "$ACCOUNT_GATE_ROOT"
+                rm -rf -- "$ACCOUNT_GATE_ROOT"
+              fi
+            fi
+            exit "$status"
+          }
+          trap cleanup_account_gate EXIT
+          trap 'exit 130' HUP INT TERM
+          ACCOUNT_GATE_ROOT="$(mktemp -d "$ACCOUNT_GATE_HOME/.gpt2agent-account-gate.XXXXXXXX")"
+          chmod 700 "$ACCOUNT_GATE_ROOT"
+
+          # The pinned setup-python action and isolated runner authorize this source copy.
+          : "${pythonLocation:?setup-python did not export pythonLocation}"
+          ACCOUNT_GATE_SOURCE_BASE="$(realpath -e -- "$pythonLocation")"
+          ACCOUNT_GATE_SOURCE_PYTHON="$(realpath -e -- \
+            "$ACCOUNT_GATE_SOURCE_BASE/bin/python3.12")"
+          case "$ACCOUNT_GATE_SOURCE_PYTHON" in
+            "$ACCOUNT_GATE_SOURCE_BASE"/*) ;;
+            *) exit 1 ;;
+          esac
+          test -f "$ACCOUNT_GATE_SOURCE_PYTHON"
+          test -x "$ACCOUNT_GATE_SOURCE_PYTHON"
+          test ! -L "$ACCOUNT_GATE_SOURCE_PYTHON"
+          ACCOUNT_GATE_PYTHON_RELATIVE="${ACCOUNT_GATE_SOURCE_PYTHON#"$ACCOUNT_GATE_SOURCE_BASE"/}"
+          SOURCE_PYTHON_SHA256="$(sha256sum -- "$ACCOUNT_GATE_SOURCE_PYTHON")"
+          SOURCE_PYTHON_SHA256="${SOURCE_PYTHON_SHA256%% *}"
+
+          ACCOUNT_GATE_PYTHON_BASE="$ACCOUNT_GATE_ROOT/cpython-3.12.13-linux-x86_64"
+          install -d -m 700 "$ACCOUNT_GATE_PYTHON_BASE"
+          (umask 077; cp -R -- "$ACCOUNT_GATE_SOURCE_BASE/." "$ACCOUNT_GATE_PYTHON_BASE/")
+          chmod -R go-w -- "$ACCOUNT_GATE_PYTHON_BASE"
+          ACCOUNT_GATE_PYTHON="$ACCOUNT_GATE_PYTHON_BASE/$ACCOUNT_GATE_PYTHON_RELATIVE"
           test "$ACCOUNT_GATE_PYTHON" = "$(realpath -e -- "$ACCOUNT_GATE_PYTHON")"
           test -f "$ACCOUNT_GATE_PYTHON"
           test -x "$ACCOUNT_GATE_PYTHON"
           test ! -L "$ACCOUNT_GATE_PYTHON"
-          ACCOUNT_GATE_PARENT="$RUNNER_TEMP/gpt2agent-account-gate-parent"
+          COPIED_PYTHON_SHA256="$(sha256sum -- "$ACCOUNT_GATE_PYTHON")"
+          COPIED_PYTHON_SHA256="${COPIED_PYTHON_SHA256%% *}"
+          test "$COPIED_PYTHON_SHA256" = "$SOURCE_PYTHON_SHA256"
+          ACCOUNT_GATE_PYTHON_SHA256="$SOURCE_PYTHON_SHA256"
+
+          ACCOUNT_GATE_PARENT="$ACCOUNT_GATE_ROOT/account-runtime"
           ACCOUNT_GATE_VENV="$ACCOUNT_GATE_PARENT/venv"
-          rm -rf -- "$ACCOUNT_GATE_PARENT"
           install -d -m 700 "$ACCOUNT_GATE_PARENT"
-          cleanup_account_gate() {
-            rm -rf -- "$ACCOUNT_GATE_VENV"
-            rmdir -- "$ACCOUNT_GATE_PARENT"
-          }
-          trap cleanup_account_gate EXIT
           SITE_PACKAGES="$(scripts/bootstrap_account_gate.sh \
-            --python "$ACCOUNT_GATE_PYTHON" --venv "$ACCOUNT_GATE_VENV")"
+            --python "$ACCOUNT_GATE_PYTHON" \
+            --python-sha256 "$ACCOUNT_GATE_PYTHON_SHA256" \
+            --venv "$ACCOUNT_GATE_VENV")"
           test "$SITE_PACKAGES" = "$ACCOUNT_GATE_VENV/lib/python3.12/site-packages"
           "$ACCOUNT_GATE_VENV/bin/python" -I -S -B \
             scripts/verify_account_receipt.py check-runtime \

@@ -1722,6 +1722,27 @@ def _secure_path_chain(path: Path, root: Path, *, owner: int) -> bool:
     return True
 
 
+def _path_has_secure_ancestors(path: Path, *, current_uid: int) -> bool:
+    if not path.is_absolute():
+        return False
+    current = path
+    while True:
+        try:
+            metadata = current.lstat()
+        except OSError:
+            return False
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid not in (0, current_uid)
+            or metadata.st_mode & 0o022
+        ):
+            return False
+        parent = current.parent
+        if parent == current:
+            return stat.S_ISDIR(metadata.st_mode)
+        current = parent
+
+
 def _dependency_origin_is_trusted(origin: Path, forbidden_roots: tuple[Path, ...]) -> bool:
     if not origin.is_absolute() or origin.is_symlink():
         return False
@@ -1798,7 +1819,11 @@ def _require_isolated_runtime_site(
         raise ReceiptError("trusted account runtime is invalid")
     venv = executable.parent.parent
     owner = os.getuid()
-    if not _safe_lstat(venv, owner=owner, directory=True):
+    if (
+        not _path_has_secure_ancestors(executable, current_uid=owner)
+        or not _path_has_secure_ancestors(venv, current_uid=owner)
+        or not _safe_lstat(venv, owner=owner, directory=True)
+    ):
         raise ReceiptError("trusted account runtime is invalid")
     try:
         venv_mode = stat.S_IMODE(venv.lstat().st_mode)
@@ -1859,6 +1884,7 @@ def _require_isolated_runtime_site(
         or stat.S_ISLNK(base_metadata.st_mode)
         or base_metadata.st_uid not in (0, owner)
         or base_metadata.st_mode & 0o022
+        or not _path_has_secure_ancestors(base, current_uid=owner)
     ):
         raise ReceiptError("trusted account runtime base is invalid")
     base_owner = base_metadata.st_uid

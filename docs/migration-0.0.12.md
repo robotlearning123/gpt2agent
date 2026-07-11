@@ -145,11 +145,20 @@ they are not presented as a supported MCP audio capability.
 
 The account gate must run on a trusted local machine from the clean repository
 root at the exact candidate commit. Follow the complete build-once operator
-procedure in the README. First create a new owner-private CPython 3.12
-environment with `scripts/bootstrap_account_gate.sh`. Its reviewed hash lock
-allows only the exact nine-distribution account-gate closure, binary wheels, and
-the official PyPI index; the verifier then checks every installed distribution,
-file, owner/mode, import origin, and runtime path under `python -I -S -B`.
+procedure in the README. First copy CPython 3.12.13 for Linux x86_64 from a
+separately reviewed full runtime artifact into an owner-private directory below
+the canonical operator home. Verify the full artifact's published checksum
+before extraction, independently record the canonical executable SHA-256, and
+pass that reviewed artifact checksum binding to
+`scripts/bootstrap_account_gate.sh`; calculating it from an unverified ambient
+Python is not provenance. Every runtime ancestor to `/` must be owned by root or
+the operator and must not be group/world-writable or a symlink. Hosted CI uses
+the same private-copy contract, with its pinned `actions/setup-python` action and
+isolated runner as the explicit external provenance authority. The reviewed hash
+lock allows only the exact nine-distribution account-gate closure, binary wheels,
+and the official PyPI index; the verifier then checks every installed
+distribution, file, owner/mode, import origin, and runtime path under
+`python -I -S -B`.
 
 Query the successful main `ci.yml` push run with at least 72 hours of artifact
 lifetime, download its attempt-specific artifact, and pass the returned run ID,

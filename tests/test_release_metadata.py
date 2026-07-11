@@ -582,6 +582,7 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     ci = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     release = (PROJECT_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    migration = (PROJECT_ROOT / "docs" / "migration-0.0.12.md").read_text(encoding="utf-8")
     readme_flat = re.sub(r"\s+", " ", readme)
 
     assert "name: Required checks" in ci
@@ -681,7 +682,13 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert "git pull --ff-only origin main" not in readme
     assert 'git merge-base --is-ancestor "$RELEASE_SHA" origin/main' in readme
     assert "scripts/bootstrap_account_gate.sh" in readme
-    assert "--python /usr/bin/python3.12" in readme
+    assert "/usr/bin/python3.12" not in readme
+    assert "CPython 3.12.13 for Linux x86_64" in readme
+    assert "GPT2AGENT_TRUSTED_PYTHON_SHA256" in readme
+    assert '--python-sha256 "$GPT2AGENT_TRUSTED_PYTHON_SHA256"' in readme
+    assert "pinned actions/setup-python action" in readme
+    assert "CPython 3.12.13 for Linux x86_64" in migration
+    assert "reviewed artifact checksum" in migration
     assert '"$VERIFIER_PYTHON" -I -S -B' in readme
     assert "scripts/verify_main_ci.py" in readme
     assert '--commit "$RELEASE_SHA"' in readme
