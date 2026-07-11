@@ -104,6 +104,26 @@ def test_stale_local_cursor_is_contract_changed() -> None:
         _run(tool, limit=1, cursor=cursor)
 
 
+def test_local_cursor_fingerprint_uses_pre_redaction_plugin_ids() -> None:
+    class ChangingSecretIdClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def get(self, path, **kwargs):
+            self.calls += 1
+            marker = "a" if self.calls == 1 else "b"
+            return [
+                {"id": "sk-" + marker * 32},
+                {"id": "sk-" + "z" * 32},
+            ]
+
+    tool = _tools(ChangingSecretIdClient())["list_plugins"]
+    cursor = _run(tool, limit=1)["cursor"]
+    with pytest.raises(RuntimeError, match="fingerprint"):
+        _run(tool, limit=1, cursor=cursor)
+
+
 def test_local_cursor_cannot_be_reinterpreted_after_envelope_changes() -> None:
     local_page = [{"id": f"p-{i}"} for i in range(2)]
 
@@ -181,6 +201,28 @@ def test_installed_nested_envelope_is_normalized_without_nested_objects() -> Non
     assert result["items"][0]["app_ids"] == ["app-1"]
     assert result["items"][0]["disabled_skill_names"] == ["skill-1"]
     assert "marketplace" not in result["items"][0]
+
+
+def test_installed_plugins_redact_secrets_from_every_allowlisted_string() -> None:
+    secret = "sk-" + "s" * 32
+    scalar_fields = {
+        field: secret
+        for field in plugins._SCALAR_FIELDS
+        if field not in {"enabled", "release_version"}
+    }
+    payload = {
+        "plugins": [
+            {
+                **scalar_fields,
+                "release_version": secret,
+                **{field: [secret] for field in plugins._LIST_FIELDS},
+            }
+        ]
+    }
+
+    result = plugins.normalize_installed_plugins(payload)
+
+    assert secret not in repr(result)
 
 
 @pytest.mark.parametrize(

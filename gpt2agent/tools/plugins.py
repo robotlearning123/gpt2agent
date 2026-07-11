@@ -59,7 +59,13 @@ def _normalize_item(raw: Any, *, require_release: bool = False) -> dict:
         else:
             value = raw.get(field)
         if field == "id":
-            item[field] = bounded_string(value, adapter=adapter, field=field, required=True)
+            item[field] = bounded_string(
+                value,
+                adapter=adapter,
+                field=field,
+                required=True,
+                redact_value=True,
+            )
         elif field == "enabled":
             if value is not None and not isinstance(value, bool):
                 raise BackendContractError(adapter, "enabled must be boolean or null")
@@ -69,14 +75,14 @@ def _normalize_item(raw: Any, *, require_release: bool = False) -> dict:
                 value,
                 adapter=adapter,
                 field=field,
-                redact_value=field in {"name", "marketplace_name", "display_name"},
+                redact_value=True,
             )
     for field in _LIST_FIELDS:
         item[field] = bounded_string_list(
             raw.get(field),
             adapter=adapter,
             field=field,
-            redact_values=field in {"skill_names", "disabled_skill_names", "capability_names"},
+            redact_values=True,
         )
     return item
 
@@ -117,7 +123,10 @@ def _decode_local_cursor(cursor: str) -> tuple[str, int]:
 def normalize_plugin_catalog(data: Any, *, limit: int, cursor: str | None) -> dict:
     if isinstance(data, list):
         items = [_normalize_item(raw) for raw in data]
-        fingerprint = _catalog_fingerprint(items)
+        # Bind pagination to the validated backend identities before redaction.
+        # Different secret-shaped IDs can intentionally project to the same
+        # placeholder, but must still invalidate a cursor when the catalog moves.
+        fingerprint = _catalog_fingerprint(data)
         offset = 0
         if cursor is not None:
             if not cursor.startswith(_LOCAL_PREFIX):
