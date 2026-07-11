@@ -19,7 +19,8 @@ Zed, and any MCP client.
 
 ## What it does
 
-gpt2agent exposes **26 MCP tools** that forward requests directly to ChatGPT's backend API.
+gpt2agent exposes **31 MCP tools** that forward requests to ChatGPT's backend API
+(plus an optional GPT-Live Mode B export control plane — text only).
 No proxy process. No separate account. No platform API key. Your `codex login`,
 your token, your quota.
 
@@ -126,7 +127,7 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 
 ---
 
-## Tools (26)
+## Tools (31)
 
 ### Chat & reasoning
 
@@ -184,6 +185,22 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 | `list_codex_tasks` | Recent Codex tasks + status |
 | `codex_task_create` | Kick off a new Codex task (resolves env from `repo_label`) |
 
+### GPT-Live export (Mode B, experimental, control only)
+
+Requires the headed browser sidecar (`sidecar/browser/sidecar.mjs`) with a
+human-authenticated ChatGPT Chrome profile. **No audio or secrets on MCP.**
+Cloudflare Turnstile bypass is out of scope.
+
+| Tool | What it does |
+|---|---|
+| `voice_live_export_help` | How to start export + Turnstile boundary |
+| `voice_live_status` | Sidecar control-plane status (text only) |
+| `voice_live_get_transcript` | Buffered human/agent transcript text |
+| `voice_live_send_text` | Speak agent reply text via Live TTS |
+| `voice_live_end` | End the export session |
+
+See [sidecar/README.md](./sidecar/README.md).
+
 ---
 
 ## Architecture
@@ -204,10 +221,10 @@ $CODEX_HOME/auth.json (default ~/.codex/auth.json) ← auto-refreshed by Codex
                                           models, memories, settings/voices,
                                           codex, gizmos, ...}
         |
-   26 MCP tools  (chat, agent, DR ×2, GPT chat, image gen,
+   31 MCP tools  (chat, agent, DR ×2, GPT chat, image gen,
                   code interpreter, canvas, memory r/w,
                   instructions r/w, codex r/w, Voice catalog,
-                  account introspect)
+                  account introspect, GPT-Live Mode B control)
 ```
 
 ---

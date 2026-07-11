@@ -14,7 +14,7 @@ $CODEX_HOME/auth.json (default ~/.codex/auth.json) ← bearer, auto-refreshed by
         │                                     └── /me, /models, /memories, /codex,  (REST)
         │                                         /gizmos, /files, /apps,
         │                                         /settings/voices, ...
-   26 MCP tools
+   31 MCP tools
 ```
 
 ## Request path

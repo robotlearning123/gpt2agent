@@ -1,120 +1,132 @@
 # gpt2agent GPT-Live voice sidecar (experimental, v0.0.14)
 
-A human-to-agent voice bridge over ChatGPT **GPT-Live**. GPT-Live is full-duplex
-audio over WebRTC — it **cannot** be an MCP tool (MCP is request/response and
-carries no media). So the bridge splits in two:
+**Export GPT-Live to an agent as Mode B voice I/O.**
 
-- **This sidecar (TypeScript/Node)** owns the WebRTC peer, the microphone, and
-  the datachannel. Audio never leaves it.
-- **The gpt2agent Python server** exposes a small **control plane** over MCP.
+GPT-Live is full-duplex audio over WebRTC — it **cannot** be a plain MCP tool
+(MCP is request/response and carries no media). The export splits ownership:
+
+- **Browser sidecar (this package)** owns WebRTC, mic, speaker, and datachannel.
+  Audio never leaves it.
+- **Agent / MCP** only receives **transcript text** and sends **reply text**
+  (`send_text`). No raw audio, SDP, bearer tokens, or cookies cross that boundary.
 
 ```
-  human mic ──WebRTC──▶ sidecar ──datachannel──▶ input transcript
-                                                     │
-                                     your agent (Claude / gpt2agent) reasons,
-                                     calls tools/search over MCP as usual
-                                                     │
-  human speaker ◀──WebRTC── sidecar ◀── speak(replyText) ── agent's reply
+  human mic ──WebRTC──▶ headed Chrome (ChatGPT Voice UI)
+                             │ datachannel text
+                             ▼
+                    ModeBExport (src/export.mjs)
+                       onAgentTurn(humanText)
+                             │
+                    your agent reasons + tools
+                             │
+  human speaker ◀──WebRTC── speak wire (response.create in data_message)
 ```
 
-This is **Mode B**: GPT-Live is voice I/O, your agent is the brain — which is why
-"use tools/search from GPT-Live" works: the agent owns the tool loop, and its
-spoken answer is voiced by Live. (Mode A — Live natively calling our tools — is
-likely disabled in the consumer product today; see the investigation doc.)
+## Hard boundary (read this)
 
-## Status — honest
-
-| Part | State |
+| Supported export path | Not supported |
 |---|---|
-| `src/reconnect.mjs` — backoff/attempt ceiling | **done, unit-tested** |
-| `src/liveness.mjs` — half-open detection | **done, unit-tested** |
-| `src/events.mjs` — datachannel event router + Mode B glue | **done, unit-tested**; event model confirmed Realtime-style from the bundle |
-| `src/adapter.mjs` — realtime routes + SDP exchange | **done, unit-tested**; routes VERIFIED from the shipped bundle (see evidence doc) |
-| `src/session.mjs` — WebRTC lifecycle wiring | wired to the real adapter; needs a WebRTC impl (browser / `werift`) to run |
-| `capture/gpt-live-capture.js` — live confirmation harness | ready to run |
+| Human-authenticated **real headed Chrome** profile signed into ChatGPT | Headless / token-only SDP “bypass” of Cloudflare Turnstile |
+| Fake WAV mic via Chrome flags, or a real mic | Shipping raw audio over MCP |
+| Localhost control plane + MCP control tools (text only) | Mode A (Live natively calling external MCP tools) |
 
-The consumer handshake is **captured from the bundle AND confirmed live
-end-to-end** — a `POST` of an Opus-audio SDP offer to `/realtime/vp?dcid=0` with
-the account bearer (`~/.codex/auth.json`) returns **HTTP 201 + a full SDP answer
-with server ICE candidates**. No browser, mic, ephemeral token, or sentinel
-needed (`docs/…/2026-07-11-gpt-live-handshake-evidence.md`).
+Turnstile / bot-detection circumvention is **out of scope**. Token-only sessions
+abort ~1s after `listening` by design (server-side validation).
 
-| mode | SDP-exchange endpoint |
-|---|---|
-| standard | `https://chatgpt.com/realtime/vps?dcid=0` |
-| advanced | `https://chatgpt.com/realtime/vp?dcid=0` |
-| wingman | `https://chatgpt.com/realtime/wm?dcid=0` |
-
-SDP is a single-shot `POST offer.sdp` (`Content-Type: application/sdp`,
-`Authorization: Bearer <token>`) whose response body is the answer SDP;
-datachannel is negotiated, `id:0`.
-
-```bash
-cd sidecar && npm test    # 21/21 green (reconnect, liveness, events, adapter)
-```
-
-## Runnable browser sidecar (recommended path) — `browser/sidecar.mjs`
-
-The Node/werift path completes the handshake but its audio SRTP egress never
-reaches the OpenAI server (confirmed: even continuous silence closes ~1s after
-`listening`), while ChatGPT's own web client works. So the recommended sidecar
-drives a real Chrome — reusing the app's working media stack — and reads the
-transcription + response off the datachannel. It feeds a **WAV file as the mic**
-(`--use-file-for-fake-audio-capture`), so no real microphone is used.
+## Quick start — export path
 
 ```bash
 cd sidecar && npm install
-# one-time: create a Chrome profile logged into ChatGPT
-open -na "Google Chrome" --args --user-data-dir="$PWD/.chrome-gptlive"   # sign in, then quit
-# make a question WAV
-echo "What is two plus two?" | mb voice -o q.mp3 && ffmpeg -y -i q.mp3 -ar 24000 -ac 1 q.wav
-# run
-node browser/sidecar.mjs --profile "$PWD/.chrome-gptlive" --audio q.wav
+
+# 1) one-time: dedicated Chrome profile, sign into chatgpt.com, quit
+open -na "Google Chrome" --args --user-data-dir="$PWD/.chrome-gptlive"
+
+# 2) short mono WAV as fake mic
+echo "What is two plus two?" | mb voice -o q.mp3
+ffmpeg -y -i q.mp3 -ar 24000 -ac 1 q.wav
+
+# 3) run export (control plane on :8741)
+node browser/sidecar.mjs \
+  --profile "$PWD/.chrome-gptlive" \
+  --audio q.wav \
+  --control-port 8741
+
+# optional demo: fixed agent reply spoken back through Live
+node browser/sidecar.mjs --profile "$PWD/.chrome-gptlive" --audio q.wav --reply "Four."
 ```
 
-It injects the datachannel hook via `evaluateOnNewDocument` (before the app's
-scripts, which fixes the hook-too-late problem seen with post-load injection),
-opens voice, and prints the event stream — you should see the human utterance
-transcribed and GPT-Live's response. The `onAgentTurn(humanText)` hook is where
-you route the transcript to your agent; voicing the agent's reply back (full Mode
-B) still needs the one "speak provided text" outbound command captured (the
-normal client only sends `track_state` + `client_metrics`, since the model
-auto-responds to audio).
+CLI help: `node browser/sidecar.mjs --help`
 
-## What remains: wire the WebRTC media (control plane is done)
+### Agent hook options
 
-The token/route/SDP-exchange control plane is verified end-to-end. To get a
-working spoken bridge, the remaining work is media transport:
+| Mechanism | How |
+|---|---|
+| Control HTTP | Agent `POST /send_text {"text":"..."}` after reading `GET /transcript` |
+| `--reply TEXT` | Fixed reply for every human turn (demo) |
+| `--agent-cmd 'cmd'` | Shell: stdin = human text, stdout = reply text |
+| In-process | `ModeBExport({ onAgentTurn })` in `src/export.mjs` |
 
-1. **Node WebRTC peer** — add `werift` (pure-JS WebRTC) or `wrtc`, build the real
-   offer (Opus audio + negotiated datachannel id 0), run `exchangeSdp` (already
-   implemented + tested), then complete ICE/DTLS with the answer's candidates.
-2. **Mic + speaker** at the human's machine (the sidecar runs where the human is).
-3. **Datachannel event enum** — `session.update` to pin voice/instructions, then
-   route `response.*` / input-transcription events through `EventRouter` into the
-   Mode B loop (`onUserSaid` → agent → `speak`).
-4. **MCP control tools** in the Python server (below).
+### Localhost control plane (text/control only)
 
-To enumerate the exact datachannel event names quickly, either connect a real
-peer (step 1) or paste `capture/gpt-live-capture.js` into an authenticated
-`chatgpt.com` voice session and read `window.__gptLiveCapture.eventTypes`.
+Default: `http://127.0.0.1:8741` (override with `--control-port` / `GPT2AGENT_LIVE_CONTROL`).
 
-## MCP control plane (to add in the Python server once the adapter is captured)
+| Route | Purpose |
+|---|---|
+| `GET /help` | Start instructions + Turnstile boundary |
+| `GET /status` | Export state (redacted; no secrets/audio) |
+| `GET /transcript` | Buffered human/agent text (`?clear=1` to drain) |
+| `POST /send_text` | `{"text":"..."}` → speak-injection wire into Live |
+| `POST /end` | Tear down |
+| `GET /health` | Liveness |
 
-Audio never crosses MCP; these are control/text only:
+### MCP tools (Python package, control only)
+
+Registered when the gpt2agent server loads this worktree:
 
 | Tool | Purpose |
 |---|---|
-| `voice_start(voice_mode?, voice?)` | start a session (catalog via `list_voices`) |
-| `voice_status()` | state, connection health, reconnect count |
-| `voice_send_text(text)` | make Live speak text (also the agent-reply path) |
-| `voice_get_transcript()` | drain buffered input/answer transcript text |
-| `voice_end()` | tear down |
+| `voice_live_export_help` | Docs + boundary |
+| `voice_live_status` | Proxy `GET /status` |
+| `voice_live_get_transcript` | Proxy `GET /transcript` |
+| `voice_live_send_text` | Proxy `POST /send_text` |
+| `voice_live_end` | Proxy `POST /end` |
 
-## Reliability (the "stable & reliable" part)
+Start the browser sidecar first; then the agent calls these tools. Audio never
+enters MCP responses.
 
-Implemented and tested here: exponential backoff with jitter + attempt ceiling
-(`reconnect.mjs`), and half-open datachannel detection (`liveness.mjs`). Still to
-wire in `session.mjs` once the adapter is captured: ICE restart on drop, TURN
-fallback from the session's ICE servers, token refresh mid-session, and the
-Sentinel challenge on the bootstrap call.
+## Shipped modules
+
+| Module | Role |
+|---|---|
+| `src/export.mjs` | **Mode B export plane** — transcript → agent hook → speak queue |
+| `src/events.mjs` | Envelope wrap/unwrap, transcript extract, `buildSpeakWire` |
+| `src/control.mjs` | Localhost HTTP control plane |
+| `src/session.mjs` | WebRTC session orchestration using export plane |
+| `src/adapter.mjs` | Verified realtime routes + SDP exchange |
+| `src/reconnect.mjs` / `liveness.mjs` | Reliability primitives |
+| `browser/sidecar.mjs` | **Runnable** headed-Chrome export entry |
+
+```bash
+cd sidecar && npm test
+```
+
+## Speak-injection contract
+
+Outbound client message (unit-tested):
+
+```json
+{
+  "type": "data_message",
+  "data": "{\"type\":\"response.create\",\"response\":{\"modalities\":[\"audio\",\"text\"],\"instructions\":\"<agent reply>\"}}"
+}
+```
+
+Built by `buildSpeakWire(text)` / `ModeBExport.queueSpeak(text)`. Consumer event
+names may still refine after live capture; the contract is serializable
+control JSON only — never PCM/Opus bytes.
+
+## Investigation notes
+
+Handshake evidence and Turnstile boundary write-ups live under
+`docs/superpowers/plans/2026-07-11-*.md`. Catalog-only voice discovery remains
+`list_voices` (0.0.13 lane) and is separate from this Live export.

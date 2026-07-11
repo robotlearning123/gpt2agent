@@ -8,7 +8,9 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "export": "node browser/sidecar.mjs",
+    "export-help": "node browser/sidecar.mjs --help"
   },
   "dependencies": {
     "puppeteer-core": "^23.11.1",

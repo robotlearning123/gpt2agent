@@ -1,6 +1,6 @@
 """Unit tests for the MCP tool layer — no network.
 
-Round-2 coverage: the 26-tool handler surface (the product's actual value) had
+Round-2 coverage: the tool handler surface (the product's actual value) had
 zero direct unit tests. These exercise every `tools/*.py` handler through its
 real `register(mcp, client, conv=None)` signature using a recording FakeMCP +
 FakeClient, and the server.py SSE closures via FastMCP's tool manager with a
@@ -704,7 +704,7 @@ def _build_with_conv(monkeypatch, conv):
     return mcp._tool_manager._tools
 
 
-def test_server_registers_exact_26_tool_surface_and_voice_once(monkeypatch) -> None:
+def test_server_registers_exact_31_tool_surface_and_voice_once(monkeypatch) -> None:
     calls = 0
     original_register = voice.register
 
@@ -743,8 +743,14 @@ def test_server_registers_exact_26_tool_surface_and_voice_once(monkeypatch) -> N
         "memory_create_via_chat",
         "memory_list",
         "memory_search",
+        # Mode B GPT-Live export control plane (text only; no audio on MCP):
+        "voice_live_end",
+        "voice_live_export_help",
+        "voice_live_get_transcript",
+        "voice_live_send_text",
+        "voice_live_status",
     }
-    assert len(tools) == 26
+    assert len(tools) == 31
     assert calls == 1
 
     annotations = tools["list_voices"].annotations
@@ -753,6 +759,10 @@ def test_server_registers_exact_26_tool_surface_and_voice_once(monkeypatch) -> N
     assert annotations.destructiveHint is False
     assert annotations.idempotentHint is True
     assert annotations.openWorldHint is True
+
+    live_help = tools["voice_live_export_help"].annotations
+    assert live_help is not None
+    assert live_help.readOnlyHint is True
 
 
 def test_agent_always_temporary_false(monkeypatch) -> None:

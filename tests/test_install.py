@@ -283,10 +283,12 @@ def test_skill_install(tmp_path: Path) -> None:
         for line in skill.splitlines()
         if line.strip().startswith("- mcp__gpt2agent__")
     ]
-    assert len(allowed) == 26
+    assert len(allowed) == 31
     assert allowed.count("- mcp__gpt2agent__list_voices") == 1
-    assert "Complete parameter reference for all 26 MCP tools" in reference
+    assert allowed.count("- mcp__gpt2agent__voice_live_export_help") == 1
+    assert "Complete parameter reference for all 31 MCP tools" in reference
     assert reference.count("### list_voices") == 1
+    assert reference.count("### voice_live_send_text") == 1
     assert "GPT-Live" in reference
 
 

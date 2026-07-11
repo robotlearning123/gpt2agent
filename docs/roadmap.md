@@ -12,7 +12,7 @@ can change without notice.
 | `0.0.11` | Recovery release; hardened release-source verification | Published to PyPI |
 | `0.0.12` | Account-native feature coverage (read-only introspection breadth) | Design + cross-model review complete; implementation on a separate lane |
 | `0.0.13` | Voice **catalog** (`list_voices`) | Code complete; release held until 0.0.12 lands |
-| `0.0.14` | **Real live voice (GPT-Live)** — experimental TypeScript WebRTC sidecar | Investigation; evidence capture first |
+| `0.0.14` | **Real live voice (GPT-Live)** — experimental TypeScript WebRTC sidecar + Mode B export | Mode B export path implemented (browser sidecar + control plane); optional/experimental |
 
 Lanes ship in order. 0.0.13 does not invent or supersede 0.0.12; the two are
 independent branches and merge in sequence.
@@ -43,12 +43,13 @@ The current official Voice documentation also excludes connected apps/plugins,
 Work, Codex, custom GPTs, temporary chats, and desktop from initial Live
 support — which constrains any "let Live call out to an external agent" design.
 
-**0.0.14 direction.** A real live-voice bridge is pursued as an *optional,
-disabled-by-default, experimental* lane: a small TypeScript/browser sidecar owns
-the WebRTC and media APIs; Python remains the MCP control plane exposing a
-control-only surface (`start`, `status`, `send_text`, `end`, `get_transcript`).
-Audio stays local to the sidecar and never transits MCP. No sidecar ships until
-a real captured handshake, benchmarks, and a separate safety design justify it.
+**0.0.14 export (Mode B).** Experimental, optional, not a stable PyPI “Live audio”
+product: a headed, human-authenticated browser sidecar owns WebRTC + media; the
+Python MCP surface is control-only (`voice_live_export_help`,
+`voice_live_status`, `voice_live_get_transcript`, `voice_live_send_text`,
+`voice_live_end`) against a localhost control plane. Audio and account secrets
+never transit MCP. **Cloudflare Turnstile bypass is out of scope** — token-only
+or headless SDP is not the supported export path. See `sidecar/README.md`.
 
 ## Language policy
 

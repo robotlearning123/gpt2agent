@@ -1,6 +1,6 @@
 # gpt2agent MCP Tools Reference
 
-Complete parameter reference for all 26 MCP tools exposed by the gpt2agent server.
+Complete parameter reference for all 31 MCP tools exposed by the gpt2agent server.
 Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 
 ---
@@ -13,6 +13,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - [Account Introspection (8)](#account-introspection)
 - [Memory & Instructions (5)](#memory--instructions)
 - [Codex (3)](#codex)
+- [GPT-Live Mode B export (5)](#gpt-live-mode-b-export)
 
 ---
 
@@ -643,6 +644,52 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
   - Raises `ValueError` if no environment matches the label, or if the label is ambiguous (matches multiple environments).
   - The payload shape is: `new_task={environment_id, branch}` + `input_items=[{type: "message", role: "user", content: [{content_type: "text", text: prompt}]}]`.
   - Async handler; offloads the REST calls to the synchronous backend client.
+
+---
+
+## GPT-Live Mode B export
+
+Experimental, optional. Audio stays in a headed browser sidecar; MCP is
+text/control only. Cloudflare Turnstile bypass is **out of scope**. Start with:
+
+```bash
+cd sidecar && node browser/sidecar.mjs --profile ./.chrome-gptlive --audio q.wav
+```
+
+Control base: `http://127.0.0.1:8741` (override with `GPT2AGENT_LIVE_CONTROL`).
+
+### voice_live_export_help
+
+- **Purpose**: Document how to export GPT-Live to an agent (Mode B) and the Turnstile boundary.
+- **Parameters**: none.
+- **Returns**: `str` — start steps, tool list, boundary notes.
+- **When to use**: First call before using the other `voice_live_*` tools.
+
+### voice_live_status
+
+- **Purpose**: Status of the local export control plane (no audio/secrets).
+- **Parameters**: none.
+- **Returns**: `dict` — state, transcript counts, boundary flags (redacted).
+
+### voice_live_get_transcript
+
+- **Purpose**: Drain buffered human/agent transcript text from the export plane.
+- **Parameters**:
+  - `clear` (bool, default: `False`) — when `True`, clears the buffer after read.
+- **Returns**: `dict` with `transcripts: [{role, text, at}, ...]`.
+
+### voice_live_send_text
+
+- **Purpose**: Make GPT-Live speak agent reply text (TTS via browser; no audio on MCP).
+- **Parameters**:
+  - `text` (str, required) — non-empty reply text (bounded length).
+- **Returns**: `dict` — `{ok, delivered, ...}` without raw wire/audio payloads.
+
+### voice_live_end
+
+- **Purpose**: End the GPT-Live export session via the local control plane.
+- **Parameters**: none.
+- **Returns**: `dict` — `{ok, state}` or an unreachable-control error with a start hint.
 
 ---
 
