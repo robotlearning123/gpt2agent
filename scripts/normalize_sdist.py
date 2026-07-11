@@ -14,9 +14,10 @@ import sys
 import tarfile
 import tempfile
 import zlib
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Sequence
+from typing import BinaryIO, Iterator, Sequence
 
 
 _MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
@@ -334,6 +335,18 @@ def _close_snapshot(snapshot: BinaryIO) -> None:
         raise SdistNormalizationError(_SNAPSHOT_ERROR) from error
 
 
+@contextmanager
+def _managed_preflighted_snapshot(stream: BinaryIO) -> Iterator[BinaryIO]:
+    snapshot = _snapshot_preflighted_tar(stream)
+    try:
+        yield snapshot
+    except BaseException:
+        _close_failed_snapshot(snapshot)
+        raise
+    else:
+        _close_snapshot(snapshot)
+
+
 def _require_open_identity(stream: BinaryIO, expected: _Identity) -> None:
     try:
         current = _identity(os.fstat(stream.fileno()))
@@ -465,7 +478,7 @@ def _scan_archive(
         try:
             with (
                 gzip.GzipFile(fileobj=raw, mode="rb") as expanded,
-                _snapshot_preflighted_tar(expanded) as snapshot,
+                _managed_preflighted_snapshot(expanded) as snapshot,
             ):
                 _require_open_identity(raw, observed_identity)
                 with tarfile.open(fileobj=snapshot, mode="r:") as archive:
@@ -590,7 +603,7 @@ def _write_normalized(
         try:
             with (
                 gzip.GzipFile(fileobj=raw_source, mode="rb") as expanded,
-                _snapshot_preflighted_tar(expanded) as snapshot,
+                _managed_preflighted_snapshot(expanded) as snapshot,
             ):
                 _require_open_identity(raw_source, observed_identity)
                 with tarfile.open(fileobj=snapshot, mode="r:") as source:

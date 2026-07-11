@@ -675,6 +675,103 @@ def test_snapshot_read_failure_has_stable_payload_free_error() -> None:
     assert "sensitive" not in str(captured.value)
 
 
+@pytest.mark.parametrize(
+    "failing_snapshot_number",
+    [1, 2],
+    ids=["scan", "write"],
+)
+def test_normalizer_maps_snapshot_close_failure_without_mutation_or_named_temp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failing_snapshot_number: int,
+) -> None:
+    module = _load_module()
+    archive = tmp_path / f"{ROOT}.tar.gz"
+    _write_custom_archive(archive, _source_entries())
+    original = archive.read_bytes()
+    real_temporary_file = module.tempfile.TemporaryFile
+    snapshot_number = 0
+
+    class Snapshot:
+        def __init__(self, wrapped: io.BytesIO, *, fail_close: bool) -> None:
+            self.wrapped = wrapped
+            self.fail_close = fail_close
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self.wrapped, name)
+
+        def __enter__(self) -> "Snapshot":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            self.close()
+
+        def close(self) -> None:
+            self.wrapped.close()
+            if self.fail_close:
+                raise OSError("sensitive snapshot close payload")
+
+    def make_snapshot(*, mode: str) -> Snapshot:
+        nonlocal snapshot_number
+        snapshot_number += 1
+        return Snapshot(
+            real_temporary_file(mode=mode),
+            fail_close=snapshot_number == failing_snapshot_number,
+        )
+
+    monkeypatch.setattr(module.tempfile, "TemporaryFile", make_snapshot)
+
+    with pytest.raises(module.SdistNormalizationError) as captured:
+        module.normalize_sdist(archive, epoch=EPOCH)
+
+    assert str(captured.value) == module._SNAPSHOT_ERROR
+    assert "sensitive" not in str(captured.value)
+    assert archive.read_bytes() == original
+    assert not list(tmp_path.glob(f".{archive.name}.*.tmp"))
+
+
+def test_snapshot_close_failure_preserves_active_validation_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    archive = tmp_path / f"{ROOT}.tar.gz"
+    _write_custom_archive(archive, [_directory(ROOT)])
+    original = archive.read_bytes()
+    real_temporary_file = module.tempfile.TemporaryFile
+
+    class Snapshot:
+        def __init__(self, wrapped: io.BytesIO) -> None:
+            self.wrapped = wrapped
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self.wrapped, name)
+
+        def __enter__(self) -> "Snapshot":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            self.close()
+
+        def close(self) -> None:
+            self.wrapped.close()
+            raise OSError("sensitive snapshot close payload")
+
+    monkeypatch.setattr(
+        module.tempfile,
+        "TemporaryFile",
+        lambda *, mode: Snapshot(real_temporary_file(mode=mode)),
+    )
+
+    with pytest.raises(module.SdistNormalizationError) as captured:
+        module.normalize_sdist(archive, epoch=EPOCH)
+
+    assert str(captured.value) == "sdist is missing its root, PKG-INFO, or pyproject.toml"
+    assert "sensitive" not in str(captured.value)
+    assert archive.read_bytes() == original
+    assert not list(tmp_path.glob(f".{archive.name}.*.tmp"))
+
+
 def test_normalizer_replace_failure_is_atomic_and_cleans_temp(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
