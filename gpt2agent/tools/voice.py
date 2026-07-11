@@ -14,14 +14,15 @@ from gpt2agent.tools._redact import redact
 _ROUTE = "/backend-api/settings/voices"
 _CONTRACT_ERROR = "voice catalog contract changed"
 _MAX_VOICES = 128
-# ChatGPT serves a mode-specific catalog: `standard`, `advanced`, `live` (the
-# latest, GPT-Live), and `wingman` are the modes observed live. The set is not
-# hard-coded — any short lowercase token is forwarded — but the value is bounded
-# to this charset so it cannot inject into the query string.
+# ChatGPT currently serves mode-specific catalogs for `standard`, `advanced`,
+# and `wingman`. The set is not hard-coded — any short lowercase token is
+# forwarded so a future rollout can be probed — but the value is bounded to this
+# charset so it cannot inject into the query string. GPT-Live is a product/audio
+# session name, not a currently accepted value for this catalog query.
 _VOICE_MODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 _VOICE_MODE_ERROR = (
     "voice_mode must be a short lowercase token like 'standard', 'advanced', "
-    "'live', or 'wingman'"
+    "or 'wingman'"
 )
 
 
@@ -96,11 +97,11 @@ def register(mcp, client: BackendClient) -> None:
     async def list_voices(voice_mode: str | None = None) -> list[dict[str, Any]]:
         """List Voice choices currently available to the signed-in account.
 
-        `voice_mode` optionally selects a mode-specific catalog. ChatGPT serves
-        several modes — `standard`, `advanced`, `live` (the latest, GPT-Live),
-        and `wingman`; omit it for the account default. The value is not
-        restricted to that list (modes change), but must be a short lowercase
-        token.
+        `voice_mode` optionally selects a mode-specific catalog. ChatGPT
+        currently accepts `standard`, `advanced`, and `wingman`; omit it for
+        the account default. The value is not restricted to that list (modes
+        change), but must be a short lowercase token. GPT-Live audio is a
+        separate session contract, not a catalog mode exposed by this tool.
 
         Returns only stable catalog metadata: `id`, `name`, `description`,
         `selected`, and `has_preview`. This does not start a Voice session,

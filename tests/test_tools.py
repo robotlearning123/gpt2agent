@@ -274,12 +274,11 @@ def test_list_voices_default_sends_no_voice_mode() -> None:
     assert client.get_calls == [(route, route)]
 
 
-@pytest.mark.parametrize("mode", ["standard", "advanced", "live", "wingman"])
+@pytest.mark.parametrize("mode", ["standard", "advanced", "wingman"])
 def test_list_voices_passes_observed_voice_mode(mode: str) -> None:
-    # Real ChatGPT voice modes: `standard`, `advanced`, `live` (the latest,
-    # GPT-Live), and `wingman` (observed on the live /backend-api/settings/voices
-    # route, 2026-07-11). The bare route (target_path) is unchanged; the mode
-    # rides the query string.
+    # Values accepted by the live /backend-api/settings/voices route on
+    # 2026-07-11. The bare route (target_path) is unchanged; the mode rides the
+    # query string. GPT-Live audio uses a separate session contract.
     route = "/backend-api/settings/voices"
     client = FakeClient(routes={route: {
         "selected": "cove",
@@ -296,6 +295,16 @@ def test_list_voices_passes_observed_voice_mode(mode: str) -> None:
         "selected": True,
         "has_preview": True,
     }]
+
+
+def test_list_voices_forwards_a_bounded_future_mode_without_hard_coding() -> None:
+    route = "/backend-api/settings/voices"
+    client = FakeClient(routes={route: {"selected": None, "voices": []}})
+
+    out = _run(_reg(voice, client).tools["list_voices"], voice_mode="future_mode")
+
+    assert out == []
+    assert client.get_calls == [(f"{route}?voice_mode=future_mode", route)]
 
 
 @pytest.mark.parametrize(

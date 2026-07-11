@@ -15,10 +15,12 @@ versioning: [SemVer](https://semver.org/).
   bounded, stable shape per voice (`id`, `name`, `description`, `selected`,
   `has_preview`); backend voice IDs are preserved verbatim and display text is
   redacted. Brings the server to 26 MCP tools.
-- `list_voices(voice_mode=...)` — optional mode-specific catalog. Real ChatGPT
-  modes are `standard`, `advanced`, `live` (the latest, GPT-Live), and
-  `wingman`; the value is charset-validated (rejected before any request) but
+- `list_voices(voice_mode=...)` — optional mode-specific catalog. The live
+  account contract accepted `standard`, `advanced`, and `wingman` on
+  2026-07-11; the value is charset-validated (rejected before any request) but
   not hard-restricted to that set. Omitting it returns the account default.
+  GPT-Live audio is a separate session contract, and the catalog endpoint
+  currently rejects `voice_mode=live` with HTTP 422.
 - `docs/roadmap.md` — version lanes, the GPT-Live boundary, the language policy
   (Python core with an optional TypeScript sidecar for a future live-voice
   lane), and the release gates.

@@ -307,7 +307,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 
 - **Purpose**: Return the Voice choices currently available to the signed-in ChatGPT account.
 - **Parameters**:
-  - `voice_mode` (str, optional) -- select a mode-specific catalog. Real ChatGPT modes: `standard`, `advanced`, `live` (the latest, GPT-Live), `wingman`. Omit for the account default. Not restricted to that list (modes change), but must be a short lowercase token or it is rejected before any request.
+  - `voice_mode` (str, optional) -- select a mode-specific catalog. Values accepted by the live account contract on 2026-07-11 are `standard`, `advanced`, and `wingman`. Omit for the account default. The value is not restricted to that list (modes change), but must be a short lowercase token or it is rejected before any request. GPT-Live audio is a separate session contract, not a currently accepted catalog mode.
 - **Returns**: `list[dict]` -- each dict contains exactly:
   - `id` (str) -- the opaque backend Voice ID; preserved verbatim and not derived from the display name
   - `name` (str) -- display name, with common PII/secret patterns redacted
@@ -317,8 +317,8 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **When to use**: Discover account/rollout-specific Voice IDs and display metadata.
 - **Example**:
   ```python
-  voices = list_voices()                     # account default
-  live_voices = list_voices(voice_mode="live")  # GPT-Live catalog
+  voices = list_voices()                          # account default
+  advanced_voices = list_voices(voice_mode="advanced")
   selected = next((voice for voice in voices if voice["selected"] is True), None)
   ```
 - **Notes**:
