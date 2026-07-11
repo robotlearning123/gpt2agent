@@ -57,6 +57,127 @@ def test_account_status_projects_only_bounded_redacted_contract_fields() -> None
     }
 
 
+@pytest.mark.parametrize("reverse", (False, True))
+def test_account_status_selects_active_account_independent_of_order(reverse: bool) -> None:
+    entries = [
+        (
+            "inactive",
+            {
+                "entitlement": {
+                    "subscription_plan": "plus",
+                    "has_active_subscription": False,
+                    "expires_at": "2025-01-01T00:00:00Z",
+                },
+                "features": [],
+            },
+        ),
+        (
+            "active",
+            {
+                "entitlement": {
+                    "subscription_plan": "pro",
+                    "has_active_subscription": True,
+                    "expires_at": "2027-01-01T00:00:00Z",
+                },
+                "features": ["voice", "deep-research"],
+            },
+        ),
+    ]
+    if reverse:
+        entries.reverse()
+
+    result = account.normalize_account_status({}, {"accounts": dict(entries)})
+
+    assert result["subscription"] == "pro"
+    assert result["has_active_subscription"] is True
+    assert result["expires_at"] == "2027-01-01T00:00:00Z"
+    assert result["features_count"] == 2
+
+
+@pytest.mark.parametrize("reverse", (False, True))
+def test_account_status_uses_richest_equivalent_active_account(reverse: bool) -> None:
+    entries = [
+        (
+            "first-pro",
+            {
+                "entitlement": {
+                    "subscription_plan": "pro",
+                    "has_active_subscription": True,
+                    "expires_at": "2026-01-01T00:00:00Z",
+                },
+                "features": ["voice"],
+            },
+        ),
+        (
+            "second-pro-alias",
+            {
+                "entitlement": {
+                    "subscription_plan": "chatgptpro",
+                    "has_active_subscription": True,
+                    "expires_at": "2027-01-01T00:00:00Z",
+                },
+                "features": ["voice", "deep-research", "codex"],
+            },
+        ),
+    ]
+    if reverse:
+        entries.reverse()
+
+    result = account.normalize_account_status({}, {"accounts": dict(entries)})
+
+    assert result["subscription"] == "pro"
+    assert result["has_active_subscription"] is True
+    assert result["expires_at"] == "2027-01-01T00:00:00Z"
+    assert result["features_count"] == 3
+
+
+def test_account_status_rejects_conflicting_active_plans() -> None:
+    check = {
+        "accounts": {
+            "active-plus": {
+                "entitlement": {
+                    "subscription_plan": "plus",
+                    "has_active_subscription": True,
+                },
+                "features": [],
+            },
+            "active-pro": {
+                "entitlement": {
+                    "subscription_plan": "pro",
+                    "has_active_subscription": True,
+                },
+                "features": [],
+            },
+        }
+    }
+
+    with pytest.raises(BackendContractError, match="conflicting active plans"):
+        account.normalize_account_status({}, check)
+
+
+def test_account_status_does_not_report_stale_inactive_entitlement() -> None:
+    result = account.normalize_account_status(
+        {},
+        {
+            "accounts": {
+                "inactive": {
+                    "entitlement": {
+                        "subscription_plan": "plus",
+                        "has_active_subscription": False,
+                        "expires_at": "2025-01-01T00:00:00Z",
+                    },
+                    "features": ["stale"],
+                }
+            }
+        },
+    )
+
+    assert result["subscription"] is None
+    assert result["has_active_subscription"] is False
+    assert result["expires_at"] is None
+    assert result["features_count"] == 0
+
+
 @pytest.mark.parametrize(
     ("me", "check"),
     [
@@ -67,6 +188,15 @@ def test_account_status_projects_only_bounded_redacted_contract_fields() -> None
         ({}, {"accounts": {"account-1": []}}),
         ({}, {"accounts": {"account-1": {"entitlement": [], "features": []}}}),
         ({}, {"accounts": {"account-1": {"entitlement": {}, "features": "many"}}}),
+        (
+            {},
+            {
+                "accounts": {
+                    "valid-first": {"entitlement": {}, "features": []},
+                    "malformed-second": [],
+                }
+            },
+        ),
         ({"groups": [{"access_token": "nested"}]}, {"accounts": {}}),
         ({"country": {"access_token": "nested"}}, {"accounts": {}}),
     ],
@@ -223,9 +353,7 @@ def test_get_conversation_fallback_preserves_adjacent_large_integer_order() -> N
             "mapping": {
                 # Reverse chronological insertion order: converting these
                 # adjacent integers to float collapses them into one key.
-                "newer": {
-                    "message": message("message-newer", "newer", 2**53 + 1)
-                },
+                "newer": {"message": message("message-newer", "newer", 2**53 + 1)},
                 "stale": {"message": message("message-stale", "stale", 2**53)},
             },
         },
@@ -338,9 +466,7 @@ def test_list_scheduled_tasks_returns_one_validated_page() -> None:
         }
     )
 
-    result = _run(
-        _registered(automations, client).tools["list_scheduled_tasks"], cursor="next-1"
-    )
+    result = _run(_registered(automations, client).tools["list_scheduled_tasks"], cursor="next-1")
 
     assert client.gets == ["/backend-api/automations"]
     assert result == {

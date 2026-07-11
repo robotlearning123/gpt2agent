@@ -14,9 +14,7 @@ def _bounded_groups(value: Any) -> list[str] | None:
     if value is None:
         return None
     if not isinstance(value, list) or len(value) > 100:
-        raise BackendContractError(
-            "account_status", "groups must be a bounded string list or null"
-        )
+        raise BackendContractError("account_status", "groups must be a bounded string list or null")
     groups: list[str] = []
     for entry in value:
         normalized = bounded_string(
@@ -31,6 +29,70 @@ def _bounded_groups(value: Any) -> list[str] | None:
     return groups
 
 
+def _active_account_projection(
+    accounts: dict[Any, Any],
+) -> tuple[str | None, bool | None, str | None, int]:
+    active: list[tuple[str, str | None, int]] = []
+    saw_inactive = False
+
+    for entry in accounts.values():
+        if not isinstance(entry, dict):
+            raise BackendContractError("account_status", "account entry object required")
+        raw_entitlement = entry.get("entitlement")
+        if raw_entitlement is not None and not isinstance(raw_entitlement, dict):
+            raise BackendContractError("account_status", "entitlement object or null required")
+        entitlement = raw_entitlement or {}
+        raw_features = entry.get("features")
+        if raw_features is not None and not isinstance(raw_features, list):
+            raise BackendContractError("account_status", "features list or null required")
+        features = raw_features or []
+
+        plan = bounded_string(
+            entitlement.get("subscription_plan"),
+            adapter="account_status",
+            field="subscription_plan",
+            maximum=256,
+        )
+        is_active = nullable_bool(
+            entitlement.get("has_active_subscription"),
+            adapter="account_status",
+            field="has_active_subscription",
+        )
+        expires_at = bounded_string(
+            entitlement.get("expires_at"),
+            adapter="account_status",
+            field="expires_at",
+            redact_value=True,
+            maximum=2_048,
+        )
+        if is_active is True:
+            if plan is None:
+                raise BackendContractError("account_status", "active subscription plan is required")
+            canonical_plan = "pro" if plan in {"pro", "chatgptpro"} else plan
+            active.append((canonical_plan, expires_at, len(features)))
+        elif is_active is False:
+            saw_inactive = True
+
+    if not active:
+        return None, False if saw_inactive else None, None, 0
+
+    plans = {plan for plan, _expires_at, _features_count in active}
+    if len(plans) != 1:
+        raise BackendContractError("account_status", "conflicting active plans")
+    representative = max(
+        active,
+        key=lambda item: (item[2], item[1] is not None, item[1] or ""),
+    )
+    plan, expires_at, features_count = representative
+    subscription = bounded_string(
+        plan,
+        adapter="account_status",
+        field="subscription_plan",
+        redact_value=True,
+    )
+    return subscription, True, expires_at, features_count
+
+
 def normalize_account_status(me: Any, check: Any) -> dict:
     """Project the two private responses onto the documented safe fields."""
     adapter = "account_status"
@@ -39,22 +101,9 @@ def normalize_account_status(me: Any, check: Any) -> dict:
     if not isinstance(check, dict) or not isinstance(check.get("accounts"), dict):
         raise BackendContractError(adapter, "accounts object envelope required")
 
-    accounts = check["accounts"]
-    first = next(iter(accounts.values()), None)
-    if first is None:
-        entitlement: dict = {}
-        features: list = []
-    else:
-        if not isinstance(first, dict):
-            raise BackendContractError(adapter, "account entry object required")
-        raw_entitlement = first.get("entitlement")
-        if raw_entitlement is not None and not isinstance(raw_entitlement, dict):
-            raise BackendContractError(adapter, "entitlement object or null required")
-        entitlement = raw_entitlement or {}
-        raw_features = first.get("features")
-        if raw_features is not None and not isinstance(raw_features, list):
-            raise BackendContractError(adapter, "features list or null required")
-        features = raw_features or []
+    subscription, has_active_subscription, expires_at, features_count = _active_account_projection(
+        check["accounts"]
+    )
 
     email = bounded_string(
         me.get("email"),
@@ -72,25 +121,10 @@ def normalize_account_status(me: Any, check: Any) -> dict:
             redact_value=True,
         ),
         "groups": _bounded_groups(me.get("groups")),
-        "subscription": bounded_string(
-            entitlement.get("subscription_plan"),
-            adapter=adapter,
-            field="subscription_plan",
-            redact_value=True,
-        ),
-        "has_active_subscription": nullable_bool(
-            entitlement.get("has_active_subscription"),
-            adapter=adapter,
-            field="has_active_subscription",
-        ),
-        "expires_at": bounded_string(
-            entitlement.get("expires_at"),
-            adapter=adapter,
-            field="expires_at",
-            redact_value=True,
-            maximum=2_048,
-        ),
-        "features_count": len(features),
+        "subscription": subscription,
+        "has_active_subscription": has_active_subscription,
+        "expires_at": expires_at,
+        "features_count": features_count,
     }
 
 
@@ -109,6 +143,7 @@ def register(
         Returns a dict with: `email` (redacted), `country`, `groups`,
         `subscription` (plan slug, e.g. "plus"/"pro"/None), `has_active_subscription`,
         `expires_at`, and `features_count` (number of entitled features).
+        Multiple account entries are validated and projected onto one active status.
         """
         auth_headers = client.request_headers()
         me = await async_get(
