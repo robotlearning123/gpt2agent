@@ -1,13 +1,16 @@
-name: Publish exact GitHub Release
-description: Validate and publish one closed GitHub Release draft by numeric ID.
+name: Validate or publish exact GitHub Release
+description: Read-only preflight or publication of one closed draft by numeric ID.
 
 inputs:
+  mode:
+    description: Explicit operation, either preflight or publish.
+    required: true
   github-token:
-    description: Fine-scoped GitHub token with contents write permission.
+    description: Fine-scoped token with contents read or write for the selected mode.
     required: true
   immutability-token:
-    description: Fine-scoped GitHub App token with administration read permission.
-    required: true
+    description: Administration-read App token, required only for publication.
+    required: false
   repository:
     description: Repository in owner/name form.
     required: true
@@ -45,9 +48,10 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Validate and publish the exact numeric draft
+    - name: Validate or publish the exact numeric draft
       shell: bash
       env:
+        INPUT_MODE: ${{ inputs.mode }}
         INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
         INPUT_IMMUTABILITY_TOKEN: ${{ inputs.immutability-token }}
         INPUT_REPOSITORY: ${{ inputs.repository }}
@@ -63,18 +67,36 @@ runs:
         INPUT_EVIDENCE: ${{ inputs.evidence }}
       run: |
         set -euo pipefail
-        printf '%s\0%s' "$INPUT_GITHUB_TOKEN" "$INPUT_IMMUTABILITY_TOKEN" |
-          /usr/bin/env -i /usr/bin/python3 -I -S -B \
-          "$GITHUB_ACTION_PATH/publish.py" \
-          --token-stdin \
-          --repository "$INPUT_REPOSITORY" \
-          --release-id "$INPUT_RELEASE_ID" \
-          --tag "$INPUT_TAG" \
-          --tag-object "$INPUT_TAG_OBJECT" \
-          --commit "$INPUT_COMMIT" \
-          --tree "$INPUT_TREE" \
-          --version "$INPUT_VERSION" \
-          --expected-prerelease "$INPUT_EXPECTED_PRERELEASE" \
-          --notes "$INPUT_NOTES" \
-          --dist "$INPUT_DIST" \
+        common_args=(
+          --repository "$INPUT_REPOSITORY"
+          --release-id "$INPUT_RELEASE_ID"
+          --tag "$INPUT_TAG"
+          --tag-object "$INPUT_TAG_OBJECT"
+          --commit "$INPUT_COMMIT"
+          --tree "$INPUT_TREE"
+          --version "$INPUT_VERSION"
+          --expected-prerelease "$INPUT_EXPECTED_PRERELEASE"
+          --notes "$INPUT_NOTES"
+          --dist "$INPUT_DIST"
           --evidence "$INPUT_EVIDENCE"
+        )
+        case "$INPUT_MODE" in
+          preflight)
+            test -z "$INPUT_IMMUTABILITY_TOKEN"
+            printf '%s' "$INPUT_GITHUB_TOKEN" |
+              /usr/bin/env -i /usr/bin/python3 -I -S -B \
+              "$GITHUB_ACTION_PATH/publish.py" \
+              --draft-preflight --token-stdin "${common_args[@]}"
+            ;;
+          publish)
+            test -n "$INPUT_IMMUTABILITY_TOKEN"
+            printf '%s\0%s' "$INPUT_GITHUB_TOKEN" "$INPUT_IMMUTABILITY_TOKEN" |
+              /usr/bin/env -i /usr/bin/python3 -I -S -B \
+              "$GITHUB_ACTION_PATH/publish.py" \
+              --token-stdin "${common_args[@]}"
+            ;;
+          *)
+            echo "unsupported exact GitHub Release mode" >&2
+            exit 1
+            ;;
+        esac
