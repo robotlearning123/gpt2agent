@@ -71,6 +71,7 @@ for required in \
 done
 if [[ $VERIFIER_PYTHON != /* || ! -x $VERIFIER_PYTHON ]]; then usage; fi
 if [[ $GH_BIN != /* || ! -x $GH_BIN || $GIT_BIN != /* || ! -x $GIT_BIN ]]; then usage; fi
+if [[ $GH_BIN != /usr/bin/gh || $GIT_BIN != /usr/bin/git ]]; then usage; fi
 if [[ $GOVERNANCE_POLICY != /* || ! -f $GOVERNANCE_POLICY || -L $GOVERNANCE_POLICY ]]; then
   usage
 fi
@@ -114,6 +115,31 @@ require_canonical_file() {
   fi
 }
 
+require_root_protected_tool() {
+  local supplied=$1
+  local expected_name=$2
+  local owner mode parent parent_owner parent_mode
+  if [[ $supplied != "/usr/bin/$expected_name" || ! -f $supplied || \
+    ! -x $supplied || -L $supplied ]]; then
+    echo "$expected_name is not a trusted system executable" >&2
+    exit 1
+  fi
+  read -r owner mode < <(/usr/bin/stat --format='%u %a' -- "$supplied")
+  if [[ $owner != 0 || ! $mode =~ ^[0-7]{3,4}$ ]] || \
+    (( (8#$mode & 06022) != 0 || (8#$mode & 0111) == 0 )); then
+    echo "$expected_name is not a trusted system executable" >&2
+    exit 1
+  fi
+  for parent in /usr/bin /usr /; do
+    read -r parent_owner parent_mode < <(/usr/bin/stat --format='%u %a' -- "$parent")
+    if [[ $parent_owner != 0 || ! $parent_mode =~ ^[0-7]{3,4}$ ]] || \
+      (( (8#$parent_mode & 0022) != 0 )); then
+      echo "$expected_name parent path is not protected" >&2
+      exit 1
+    fi
+  done
+}
+
 require_canonical_file "$VERIFIER_PYTHON"
 require_canonical_file "$GH_BIN"
 require_canonical_file "$GIT_BIN"
@@ -123,6 +149,8 @@ if [[ $(canonical_file "$IRREVERSIBLE_STATE_FILE") != "$IRREVERSIBLE_STATE_FILE"
   echo "irreversible state path is not canonical" >&2
   exit 1
 fi
+require_root_protected_tool "$GH_BIN" gh
+require_root_protected_tool "$GIT_BIN" git
 CHECKOUT=$(canonical_directory "$CHECKOUT")
 DIST=$(canonical_directory "$DIST")
 
@@ -146,71 +174,30 @@ run_git() {
     "$GIT_BIN" -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
 }
 
+verify_checkout_state() {
+  if [[ $(run_git -C "$CHECKOUT" rev-parse HEAD) != "$COMMIT" ]]; then
+    echo "release checkout commit does not match" >&2
+    exit 1
+  fi
+  if [[ $(run_git -C "$CHECKOUT" rev-parse 'HEAD^{tree}') != "$TREE" ]]; then
+    echo "release checkout tree does not match" >&2
+    exit 1
+  fi
+  if [[ -n $(run_git -C "$CHECKOUT" status --porcelain=v1 --untracked-files=all \
+    --ignored=matching --ignore-submodules=none) ]]; then
+    echo "release checkout must be clean" >&2
+    exit 1
+  fi
+}
+
+# Literal root-protected git establishes the exact reviewed checkout before any
+# checkout-owned Python module is loaded. The documented release boundary
+# trusts the same local user not to mutate these inputs concurrently.
+verify_checkout_state
+
 run_python_clean "$CHECKOUT/scripts/verify_release_tools.py" check \
   --gh "$GH_BIN" --git "$GIT_BIN" --policy "$GOVERNANCE_POLICY"
 run_python_clean "$CHECKOUT/scripts/audit_release_governance.py" --help >/dev/null
-
-if [[ $(run_git -C "$CHECKOUT" rev-parse HEAD) != "$COMMIT" ]]; then
-  echo "release checkout commit does not match" >&2
-  exit 1
-fi
-if [[ $(run_git -C "$CHECKOUT" rev-parse 'HEAD^{tree}') != "$TREE" ]]; then
-  echo "release checkout tree does not match" >&2
-  exit 1
-fi
-if [[ -n $(run_git -C "$CHECKOUT" status --porcelain=v1 --untracked-files=all \
-  --ignored=matching --ignore-submodules=none) ]]; then
-  echo "release checkout must be clean" >&2
-  exit 1
-fi
-
-SCRATCH_ROOT=${TMPDIR:-/tmp}
-if [[ $SCRATCH_ROOT != /* || ! -d $SCRATCH_ROOT || -L $SCRATCH_ROOT ]]; then
-  echo "release scratch root is invalid" >&2
-  exit 1
-fi
-SCRATCH_ROOT=$(canonical_directory "$SCRATCH_ROOT")
-umask 077
-REQUEST_DIR=$(/usr/bin/mktemp -d "$SCRATCH_ROOT/gpt2agent-release-tag.XXXXXXXX")
-/usr/bin/chmod 700 "$REQUEST_DIR"
-TAG_REQUEST="$REQUEST_DIR/tag-request.json"
-VERIFY_REF="refs/release-verification/${TAG}-${REQUEST_DIR##*.}"
-VERIFY_REF_EXPECTED=
-OPERATOR_TOKEN=
-RELEASE_APP_TOKEN=
-REF_MUTATION_ATTEMPTED=0
-
-cleanup() {
-  local status=$?
-  local current=
-  trap - EXIT HUP INT TERM
-  unset OPERATOR_TOKEN RELEASE_APP_TOKEN GH_TOKEN GITHUB_TOKEN \
-    GPT2AGENT_RELEASE_APP_TOKEN
-  if [[ -n $VERIFY_REF_EXPECTED ]]; then
-    current=$(run_git -C "$CHECKOUT" show-ref --hash --verify "$VERIFY_REF" 2>/dev/null || true)
-    if [[ $current == "$VERIFY_REF_EXPECTED" ]]; then
-      run_git -C "$CHECKOUT" update-ref -d "$VERIFY_REF" "$VERIFY_REF_EXPECTED" \
-        >/dev/null 2>&1 || true
-    fi
-  fi
-  /usr/bin/rm -f -- "$TAG_REQUEST"
-  /usr/bin/rmdir -- "$REQUEST_DIR" 2>/dev/null || true
-  exit "$status"
-}
-signal_exit() {
-  if (( REF_MUTATION_ATTEMPTED == 1 )); then
-    printf '%s\n' \
-      "IRREVERSIBLE POST-REF STATE: refs/tags/$TAG creation was interrupted after the mutation attempt. Do not retry, update, or delete blindly; independently inspect the exact remote tag." >&2
-  fi
-  exit 130
-}
-trap cleanup EXIT
-trap signal_exit HUP INT TERM
-
-if run_git -C "$CHECKOUT" show-ref --verify --quiet "$VERIFY_REF"; then
-  echo "unique local release verification ref unexpectedly exists" >&2
-  exit 1
-fi
 
 TOKEN_TIMEOUT=${GPT2AGENT_RELEASE_TOKEN_TIMEOUT_SECONDS-300}
 if [[ ! $TOKEN_TIMEOUT =~ ^[1-9][0-9]{0,2}$ ]] || (( TOKEN_TIMEOUT > 900 )); then
@@ -224,6 +211,64 @@ if [[ $OPERATOR_HOME != /* || ! -d $OPERATOR_HOME || -L $OPERATOR_HOME ]]; then
   exit 1
 fi
 OPERATOR_HOME=$(canonical_directory "$OPERATOR_HOME")
+OPERATOR_UID=$(/usr/bin/id -u)
+read -r OPERATOR_HOME_UID OPERATOR_HOME_MODE < <(
+  /usr/bin/stat --format='%u %a' -- "$OPERATOR_HOME"
+)
+if [[ $OPERATOR_HOME_UID != "$OPERATOR_UID" || \
+  ! $OPERATOR_HOME_MODE =~ ^[0-7]{3,4}$ ]] || \
+  (( (8#$OPERATOR_HOME_MODE & 0022) != 0 )); then
+  echo "operator home is not protected" >&2
+  exit 1
+fi
+
+REQUEST_DIR=
+TAG_REQUEST=
+MAIN_GIT_DIR=
+VERIFY_REF=
+OPERATOR_TOKEN=
+RELEASE_APP_TOKEN=
+REF_MUTATION_ATTEMPTED=0
+
+cleanup() {
+  local status=$?
+  trap - EXIT HUP INT TERM
+  unset OPERATOR_TOKEN RELEASE_APP_TOKEN GH_TOKEN GITHUB_TOKEN \
+    GPT2AGENT_RELEASE_APP_TOKEN
+  if [[ -n $REQUEST_DIR && \
+    $REQUEST_DIR == "$OPERATOR_HOME"/.gpt2agent-release-tag.* && \
+    -d $REQUEST_DIR && ! -L $REQUEST_DIR ]]; then
+    /usr/bin/chmod -R u+w -- "$REQUEST_DIR" 2>/dev/null || true
+    /usr/bin/rm -rf -- "$REQUEST_DIR"
+  fi
+  exit "$status"
+}
+signal_exit() {
+  if (( REF_MUTATION_ATTEMPTED == 1 )); then
+    printf '%s\n' \
+      "IRREVERSIBLE POST-REF STATE: refs/tags/$TAG creation was interrupted after the mutation attempt. Do not retry, update, or delete blindly; independently inspect the exact remote tag." >&2
+  fi
+  exit 130
+}
+trap cleanup EXIT
+trap signal_exit HUP INT TERM
+
+# Ignore ambient TMPDIR. This fresh, same-user-owned 0700 directory is the
+# only scratch root for the tag request and fetched-main ancestry proof.
+umask 077
+REQUEST_DIR=$(/usr/bin/mktemp -d "$OPERATOR_HOME/.gpt2agent-release-tag.XXXXXXXX")
+/usr/bin/chmod 700 "$REQUEST_DIR"
+REQUEST_DIR=$(canonical_directory "$REQUEST_DIR")
+read -r REQUEST_UID REQUEST_MODE < <(/usr/bin/stat --format='%u %a' -- "$REQUEST_DIR")
+if [[ $REQUEST_UID != "$OPERATOR_UID" || $REQUEST_MODE != 700 || \
+  ! -d $REQUEST_DIR || -L $REQUEST_DIR ]]; then
+  echo "release scratch root is invalid" >&2
+  exit 1
+fi
+TAG_REQUEST="$REQUEST_DIR/tag-request.json"
+MAIN_GIT_DIR="$REQUEST_DIR/main.git"
+VERIFY_REF="refs/release-verification/${TAG}-${REQUEST_DIR##*.}"
+
 unset GH_TOKEN GITHUB_TOKEN GPT2AGENT_RELEASE_APP_TOKEN GH_HOST GH_CONFIG_DIR GH_DEBUG
 OPERATOR_TOKEN=$(/usr/bin/env -i \
   GH_PROMPT_DISABLED=1 HOME="$OPERATOR_HOME" LC_ALL=C PATH=/usr/bin:/bin \
@@ -237,10 +282,31 @@ fi
 # The immutable full-SHA action gate runs before asking for the mutation
 # credential. Missing, inaccessible, or byte-mismatched pins therefore fail
 # without acquiring a release App token.
-run_python_operator "$CHECKOUT/scripts/verify_remote_action_pin.py" \
+ACTION_PIN=$(run_python_operator "$CHECKOUT/scripts/verify_remote_action_pin.py" \
   --gh "$GH_BIN" --repository "$REPOSITORY" \
   --workflow "$CHECKOUT/.github/workflows/release.yml" \
-  --action-directory "$CHECKOUT/.github/actions/publish-exact-github-release"
+  --action-directory "$CHECKOUT/.github/actions/publish-exact-github-release" \
+  --print-pin)
+if [[ ! $ACTION_PIN =~ ^[0-9a-f]{40}$ ]]; then
+  echo "reviewed publication action pin is invalid" >&2
+  exit 1
+fi
+
+run_git init --bare --quiet "$MAIN_GIT_DIR"
+fetch_and_verify_action_on_main() {
+  run_git --git-dir="$MAIN_GIT_DIR" \
+    -c credential.helper= -c core.askPass= -c core.hooksPath=/dev/null \
+    -c protocol.file.allow=never -c transfer.fsckObjects=true \
+    fetch --force --no-tags --no-write-fetch-head \
+    "https://github.com/$REPOSITORY.git" \
+    "+refs/heads/main:refs/remotes/origin/main"
+  if ! run_git --git-dir="$MAIN_GIT_DIR" merge-base --is-ancestor \
+    "$ACTION_PIN" refs/remotes/origin/main; then
+    echo "reviewed publication action pin is not an ancestor of fetched origin/main" >&2
+    exit 1
+  fi
+}
+fetch_and_verify_action_on_main
 
 if ! IFS= read -r -s -t "$TOKEN_TIMEOUT" \
   -p "Short-lived release App installation token: " RELEASE_APP_TOKEN; then
@@ -251,6 +317,10 @@ printf '\n' >&2
 if [[ -z $RELEASE_APP_TOKEN || ${#RELEASE_APP_TOKEN} -gt 4096 || \
   $RELEASE_APP_TOKEN == *[$'\r\n\t ']* ]]; then
   echo "release App token is invalid" >&2
+  exit 1
+fi
+if [[ $RELEASE_APP_TOKEN == "$OPERATOR_TOKEN" ]]; then
+  echo "operator and release App tokens must be distinct" >&2
   exit 1
 fi
 
@@ -307,6 +377,10 @@ while IFS= read -r remote_ref; do
   fi
 done <<< "$MATCHING_REFS"
 
+# Refresh remote main and source identity at the final pre-object boundary.
+fetch_and_verify_action_on_main
+verify_checkout_state
+
 if ! TAG_OBJECT_SHA=$(gh_app --method POST \
   "repos/$REPOSITORY/git/tags" --input "$TAG_REQUEST" --jq .sha); then
   echo "annotated tag object creation failed before ref mutation" >&2
@@ -314,6 +388,15 @@ if ! TAG_OBJECT_SHA=$(gh_app --method POST \
 fi
 if [[ ! $TAG_OBJECT_SHA =~ ^[0-9a-f]{40}$ ]]; then
   echo "created annotated tag object is invalid" >&2
+  exit 1
+fi
+
+# No checkout-owned code or mutable local input is consumed between this final
+# same-user trust-boundary recheck and the one irreversible ref POST.
+verify_checkout_state
+if ! run_git --git-dir="$MAIN_GIT_DIR" merge-base --is-ancestor \
+  "$ACTION_PIN" refs/remotes/origin/main; then
+  echo "reviewed publication action pin is not an ancestor of fetched origin/main" >&2
   exit 1
 fi
 
@@ -369,15 +452,15 @@ if [[ $INDEPENDENT_REF == $'refs/tags/'"$TAG"$'\ttag\t'"$TAG_OBJECT_SHA" && \
 fi
 
 FETCH_OK=0
-if run_git -C "$CHECKOUT" \
+if run_git --git-dir="$MAIN_GIT_DIR" \
   -c credential.helper= -c core.askPass= -c core.hooksPath=/dev/null \
   -c protocol.file.allow=never -c transfer.fsckObjects=true \
   fetch --no-tags --no-write-fetch-head \
   "https://github.com/$REPOSITORY.git" "refs/tags/$TAG:$VERIFY_REF"; then
-  VERIFY_REF_EXPECTED=$(run_git -C "$CHECKOUT" rev-parse "$VERIFY_REF")
-  if [[ $(run_git -C "$CHECKOUT" cat-file -t "$VERIFY_REF") == tag && \
-    $VERIFY_REF_EXPECTED == "$TAG_OBJECT_SHA" && \
-    $(run_git -C "$CHECKOUT" rev-parse "$VERIFY_REF^{}") == "$COMMIT" ]]; then
+  FETCHED_TAG_OBJECT=$(run_git --git-dir="$MAIN_GIT_DIR" rev-parse "$VERIFY_REF")
+  if [[ $(run_git --git-dir="$MAIN_GIT_DIR" cat-file -t "$VERIFY_REF") == tag && \
+    $FETCHED_TAG_OBJECT == "$TAG_OBJECT_SHA" && \
+    $(run_git --git-dir="$MAIN_GIT_DIR" rev-parse "$VERIFY_REF^{}") == "$COMMIT" ]]; then
     FETCH_OK=1
   fi
 fi

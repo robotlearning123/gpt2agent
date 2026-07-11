@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import stat
 import subprocess
@@ -608,6 +609,41 @@ def test_receipt_is_closed_canonical_secret_free_and_sha256_bound(tmp_path: Path
     captured = capsys.readouterr()
     assert secret not in captured.out
     assert secret not in captured.err
+
+
+@pytest.mark.parametrize("mode", (0o400, 0o640))
+def test_receipt_reader_requires_exact_mode_0600(tmp_path: Path, mode: int) -> None:
+    from scripts.verify_account_receipt import ReceiptError, _read_receipt
+
+    *_unused, receipt_path, _digest = _create_receipt_fixture(tmp_path)
+    receipt_path.chmod(mode)
+
+    with pytest.raises(ReceiptError, match="protected regular file"):
+        _read_receipt(receipt_path)
+
+
+def test_receipt_reader_rejects_hard_links(tmp_path: Path) -> None:
+    from scripts.verify_account_receipt import ReceiptError, _read_receipt
+
+    *_unused, receipt_path, _digest = _create_receipt_fixture(tmp_path)
+    receipt_path.with_suffix(".hardlink.json").hardlink_to(receipt_path)
+
+    with pytest.raises(ReceiptError, match="protected regular file"):
+        _read_receipt(receipt_path)
+
+
+def test_receipt_reader_requires_current_user_ownership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.verify_account_receipt as receipt_module
+
+    *_unused, receipt_path, _digest = _create_receipt_fixture(tmp_path)
+    current_uid = os.getuid()
+    monkeypatch.setattr(receipt_module.os, "getuid", lambda: current_uid + 1)
+
+    with pytest.raises(receipt_module.ReceiptError, match="protected regular file"):
+        receipt_module._read_receipt(receipt_path)
 
 
 def test_checkout_validation_rejects_wrong_or_dirty_state_without_name_leak(

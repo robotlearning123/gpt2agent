@@ -46,6 +46,8 @@ def _make_harness(tmp_path: Path) -> tuple[list[str], dict[str, str], list[str]]
     event_log = tmp_path / "events"
     poison_log = tmp_path / "poison-events"
     mode_file = tmp_path / "mode"
+    operator_home = tmp_path / "operator-home"
+    operator_home.mkdir(mode=0o700)
     fake_python = trusted_bin / "trusted-python"
     fake_gh = trusted_bin / "gh"
     fake_git = trusted_bin / "git"
@@ -75,6 +77,9 @@ def _make_harness(tmp_path: Path) -> tuple[list[str], dict[str, str], list[str]]
     case "${FAKE_MODE-}" in
       action-unresolved|action-mismatch|action-redirect|action-auth-fail) exit 21;;
     esac
+    if [[ " $* " == *' --print-pin '* ]]; then
+      printf '%s\n' '15f56b2c16c5923e81df9428c69256237a004c20'
+    fi
     ;;
   *'verify_account_receipt.py prepare-tag'*)
     printf 'python-prepare token=%s\n' "${GH_TOKEN-unset}" >> "$EVENT_LOG"
@@ -82,6 +87,7 @@ def _make_harness(tmp_path: Path) -> tuple[list[str], dict[str, str], list[str]]
     while [ "$#" -gt 0 ]; do
       if [ "$1" = --output ]; then output=$2; shift 2; else shift; fi
     done
+    printf 'python-prepare-output=%s\n' "$output" >> "$EVENT_LOG"
     printf '%s\n' '{"message":"closed","object":"1111111111111111111111111111111111111111","tag":"v0.0.12","type":"commit"}' > "$output"
     ;;
   *) exit 97 ;;
@@ -149,11 +155,38 @@ esac
 set -euo pipefail
 EVENT_LOG={shlex.quote(str(event_log))}
 FAKE_MODE=$(/usr/bin/cat {shlex.quote(str(mode_file))})
-printf 'git-env token=%s dir=%s worktree=%s ssh=%s path=%s\n' "${{GH_TOKEN-unset}}" "${{GIT_DIR-unset}}" "${{GIT_WORK_TREE-unset}}" "${{GIT_SSH_COMMAND-unset}}" "${{PATH-unset}}" >> "$EVENT_LOG"
+printf 'git-env token=%s dir=%s worktree=%s ssh=%s path=%s global=%s nosystem=%s system=%s\n' "${{GH_TOKEN-unset}}" "${{GIT_DIR-unset}}" "${{GIT_WORK_TREE-unset}}" "${{GIT_SSH_COMMAND-unset}}" "${{PATH-unset}}" "${{GIT_CONFIG_GLOBAL-unset}}" "${{GIT_CONFIG_NOSYSTEM-unset}}" "${{GIT_CONFIG_SYSTEM-unset}}" >> "$EVENT_LOG"
+if [[ " $* " != *' -c core.fsmonitor=false '* || \
+  " $* " != *' -c core.hooksPath=/dev/null '* ]]; then
+  printf '%s\n' 'git-missing-safe-config' >> "$EVENT_LOG"
+  exit 100
+fi
 case "$*" in
+  *'init --bare --quiet'*) ;;
+  *'fetch --force --no-tags --no-write-fetch-head'*'+refs/heads/main:refs/remotes/origin/main'*)
+    ref=${{@: -1}}
+    printf 'git-main-fetch %s\n' "${{ref#*:}}" >> "$EVENT_LOG"
+    ;;
+  *'merge-base --is-ancestor 15f56b2c16c5923e81df9428c69256237a004c20 refs/remotes/origin/main'*)
+    if [ "${{FAKE_MODE-}}" = action-not-on-main ]; then exit 1; fi
+    ;;
   *'rev-parse HEAD^{{tree}}'*) printf '%s\n' '{TREE}' ;;
-  *'rev-parse HEAD'*) printf '%s\n' '{COMMIT}' ;;
-  *'status --porcelain=v1'*) exit 0 ;;
+  *'rev-parse HEAD'*)
+    checks=$(/usr/bin/grep -c '^git-checkout-head$' "$EVENT_LOG" || true)
+    printf '%s\n' 'git-checkout-head' >> "$EVENT_LOG"
+    if [ "${{FAKE_MODE-}}" = checkout-drift ] && [ "$checks" -gt 0 ]; then
+      printf '%s\n' '{MISMATCH_SHA}'
+    else
+      printf '%s\n' '{COMMIT}'
+    fi
+    ;;
+  *'status --porcelain=v1'*)
+    checks=$(/usr/bin/grep -c '^git-checkout-status$' "$EVENT_LOG" || true)
+    printf '%s\n' 'git-checkout-status' >> "$EVENT_LOG"
+    if [ "${{FAKE_MODE-}}" = checkout-dirty ] && [ "$checks" -gt 0 ]; then
+      printf '%s\n' ' M reviewed.py'
+    fi
+    ;;
   *'show-ref --verify --quiet refs/release-verification/'*) exit 1 ;;
   *'fetch --no-tags --no-write-fetch-head'*)
     ref=${{@: -1}}
@@ -190,8 +223,20 @@ esac
     policy = tmp_path / "reviewed-policy.json"
     policy.write_text("{}\n", encoding="utf-8")
     irreversible_state = tmp_path / "irreversible-state"
+    harness_coordinator = tmp_path / "create-release-tag-test-harness.sh"
+    harness_source = COORDINATOR.read_text(encoding="utf-8")
+    exact_guard = "if [[ $GH_BIN != /usr/bin/gh || $GIT_BIN != /usr/bin/git ]]; then usage; fi"
+    tool_checks = (
+        'require_root_protected_tool "$GH_BIN" gh\n'
+        'require_root_protected_tool "$GIT_BIN" git'
+    )
+    assert harness_source.count(exact_guard) == 1
+    assert harness_source.count(tool_checks) == 1
+    harness_source = harness_source.replace(exact_guard, ": # test-only injected tools", 1)
+    harness_source = harness_source.replace(tool_checks, ": # test-only trusted tools", 1)
+    _write_executable(harness_coordinator, harness_source)
     command = [
-        str(COORDINATOR),
+        str(harness_coordinator),
         "--python",
         str(fake_python),
         "--gh",
@@ -237,12 +282,16 @@ esac
         "EVENT_LOG": str(event_log),
         "POISON_LOG": str(poison_log),
         "TMPDIR": str(tmp_path),
+        "HOME": str(operator_home),
         "GH_HOST": "attacker.invalid",
         "GH_CONFIG_DIR": str(tmp_path / "attacker-gh-config"),
         "GH_DEBUG": "api",
         "GIT_DIR": str(tmp_path / "attacker-git-dir"),
         "GIT_WORK_TREE": str(tmp_path / "attacker-worktree"),
         "GIT_SSH_COMMAND": "attacker-git-ssh-command",
+        "GIT_CONFIG_GLOBAL": str(tmp_path / "attacker-global-gitconfig"),
+        "GIT_CONFIG_NOSYSTEM": "0",
+        "GIT_CONFIG_SYSTEM": str(tmp_path / "attacker-system-gitconfig"),
     }
     for key in ("GH_TOKEN", "GITHUB_TOKEN", "GPT2AGENT_RELEASE_APP_TOKEN"):
         environment.pop(key, None)
@@ -256,6 +305,8 @@ def _run_harness(
     token_timeout: str | None = None,
     terminate_at_prompt: bool = False,
     omit_policy: bool = False,
+    app_token: str = APP_TOKEN,
+    tmpdir: str | None = None,
 ) -> tuple[list[str], dict[str, str], list[str]]:
     command, environment, logs = _make_harness(tmp_path)
     event_log, poison_log, mode_file = map(Path, logs)
@@ -266,6 +317,8 @@ def _run_harness(
     if omit_policy:
         index = command.index("--governance-policy")
         del command[index : index + 2]
+    if tmpdir is not None:
+        environment["TMPDIR"] = tmpdir
     if terminate_at_prompt:
         process = subprocess.Popen(
             command,
@@ -293,7 +346,7 @@ def _run_harness(
             command,
             cwd=PROJECT_ROOT,
             env=environment,
-            input=APP_TOKEN + "\n",
+            input=app_token + "\n",
             capture_output=True,
             text=True,
             check=False,
@@ -311,7 +364,19 @@ def test_coordinator_closes_governance_action_and_tag_sequence(tmp_path: Path) -
     events, result, poison = _run_harness(tmp_path)
 
     assert result["returncode"] == "0", result["stderr"]
-    significant = [event for event in events if not event.startswith(("gh-env", "git-env"))]
+    significant = [
+        event
+        for event in events
+        if not event.startswith(
+            (
+                "gh-env",
+                "git-env",
+                "git-checkout-",
+                "git-main-fetch",
+                "python-prepare-output=",
+            )
+        )
+    ]
     assert significant[:11] == [
         "python-tools token=unset",
         "python-governance token=unset",
@@ -355,6 +420,19 @@ def test_app_token_calls_ignore_path_and_ambient_gh_or_git_environment(tmp_path:
     assert poison == []
 
 
+def test_every_git_call_disables_executable_local_config(tmp_path: Path) -> None:
+    events, result, _ = _run_harness(tmp_path)
+
+    assert result["returncode"] == "0", result["stderr"]
+    assert "git-missing-safe-config" not in events
+    git_environments = [event for event in events if event.startswith("git-env")]
+    assert git_environments
+    assert all(
+        "global=/dev/null nosystem=1 system=/dev/null" in event
+        for event in git_environments
+    )
+
+
 @pytest.mark.parametrize(
     "mode",
     (
@@ -386,6 +464,71 @@ def test_reviewed_governance_policy_is_mandatory(tmp_path: Path) -> None:
 
     assert result["returncode"] == "2"
     assert events == []
+
+
+def test_production_coordinator_rejects_injected_gh_and_git_before_execution(
+    tmp_path: Path,
+) -> None:
+    command, environment, logs = _make_harness(tmp_path)
+    event_log, _poison_log, mode_file = map(Path, logs)
+    mode_file.write_text("ok\n", encoding="utf-8")
+    command[0] = str(COORDINATOR)
+
+    result = subprocess.run(
+        command,
+        cwd=PROJECT_ROOT,
+        env=environment,
+        input=APP_TOKEN + "\n",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert not event_log.exists()
+
+
+def test_ambient_tmpdir_is_ignored_for_owner_private_scratch(tmp_path: Path) -> None:
+    ambient = tmp_path / "ambient-tmp"
+    ambient.mkdir(mode=0o777)
+    ambient.chmod(0o777)
+
+    events, result, _ = _run_harness(tmp_path, tmpdir=str(ambient))
+
+    assert result["returncode"] == "0", result["stderr"]
+    assert list(ambient.iterdir()) == []
+    output_events = [event for event in events if event.startswith("python-prepare-output=")]
+    assert len(output_events) == 1
+    assert not output_events[0].startswith(f"python-prepare-output={ambient}/")
+
+
+def test_identical_operator_and_release_app_tokens_fail_before_mutation(tmp_path: Path) -> None:
+    events, result, _ = _run_harness(tmp_path, app_token=OPERATOR_TOKEN)
+
+    assert result["returncode"] != "0"
+    assert "must be distinct" in result["stderr"]
+    assert not any(event.startswith(("gh-tag", "gh-ref")) for event in events)
+
+
+def test_action_pin_must_be_on_fetched_origin_main_before_mutation(tmp_path: Path) -> None:
+    events, result, _ = _run_harness(tmp_path, mode="action-not-on-main")
+
+    assert result["returncode"] != "0"
+    assert any(event.startswith("git-main-fetch") for event in events)
+    assert "not an ancestor" in result["stderr"]
+    assert not any(event.startswith(("gh-tag", "gh-ref")) for event in events)
+
+
+@pytest.mark.parametrize("mode", ("checkout-drift", "checkout-dirty"))
+def test_checkout_identity_and_cleanliness_are_rechecked_before_ref_mutation(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    events, result, _ = _run_harness(tmp_path, mode=mode)
+
+    assert result["returncode"] != "0"
+    assert sum(event == "git-checkout-head" for event in events) >= 2
+    assert not any(event.startswith("gh-ref") for event in events)
 
 
 @pytest.mark.parametrize("mode", ("ref-ambiguous-success", "readback-fail"))
@@ -454,6 +597,10 @@ def test_coordinator_source_never_updates_or_deletes_a_remote_ref() -> None:
     governance_import_preflight = source.index(
         'run_python_clean "$CHECKOUT/scripts/audit_release_governance.py" --help'
     )
+    first_checkout_state = source.index(
+        "verify_checkout_state\n\nrun_python_clean \"$CHECKOUT/scripts/verify_release_tools.py\""
+    )
+    tools = source.index("scripts/verify_release_tools.py")
     governance = source.index(
         'run_python_operator "$CHECKOUT/scripts/audit_release_governance.py"'
     )
@@ -463,7 +610,9 @@ def test_coordinator_source_never_updates_or_deletes_a_remote_ref() -> None:
     ref_post = source.index('"repos/$REPOSITORY/git/refs"')
     fetch = source.index("fetch --no-tags --no-write-fetch-head")
     assert (
-        governance_import_preflight
+        first_checkout_state
+        < tools
+        < governance_import_preflight
         < action_pin
         < prompt
         < final_ci
@@ -478,6 +627,8 @@ def test_coordinator_source_never_updates_or_deletes_a_remote_ref() -> None:
     assert "git tag" not in source
     assert "--method DELETE" not in source
     assert "--method PATCH" not in source
+    assert "${TMPDIR" not in source
+    assert '[[ $GH_BIN != /usr/bin/gh || $GIT_BIN != /usr/bin/git ]]' in source
 
 
 def test_coordinator_ignores_bash_startup_environment(tmp_path: Path) -> None:

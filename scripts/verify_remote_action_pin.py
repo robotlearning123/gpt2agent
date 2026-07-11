@@ -336,7 +336,7 @@ def verify_action(
     repository: str,
     workflow: Path,
     action_directory: Path,
-) -> None:
+) -> str:
     if not _REPOSITORY_RE.fullmatch(repository):
         raise ActionVerificationError("repository must be an owner/name pair")
     if not gh.is_absolute():
@@ -369,6 +369,7 @@ def verify_action(
         )
         if _remote_file(remote_payload, len(local)) != local:
             raise ActionVerificationError(f"remote {name} does not match the reviewed local file")
+    return pin
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -377,9 +378,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repository", required=True)
     parser.add_argument("--workflow", type=Path, required=True)
     parser.add_argument("--action-directory", type=Path, required=True)
+    parser.add_argument("--print-pin", action="store_true")
     args = parser.parse_args(argv)
     try:
-        verify_action(
+        pin = verify_action(
             gh=args.gh,
             repository=args.repository,
             workflow=args.workflow,
@@ -388,6 +390,8 @@ def main(argv: list[str] | None = None) -> int:
     except ActionVerificationError as exc:
         print(f"publication action verification failed: {exc}", file=sys.stderr)
         return 1
+    if args.print_pin:
+        print(pin)
     return 0
 
 

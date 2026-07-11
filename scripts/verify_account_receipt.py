@@ -1310,14 +1310,32 @@ def _project_version(checkout: Path) -> str:
 
 def _read_receipt(path: Path) -> tuple[dict[str, Any], bytes]:
     path = Path(path)
-    if path.is_symlink() or not path.is_file():
-        raise ReceiptError("account receipt must be a regular file")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        if path.stat().st_size > _MAX_RECEIPT_BYTES:
+        descriptor = os.open(path, flags)
+    except OSError:
+        raise ReceiptError("account receipt must be a protected regular file") from None
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1
+        ):
+            raise ReceiptError("account receipt must be a protected regular file")
+        if metadata.st_size > _MAX_RECEIPT_BYTES:
             raise ReceiptError("account receipt is too large")
-        payload = path.read_bytes()
+        with os.fdopen(descriptor, "rb", closefd=True) as receipt_file:
+            descriptor = -1
+            payload = receipt_file.read(_MAX_RECEIPT_BYTES + 1)
+        if len(payload) > _MAX_RECEIPT_BYTES:
+            raise ReceiptError("account receipt is too large")
     except OSError:
         raise ReceiptError("account receipt could not be read") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     try:
         receipt = json.loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError):

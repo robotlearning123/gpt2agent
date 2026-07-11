@@ -11,7 +11,10 @@ from pathlib import Path
 
 
 _MAX_POLICY_BYTES = 4 * 1024 * 1024
-_TOOL_DIRECTORIES = frozenset({Path("/usr/bin"), Path("/usr/local/bin")})
+_TOOL_PATHS = {
+    "gh": Path("/usr/bin/gh"),
+    "git": Path("/usr/bin/git"),
+}
 
 
 class ToolValidationError(ValueError):
@@ -35,8 +38,9 @@ def validate_tool(path: Path, expected_name: str) -> None:
     """Require one canonical root-owned executable in a protected /usr bin dir."""
     resolved, metadata = _canonical(path, expected_name)
     if (
-        resolved.name != expected_name
-        or resolved.parent not in _TOOL_DIRECTORIES
+        _TOOL_PATHS.get(expected_name) != resolved
+        or resolved.name != expected_name
+        or resolved.parent != Path("/usr/bin")
         or not stat.S_ISREG(metadata.st_mode)
         or metadata.st_uid != 0
         or metadata.st_mode & 0o6022

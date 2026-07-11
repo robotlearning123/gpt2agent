@@ -64,6 +64,18 @@ def test_tool_check_rejects_user_owned_or_noncanonical_tools(tmp_path: Path) -> 
         assert result.stdout == ""
 
 
+def test_tool_check_accepts_only_exact_usr_bin_gh_and_git(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.verify_release_tools as tools
+
+    metadata = os.stat("/usr/bin/git")
+    monkeypatch.setattr(tools, "_canonical", lambda path, _label: (path, metadata))
+
+    with pytest.raises(tools.ToolValidationError, match="trusted system executable"):
+        tools.validate_tool(Path("/usr/local/bin/git"), "git")
+
+
 def test_tool_check_requires_a_protected_nonlinked_reviewed_policy() -> None:
     with tempfile.TemporaryDirectory(
         prefix=".gpt2agent-policy-test-",
@@ -239,6 +251,33 @@ def test_remote_action_pin_verifies_full_sha_and_exact_bytes(tmp_path: Path) -> 
         in events
     )
     assert result.stdout == ""
+
+
+def test_remote_action_pin_can_return_the_exact_reviewed_pin(tmp_path: Path) -> None:
+    fake_gh, workflow, environment = _action_fixture(tmp_path)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ACTION_CHECK),
+            "--gh",
+            str(fake_gh),
+            "--repository",
+            "robotlearning123/gpt2agent",
+            "--workflow",
+            str(workflow),
+            "--action-directory",
+            str(ACTION_DIRECTORY),
+            "--print-pin",
+        ],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"{ACTION_PIN}\n"
 
 
 def test_repository_release_workflow_has_one_executable_exact_action_pin() -> None:
