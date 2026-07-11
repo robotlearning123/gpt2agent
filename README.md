@@ -402,6 +402,15 @@ directory below the canonical runner home, and binds the copy to the source
 executable digest. A local operator must start from a separately reviewed full
 runtime artifact, verify its published artifact checksum, and record the
 canonical extracted executable's SHA-256 before making the private copy below.
+For v0.0.12, the reviewed local source is the
+[`actions/python-versions` `3.12.13-27650778726` release](https://github.com/actions/python-versions/releases/tag/3.12.13-27650778726),
+asset `python-3.12.13-linux-24.04-x64.tar.gz`. Its archive SHA-256 is
+`ce7d511228f095b5ea1ad5568543388870f5964688303f9ddc24ba06c336bfba`;
+after extraction, the canonical `./bin/python3.12` SHA-256 is
+`edcdaf07e49bb241cbccb0f18fdb2c8f2e6e1be36a583fce9fc703894d814238`.
+Verify the archive before extraction and both digests before setting the two
+`GPT2AGENT_TRUSTED_PYTHON_*` variables. These values authorize only that exact
+Ubuntu 24.04 x64 artifact, not an arbitrary CPython 3.12.13 installation.
 The bootstrap then accepts only the reviewed nine-distribution closure, exact
 hashes, binary wheels, and the official PyPI index, and verifies every installed
 file and import origin. It emits only the trusted `site-packages` path on stdout.
@@ -441,9 +450,13 @@ tag and ref. Never substitute the operator's user token for the App token.
 ```bash
 set -euo pipefail
 set +x
-ROOT=$(git rev-parse --show-toplevel)
+GH_BIN=/usr/bin/gh
+GIT_BIN=/usr/bin/git
+test -x "$GH_BIN" && test ! -L "$GH_BIN"
+test -x "$GIT_BIN" && test ! -L "$GIT_BIN"
+ROOT=$("$GIT_BIN" rev-parse --show-toplevel)
 cd "$ROOT"
-git fetch --no-tags origin +main:refs/remotes/origin/main
+"$GIT_BIN" fetch --no-tags origin +main:refs/remotes/origin/main
 : "${GPT2AGENT_RELEASE_GOVERNANCE_POLICY:?set this to the reviewed policy JSON}"
 : "${GPT2AGENT_TRUSTED_PYTHON_BASE:?set this to the canonical base extracted from the reviewed CPython 3.12.13 Linux x86_64 artifact}"
 : "${GPT2AGENT_TRUSTED_PYTHON_SHA256:?set this to the independently recorded canonical executable SHA-256}"
@@ -464,25 +477,25 @@ SOURCE_PYTHON_SHA256=${SOURCE_PYTHON_SHA256%% *}
 test "$SOURCE_PYTHON_SHA256" = "$GPT2AGENT_TRUSTED_PYTHON_SHA256"
 unset GH_TOKEN GITHUB_TOKEN GPT2AGENT_RELEASE_APP_TOKEN
 read -r -p "Merged release PR number: " PR_NUMBER
-RELEASE_SHA=$(gh pr view "$PR_NUMBER" --json mergeCommit,state \
+RELEASE_SHA=$("$GH_BIN" pr view "$PR_NUMBER" --json mergeCommit,state \
   --jq 'select(.state == "MERGED") | .mergeCommit.oid')
 case "$RELEASE_SHA" in (*[!0-9a-f]*|'') exit 1;; esac
 test "${#RELEASE_SHA}" -eq 40
-git merge-base --is-ancestor "$RELEASE_SHA" origin/main
-test -z "$(git status --porcelain=v1 --untracked-files=all \
+"$GIT_BIN" merge-base --is-ancestor "$RELEASE_SHA" origin/main
+test -z "$("$GIT_BIN" status --porcelain=v1 --untracked-files=all \
   --ignored=matching --ignore-submodules=none)"
 
-START_BRANCH=$(git symbolic-ref --quiet --short HEAD || true)
-START_COMMIT=$(git rev-parse HEAD)
+START_BRANCH=$("$GIT_BIN" symbolic-ref --quiet --short HEAD || true)
+START_COMMIT=$("$GIT_BIN" rev-parse HEAD)
 TRUSTED_HOME=
 RUNTIME_ROOT=
 cleanup_release_runtime() {
   status=$?
   trap - EXIT HUP INT TERM
   if [ -n "$START_BRANCH" ]; then
-    git switch -- "$START_BRANCH" >/dev/null || status=1
+    "$GIT_BIN" switch -- "$START_BRANCH" >/dev/null || status=1
   else
-    git switch --detach "$START_COMMIT" >/dev/null || status=1
+    "$GIT_BIN" switch --detach "$START_COMMIT" >/dev/null || status=1
   fi
   if [ -n "$RUNTIME_ROOT" ]; then
     case "$RUNTIME_ROOT" in
@@ -502,9 +515,9 @@ cleanup_release_runtime() {
 trap cleanup_release_runtime EXIT
 trap 'exit 130' HUP INT TERM
 
-git switch --detach "$RELEASE_SHA"
-test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
-test -z "$(git status --porcelain=v1 --untracked-files=all \
+"$GIT_BIN" switch --detach "$RELEASE_SHA"
+test "$("$GIT_BIN" rev-parse HEAD)" = "$RELEASE_SHA"
+test -z "$("$GIT_BIN" status --porcelain=v1 --untracked-files=all \
   --ignored=matching --ignore-submodules=none)"
 
 TRUSTED_HOME=$(realpath -e -- "$HOME")
@@ -532,13 +545,14 @@ SITE_PACKAGES=$(scripts/bootstrap_account_gate.sh \
 VERIFIER_PYTHON="$VENV/bin/python"
 test -x "$VERIFIER_PYTHON"
 
-REPOSITORY=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+REPOSITORY=$("$GH_BIN" repo view --json nameWithOwner --jq .nameWithOwner)
 "$VERIFIER_PYTHON" -I -S -B scripts/audit_release_governance.py \
   --live "$REPOSITORY" \
-  --policy "$GPT2AGENT_RELEASE_GOVERNANCE_POLICY"
+  --policy "$GPT2AGENT_RELEASE_GOVERNANCE_POLICY" \
+  --gh "$GH_BIN"
 
 CANDIDATE_JSON="$RUNTIME_ROOT/candidate.json"
-GH_TOKEN="$(gh auth token)" "$VERIFIER_PYTHON" -I -S -B \
+GH_TOKEN="$("$GH_BIN" auth token)" "$VERIFIER_PYTHON" -I -S -B \
   scripts/verify_main_ci.py \
   --repository "$REPOSITORY" --commit "$RELEASE_SHA" \
   --print-candidate-json --attempts 180 --delay 10 >"$CANDIDATE_JSON"
@@ -555,8 +569,8 @@ CI_ARTIFACT_DIGEST=$(candidate_field artifact_digest)
 CI_ARTIFACT_SIZE=$(candidate_field artifact_size)
 CI_ARTIFACT_EXPIRES_AT=$(candidate_field artifact_expires_at)
 
-COMMIT=$(git rev-parse HEAD)
-TREE=$(git rev-parse 'HEAD^{tree}')
+COMMIT=$("$GIT_BIN" rev-parse HEAD)
+TREE=$("$GIT_BIN" rev-parse 'HEAD^{tree}')
 VERSION=$("$VERIFIER_PYTHON" -I -S -B -c \
   'import pathlib,sys,tomllib; print(tomllib.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["project"]["version"])' \
   "$ROOT/pyproject.toml")
@@ -566,7 +580,7 @@ DIST="$ROOT/../gpt2agent-$TAG-$COMMIT-main-ci-candidate"
 RECEIPT="$ROOT/../gpt2agent-$TAG-$COMMIT.account-receipt.json"
 test ! -e "$DIST" && test ! -L "$DIST"
 test ! -e "$RECEIPT" && test ! -L "$RECEIPT"
-GH_TOKEN="$(gh auth token)" gh run download "$CI_RUN_ID" \
+GH_TOKEN="$("$GH_BIN" auth token)" "$GH_BIN" run download "$CI_RUN_ID" \
   --repo "$REPOSITORY" --name "$CI_ARTIFACT_NAME" --dir "$DIST"
 
 CREATE_SUMMARY="$RUNTIME_ROOT/create-summary.txt"
@@ -598,7 +612,9 @@ VERIFY_SUMMARY="$RUNTIME_ROOT/verify-summary.txt"
 cmp --silent "$CREATE_SUMMARY" "$VERIFY_SUMMARY"
 
 scripts/create_release_tag.sh \
-  --python "$VERIFIER_PYTHON" --checkout "$ROOT" --dist "$DIST" \
+  --python "$VERIFIER_PYTHON" --gh "$GH_BIN" --git "$GIT_BIN" \
+  --governance-policy "$GPT2AGENT_RELEASE_GOVERNANCE_POLICY" \
+  --checkout "$ROOT" --dist "$DIST" \
   --receipt "$RECEIPT" --receipt-sha256 "$RECEIPT_SHA256" \
   --repository "$REPOSITORY" --tag "$TAG" \
   --commit "$COMMIT" --tree "$TREE" \
@@ -655,11 +671,22 @@ controls are also configured and verified: a policy-bound release App is the
 only actor that can create `v*` tags; separate no-bypass rules make existing
 tags immutable; the `pypi` environment requires the policy-bound independent
 reviewer or protection App; self-review and administrator bypass are disabled;
-and `main` has no bypass actor. The approver must verify the exact tag, commit,
-tree, version, and receipt digest before allowing publication.
-`scripts/audit_release_governance.py --live OWNER/REPO --policy POLICY.json`
-performs these reviewed, read-only GitHub checks and exits nonzero when the
-closed identity policy or any required live control is absent.
+and `main` has no bypass actor. A distinct policy-bound GitHub App must read
+immutable-release settings with exactly Administration read plus GitHub's
+implicit Metadata read and no subscribed events. Install it only on this
+repository. The `release-settings-read` environment must accept only `v*` tags,
+have no reviewer, wait timer, or custom deployment gate, disable administrator
+bypass, and contain exactly the policy-bound
+`GPT2AGENT_RELEASE_SETTINGS_APP_CLIENT_ID` variable and
+`GPT2AGENT_RELEASE_SETTINGS_APP_PRIVATE_KEY` secret. Do not reuse this reader as
+the tag creator, required-check App, or PyPI protection actor. The workflow's
+built-in token remains the only release read/write credential; the App token is
+accepted only by the immutable-settings GET allowlist. The approver must verify
+the exact tag, commit, tree, version, and receipt digest before allowing
+publication. Run `scripts/audit_release_governance.py` with
+`--live OWNER/REPO`, `--policy POLICY.json`, and `--gh /usr/bin/gh` to perform
+these reviewed, read-only GitHub checks. It exits nonzero when the closed
+identity policy or any required live control is absent.
 
 Immediately before the release App creates the immutable tag, the operator
 command re-fetches the complete pinned run artifact list, requires at least one
@@ -675,6 +702,10 @@ GitHub Release:
 ```bash
 set -euo pipefail
 umask 077
+GH_BIN=/usr/bin/gh
+GIT_BIN=/usr/bin/git
+test -x "$GH_BIN" && test ! -L "$GH_BIN"
+test -x "$GIT_BIN" && test ! -L "$GIT_BIN"
 : "${GPT2AGENT_TRUSTED_PYTHON_BASE:?set this to the canonical base extracted from the reviewed CPython 3.12.13 Linux x86_64 artifact}"
 : "${GPT2AGENT_TRUSTED_PYTHON_SHA256:?set this to the independently recorded canonical executable SHA-256}"
 AUDIT_PYTHON_SOURCE_BASE=$(realpath -e -- "$GPT2AGENT_TRUSTED_PYTHON_BASE")
@@ -684,11 +715,11 @@ SOURCE_PYTHON_SHA256=$(sha256sum -- "$AUDIT_PYTHON_SOURCE")
 SOURCE_PYTHON_SHA256=${SOURCE_PYTHON_SHA256%% *}
 test "$SOURCE_PYTHON_SHA256" = "$GPT2AGENT_TRUSTED_PYTHON_SHA256"
 read -r -p "Release tag (for example v0.0.12): " TAG
-ROOT=$(git rev-parse --show-toplevel)
+ROOT=$("$GIT_BIN" rev-parse --show-toplevel)
 cd "$ROOT"
 case "$TAG" in (v[0-9]*.[0-9]*.[0-9]*) ;; (*) exit 1;; esac
 AUDIT_REF=refs/release-verification/retained-receipt
-if git show-ref --verify --quiet "$AUDIT_REF"; then exit 1; fi
+if "$GIT_BIN" show-ref --verify --quiet "$AUDIT_REF"; then exit 1; fi
 AUDIT_HOME=$(realpath -e -- "$HOME")
 test "$AUDIT_HOME" = "$HOME"
 AUDIT_ROOT=$(mktemp -d "$AUDIT_HOME/.gpt2agent-receipt-audit.XXXXXXXX")
@@ -696,7 +727,7 @@ chmod 700 "$AUDIT_ROOT"
 cleanup_receipt_audit() {
   status=$?
   trap - EXIT HUP INT TERM
-  git update-ref -d "$AUDIT_REF" >/dev/null 2>&1 || status=1
+  "$GIT_BIN" update-ref -d "$AUDIT_REF" >/dev/null 2>&1 || status=1
   case "$AUDIT_ROOT" in
     ("$AUDIT_HOME"/.gpt2agent-receipt-audit.*)
       if [ -d "$AUDIT_ROOT" ] && [ ! -L "$AUDIT_ROOT" ]; then
@@ -726,10 +757,10 @@ test "$COPIED_PYTHON_SHA256" = "$GPT2AGENT_TRUSTED_PYTHON_SHA256"
 "$AUDIT_PYTHON" -I -S -B -c \
   'import os,sys; assert (sys.implementation.name,sys.version_info[:3],sys.platform,os.uname().machine)==("cpython",(3,12,13),"linux","x86_64")'
 
-git fetch --force --no-tags origin "refs/tags/$TAG:$AUDIT_REF"
-test "$(git cat-file -t "$AUDIT_REF")" = tag
-COMMIT=$(git rev-parse "$AUDIT_REF^{}")
-TREE=$(git rev-parse "$AUDIT_REF^{tree}")
+"$GIT_BIN" fetch --force --no-tags origin "refs/tags/$TAG:$AUDIT_REF"
+test "$("$GIT_BIN" cat-file -t "$AUDIT_REF")" = tag
+COMMIT=$("$GIT_BIN" rev-parse "$AUDIT_REF^{}")
+TREE=$("$GIT_BIN" rev-parse "$AUDIT_REF^{tree}")
 RECEIPT="$ROOT/../gpt2agent-$TAG-$COMMIT.account-receipt.json"
 test -f "$RECEIPT" && test ! -L "$RECEIPT"
 test "$(stat -c '%a' "$RECEIPT")" = 600
@@ -737,9 +768,9 @@ test "$(stat -c '%a' "$RECEIPT")" = 600
 TAG_OBJECT="$AUDIT_ROOT/tag-object"
 TAG_OUTPUT="$AUDIT_ROOT/tag-output"
 TAG_VERIFIER="$AUDIT_ROOT/release_tag_metadata.py"
-git cat-file tag "$AUDIT_REF" >"$TAG_OBJECT"
-git show "$AUDIT_REF:scripts/release_tag_metadata.py" >"$TAG_VERIFIER"
-REPOSITORY=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+"$GIT_BIN" cat-file tag "$AUDIT_REF" >"$TAG_OBJECT"
+"$GIT_BIN" show "$AUDIT_REF:scripts/release_tag_metadata.py" >"$TAG_VERIFIER"
+REPOSITORY=$("$GH_BIN" repo view --json nameWithOwner --jq .nameWithOwner)
 GITHUB_OUTPUT="$TAG_OUTPUT" "$AUDIT_PYTHON" -I -S -B "$TAG_VERIFIER" \
   verify-tag-object --tag-object-file "$TAG_OBJECT" \
   --repository "$REPOSITORY" --tag "$TAG" \

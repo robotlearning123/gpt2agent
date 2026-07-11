@@ -15,7 +15,20 @@ from typing import Any, Callable
 if __package__:
     from .verify_release_tools import ToolValidationError, validate_policy, validate_tool
 else:
-    from verify_release_tools import ToolValidationError, validate_policy, validate_tool
+    # ``python -I`` intentionally omits the script directory from sys.path. The
+    # release coordinator uses that mode, so load the reviewed sibling by its
+    # exact checkout path instead of weakening isolation with PYTHONPATH.
+    from importlib.util import module_from_spec, spec_from_file_location
+
+    _tools_path = Path(__file__).resolve(strict=True).with_name("verify_release_tools.py")
+    _tools_spec = spec_from_file_location("_gpt2agent_verify_release_tools", _tools_path)
+    if _tools_spec is None or _tools_spec.loader is None:
+        raise ImportError("the release-tool validator is unavailable")
+    _tools_module = module_from_spec(_tools_spec)
+    _tools_spec.loader.exec_module(_tools_module)
+    ToolValidationError = _tools_module.ToolValidationError
+    validate_policy = _tools_module.validate_policy
+    validate_tool = _tools_module.validate_tool
 
 
 _MAX_JSON_BYTES = 4 * 1024 * 1024

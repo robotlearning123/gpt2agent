@@ -36,6 +36,19 @@ def _checks(report: dict) -> dict[str, str]:
     return {check["id"]: check["status"] for check in report["checks"]}
 
 
+def test_governance_cli_runs_with_real_isolated_interpreter() -> None:
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-B", str(AUDITOR), "--snapshot", str(FIXTURE)],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["status"] == "pass"
+
+
 def test_complete_fixture_passes_every_governance_check() -> None:
     from scripts.audit_release_governance import audit_snapshot
 

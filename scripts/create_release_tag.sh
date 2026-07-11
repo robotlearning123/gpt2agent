@@ -139,6 +139,7 @@ run_git() {
 
 run_python_clean "$CHECKOUT/scripts/verify_release_tools.py" check \
   --gh "$GH_BIN" --git "$GIT_BIN" --policy "$GOVERNANCE_POLICY"
+run_python_clean "$CHECKOUT/scripts/audit_release_governance.py" --help >/dev/null
 
 if [[ $(run_git -C "$CHECKOUT" rev-parse HEAD) != "$COMMIT" ]]; then
   echo "release checkout commit does not match" >&2

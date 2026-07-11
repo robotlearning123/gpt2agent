@@ -233,7 +233,16 @@ policy-bound release App and enforce deletion/update/non-fast-forward through
 separate no-bypass rules. Require the policy-bound independent reviewer or
 protection App on the protected `pypi` environment, with self-review and
 administrator bypass disabled. The reviewer must verify the exact tag, commit,
-tree, version, and receipt digest. Without those live controls, do not tag or
+tree, version, and receipt digest. Configure a separate policy-bound GitHub App
+for immutable-release settings with exactly Administration read, implicit
+Metadata read, no subscribed events, and access only to this repository. Bind
+its client ID and private key exclusively to a nonblocking
+`release-settings-read` environment through
+`GPT2AGENT_RELEASE_SETTINGS_APP_CLIENT_ID` and
+`GPT2AGENT_RELEASE_SETTINGS_APP_PRIVATE_KEY`. That environment must accept only
+`v*` tags, have no reviewer, wait timer, or custom protection rule, and disable
+administrator bypass. Do not reuse the reader App as the tag creator,
+required-check App, or PyPI gate. Without those live controls, do not tag or
 publish.
 
 Verify the controls through reviewed GET-only endpoints before tagging:
@@ -241,14 +250,17 @@ Verify the controls through reviewed GET-only endpoints before tagging:
 ```bash
 python scripts/audit_release_governance.py \
   --live robotlearning123/gpt2agent \
-  --policy /trusted/local/release-governance-policy.json
+  --policy /trusted/local/release-governance-policy.json \
+  --gh /usr/bin/gh
 ```
 
-The policy is the separately reviewed closed-schema identity binding documented
-in `CONTRIBUTING.md`; do not infer its App IDs or reviewer identity from the
-snapshot being audited. The command emits deterministic JSON and exits nonzero
-if the policy is missing or invalid, any required control is absent, or the
-live snapshot cannot be validated.
+The policy is the separately reviewed schema-v2 identity binding documented in
+`CONTRIBUTING.md`; it includes distinct release-tag, release-settings, and
+required-check App identities plus the PyPI gate identity. Do not infer those
+IDs, the settings App client ID, or the reviewer identity from the snapshot
+being audited. The command emits deterministic JSON and exits nonzero if the
+policy or exact trusted `gh` path is missing or invalid, any required control is
+absent, or the live snapshot cannot be validated.
 
 After the workflow is green, verify the raw annotated tag object with the
 tagged `release_tag_metadata.py`, compare its canonical `receipt_sha256` output

@@ -92,17 +92,27 @@ owns the bearer and live transport while candidate distributions remain inert.
 The closed adapter corpus executes candidates only in credential-free main CI
 or an OS-isolated environment with no account auth. See
 [the 0.0.12 migration guide](docs/migration-0.0.12.md#release-operators).
-Before creating a release tag, run
-`python scripts/audit_release_governance.py --live OWNER/REPO --policy POLICY.json`;
-any failed check blocks tagging and publication. `POLICY.json` is a separately
+Before creating a release tag, run:
+
+```bash
+python scripts/audit_release_governance.py \
+  --live OWNER/REPO --policy POLICY.json --gh /usr/bin/gh
+```
+
+Any failed check blocks tagging and publication. `POLICY.json` is a separately
 reviewed, closed-schema identity binding, not data inferred from the live
 snapshot:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "repository": "OWNER/REPO",
   "release_tag_app": {"id": 123456},
+  "release_settings_app": {
+    "id": 234567,
+    "slug": "release-settings-reader",
+    "client_id": "Iv1.1234567890abcdef"
+  },
   "required_check_app": {"id": 15368},
   "pypi_gate": {"kind": "reviewer", "login": "independent-reviewer"}
 }
@@ -112,9 +122,18 @@ The alternative PyPI gate is
 `{"kind":"protection_app","id":654321,"slug":"reviewed-app"}`. A reviewer
 policy passes only when the environment's required-reviewer list contains that
 one independent user; adding the repository owner would create an OR path and
-fails the audit. A protection App must be distinct from the release-tag App.
+fails the audit. A protection App must be distinct from the release-tag,
+release-settings, and required-check Apps.
 Tag creation uses one or more exact `v*` rulesets; every such creation ruleset's
 sole bypass must be the policy-bound release App. Deletion, update, and
 non-fast-forward use separate exact-scope rulesets with no bypass actors.
 `Required checks` must be bound to the App ID in the policy. Live mode fails
-before making GitHub requests when `--policy` is absent or invalid.
+before making GitHub requests when `--policy` is absent or invalid, when `--gh`
+is not an absolute protected executable, or when the policy path or any ancestor
+is writable by another user. The policy-bound release-settings App must be
+installed only on this repository with exactly Administration read, implicit
+Metadata read, and no subscribed events. The nonblocking
+`release-settings-read` environment must allow only `v*` tags, disable
+administrator bypass, expose exactly one client-ID variable named
+`GPT2AGENT_RELEASE_SETTINGS_APP_CLIENT_ID`, and expose exactly one private-key
+secret named `GPT2AGENT_RELEASE_SETTINGS_APP_PRIVATE_KEY`.

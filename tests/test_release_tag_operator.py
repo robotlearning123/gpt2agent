@@ -302,8 +302,9 @@ def test_coordinator_closes_governance_action_and_tag_sequence(tmp_path: Path) -
 
     assert result["returncode"] == "0", result["stderr"]
     significant = [event for event in events if not event.startswith(("gh-env", "git-env"))]
-    assert significant[:10] == [
+    assert significant[:11] == [
         "python-tools token=unset",
+        "python-governance token=unset",
         "gh-auth token=unset",
         f"python-action-pin token={OPERATOR_TOKEN}",
         f"python-ci token={OPERATOR_TOKEN}",
@@ -435,13 +436,28 @@ def test_coordinator_source_never_updates_or_deletes_a_remote_ref() -> None:
 
     prompt = source.index("Short-lived release App installation token")
     final_ci = source.index("scripts/verify_main_ci.py")
-    governance = source.index("scripts/audit_release_governance.py")
+    governance_import_preflight = source.index(
+        'run_python_clean "$CHECKOUT/scripts/audit_release_governance.py" --help'
+    )
+    governance = source.index(
+        'run_python_operator "$CHECKOUT/scripts/audit_release_governance.py"'
+    )
     action_pin = source.index("scripts/verify_remote_action_pin.py")
     prepare = source.index('verify_account_receipt.py" prepare-tag')
     tag_post = source.index('"repos/$REPOSITORY/git/tags"')
     ref_post = source.index('"repos/$REPOSITORY/git/refs"')
     fetch = source.index("fetch --no-tags --no-write-fetch-head")
-    assert action_pin < prompt < final_ci < governance < prepare < tag_post < ref_post < fetch
+    assert (
+        governance_import_preflight
+        < action_pin
+        < prompt
+        < final_ci
+        < governance
+        < prepare
+        < tag_post
+        < ref_post
+        < fetch
+    )
     assert "export GPT2AGENT_RELEASE_APP_TOKEN" not in source
     assert "git push" not in source
     assert "git tag" not in source

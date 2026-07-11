@@ -583,6 +583,7 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     release = (PROJECT_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
     migration = (PROJECT_ROOT / "docs" / "migration-0.0.12.md").read_text(encoding="utf-8")
+    contributing = (PROJECT_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
     readme_flat = re.sub(r"\s+", " ", readme)
 
     assert "name: Required checks" in ci
@@ -675,25 +676,30 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     )
     assert action_pin is not None
     assert "release-id: ${{ needs.github-release-draft.outputs.release_id }}" in release
-    assert 'gh pr view "$PR_NUMBER" --json mergeCommit,state' in readme
+    assert 'GH_BIN=/usr/bin/gh' in readme
+    assert 'GIT_BIN=/usr/bin/git' in readme
+    assert '"$GH_BIN" pr view "$PR_NUMBER" --json mergeCommit,state' in readme
     assert "```bash\nset -euo pipefail\nset +x" in readme
-    assert "git fetch --no-tags origin +main:refs/remotes/origin/main" in readme
+    assert '"$GIT_BIN" fetch --no-tags origin +main:refs/remotes/origin/main' in readme
     assert "\ngit switch main\n" not in readme
     assert "git pull --ff-only origin main" not in readme
-    assert 'git merge-base --is-ancestor "$RELEASE_SHA" origin/main' in readme
+    assert '"$GIT_BIN" merge-base --is-ancestor "$RELEASE_SHA" origin/main' in readme
     assert "scripts/bootstrap_account_gate.sh" in readme
     assert "/usr/bin/python3.12" not in readme
     assert "CPython 3.12.13 for Linux x86_64" in readme
     assert "GPT2AGENT_TRUSTED_PYTHON_SHA256" in readme
     assert '--python-sha256 "$GPT2AGENT_TRUSTED_PYTHON_SHA256"' in readme
     assert "pinned actions/setup-python action" in readme
+    assert "3.12.13-27650778726" in readme
+    assert "ce7d511228f095b5ea1ad5568543388870f5964688303f9ddc24ba06c336bfba" in readme
+    assert "edcdaf07e49bb241cbccb0f18fdb2c8f2e6e1be36a583fce9fc703894d814238" in readme
     assert "CPython 3.12.13 for Linux x86_64" in migration
     assert "reviewed artifact checksum" in migration
     assert '"$VERIFIER_PYTHON" -I -S -B' in readme
     assert "scripts/verify_main_ci.py" in readme
     assert '--commit "$RELEASE_SHA"' in readme
     assert "--ignored=matching --ignore-submodules=none" in readme_flat
-    assert 'git switch --detach "$RELEASE_SHA"' in readme
+    assert '"$GIT_BIN" switch --detach "$RELEASE_SHA"' in readme
     assert "trap cleanup_release_runtime EXIT" in readme
     assert 'rm -rf -- "$RUNTIME_ROOT"' in readme
     assert "scripts/verify_account_receipt.py create" in readme
@@ -703,6 +709,9 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert "scripts/create_release_tag.sh" in readme
     for expected in (
         '--python "$VERIFIER_PYTHON"',
+        '--gh "$GH_BIN"',
+        '--git "$GIT_BIN"',
+        '--governance-policy "$GPT2AGENT_RELEASE_GOVERNANCE_POLICY"',
         '--receipt-sha256 "$RECEIPT_SHA256"',
         '--commit "$COMMIT"',
         '--tree "$TREE"',
@@ -724,7 +733,16 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert 'git push origin "refs/tags/$TAG"' not in readme
     assert "release_tag_metadata.py" in readme
     assert "verify-tag-object" in readme
-    assert 'git update-ref -d "$AUDIT_REF"' in readme
+    assert '"$GIT_BIN" update-ref -d "$AUDIT_REF"' in readme
+    assert "release-settings-read" in readme
+    assert "GPT2AGENT_RELEASE_SETTINGS_APP_CLIENT_ID" in readme
+    assert "GPT2AGENT_RELEASE_SETTINGS_APP_PRIVATE_KEY" in readme
+    assert "--gh /usr/bin/gh" in readme
+    assert "--gh /usr/bin/gh" in migration
+    assert '"schema_version": 2' in contributing
+    assert '"release_settings_app"' in contributing
+    assert '"client_id"' in contributing
+    assert "--gh /usr/bin/gh" in contributing
     assert "Re-run failed jobs" in readme_flat
     assert "Do not re-run the whole workflow" in readme_flat
     assert not re.search(r"python scripts/verify_release\.py --tag v\d+\.\d+\.\d+", readme)
@@ -788,6 +806,9 @@ def test_release_operator_revalidates_pinned_candidate_immediately_before_tag() 
     operator = (PROJECT_ROOT / "scripts" / "create_release_tag.sh").read_text(
         encoding="utf-8"
     )
+    governance_import_preflight = operator.index(
+        'run_python_clean "$CHECKOUT/scripts/audit_release_governance.py" --help'
+    )
     operator_token = operator.index('"$GH_BIN" auth token --hostname github.com')
     action_pin = operator.index('"$CHECKOUT/scripts/verify_remote_action_pin.py"')
     app_token_acquisition = operator.index(
@@ -795,7 +816,9 @@ def test_release_operator_revalidates_pinned_candidate_immediately_before_tag() 
     )
     revalidation = operator.index('run_python_operator "$CHECKOUT/scripts/verify_main_ci.py"')
     verify_main = operator.index('"$CHECKOUT/scripts/verify_main_ci.py"')
-    governance = operator.index('"$CHECKOUT/scripts/audit_release_governance.py"')
+    governance = operator.index(
+        'run_python_operator "$CHECKOUT/scripts/audit_release_governance.py"'
+    )
     receipt_verify = operator.index(
         '"$CHECKOUT/scripts/verify_account_receipt.py" prepare-tag'
     )
@@ -808,7 +831,8 @@ def test_release_operator_revalidates_pinned_candidate_immediately_before_tag() 
     independent_fetch = operator.index("fetch --no-tags --no-write-fetch-head")
 
     assert (
-        operator_token
+        governance_import_preflight
+        < operator_token
         < action_pin
         < app_token_acquisition
         < revalidation
