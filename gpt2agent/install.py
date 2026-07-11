@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -70,14 +71,24 @@ def _backup(path: Path) -> Path | None:
     plain ``write_bytes`` would create the backup with the process umask
     (often world-readable), exposing a ``0600`` config in its ``.bak`` copy.
     """
-    if not path.exists():
-        return None
-    bak = path.with_name(path.name + ".bak-gpt2agent")
-    data = path.read_bytes()
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
     try:
-        mode = path.stat().st_mode & 0o777
-    except OSError:
-        mode = 0o600
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RuntimeError(f"{path} must resolve to a regular file before backup")
+        mode = stat.S_IMODE(metadata.st_mode)
+        with os.fdopen(descriptor, "rb") as source:
+            descriptor = -1
+            data = source.read()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    bak = path.with_name(path.name + ".bak-gpt2agent")
     # Write a random sibling and replace the backup path.  In particular, do
     # not open a pre-planted ``.bak-gpt2agent`` symlink and truncate its target.
     atomic_replace_bytes(bak, data, mode=mode)

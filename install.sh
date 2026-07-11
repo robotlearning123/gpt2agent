@@ -119,6 +119,10 @@ restore_pipx_environment() {
   fi
   exit "$status"
 }
+if [[ -L "$PIPX_VENV_DIR" || ( -e "$PIPX_VENV_DIR" && ! -d "$PIPX_VENV_DIR" ) ]]; then
+  err "Existing pipx environment path must be a real directory: $PIPX_VENV_DIR"
+  exit 1
+fi
 if [[ -d "$PIPX_VENV_DIR" && ! -L "$PIPX_VENV_DIR" ]]; then
   info "Replacing existing gpt2agent pipx environment (restored automatically on failure)"
   PIPX_BACKUP_DIR=$(mktemp -d "$PIPX_HOME_DIR/.gpt2agent-upgrade.XXXXXXXX")

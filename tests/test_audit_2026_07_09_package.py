@@ -202,6 +202,42 @@ def test_installer_replaces_existing_pipx_environment_without_uninstall(
     assert not list(Path(env["FAKE_PIPX_HOME"]).glob(".gpt2agent-upgrade.*"))
 
 
+@pytest.mark.parametrize("entry_kind", ["symlink", "file"])
+def test_installer_rejects_non_directory_pipx_environment_before_mutation(
+    tmp_path: Path, entry_kind: str
+) -> None:
+    env, log = _recording_installer_env(tmp_path)
+    venv = Path(env["FAKE_PIPX_HOME"]) / "venvs" / "gpt2agent"
+    venv.parent.mkdir(parents=True)
+    sentinel = tmp_path / "sentinel"
+    if entry_kind == "symlink":
+        sentinel.mkdir()
+        (sentinel / "installed-version").write_text("do not touch\n", encoding="utf-8")
+        venv.symlink_to(sentinel, target_is_directory=True)
+    else:
+        sentinel.write_text("do not touch\n", encoding="utf-8")
+        venv.write_text("not a virtual environment\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [str(INSTALLER), "--no-register"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "must be a real directory" in result.stderr
+    assert not log.exists(), "pipx install must not run for an unsafe environment path"
+    if entry_kind == "symlink":
+        assert (sentinel / "installed-version").read_text(encoding="utf-8") == "do not touch\n"
+        assert venv.is_symlink()
+    else:
+        assert sentinel.read_text(encoding="utf-8") == "do not touch\n"
+        assert venv.read_text(encoding="utf-8") == "not a virtual environment\n"
+
+
 def test_failed_upgrade_restores_existing_pipx_environment(
     tmp_path: Path,
 ) -> None:

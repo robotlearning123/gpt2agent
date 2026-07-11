@@ -52,6 +52,67 @@ def test_backup_atomically_replaces_attacker_symlink(tmp_path: Path) -> None:
     assert backup.read_text() == '{"secret": "config"}'
 
 
+def test_backup_binds_symlink_content_and_mode_to_one_open_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gpt2agent.install import _backup
+
+    private = tmp_path / "private.json"
+    private.write_text("TOP-SECRET", encoding="utf-8")
+    private.chmod(0o600)
+    public = tmp_path / "public.json"
+    public.write_text("public", encoding="utf-8")
+    public.chmod(0o644)
+    config = tmp_path / "config.json"
+    config.symlink_to(private)
+    original_read_bytes = Path.read_bytes
+    original_open = os.open
+    swapped = False
+
+    def swap_config_target() -> None:
+        nonlocal swapped
+        if not swapped:
+            config.unlink()
+            config.symlink_to(public)
+            swapped = True
+
+    def read_then_swap(path: Path) -> bytes:
+        content = original_read_bytes(path)
+        if path == config:
+            swap_config_target()
+        return content
+
+    def open_then_swap(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is None:
+            descriptor = original_open(path, flags, mode)
+        else:
+            descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if Path(path) == config:
+            swap_config_target()
+        return descriptor
+
+    monkeypatch.setattr(Path, "read_bytes", read_then_swap)
+    monkeypatch.setattr(os, "open", open_then_swap)
+
+    backup = _backup(config)
+
+    assert backup is not None
+    assert original_read_bytes(backup) == b"TOP-SECRET"
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+
+
+def test_backup_rejects_non_regular_source(tmp_path: Path) -> None:
+    from gpt2agent.install import _backup
+
+    config = tmp_path / "config.json"
+    config.mkdir()
+
+    with pytest.raises(RuntimeError, match="must resolve to a regular file"):
+        _backup(config)
+
+    assert not config.with_name(config.name + ".bak-gpt2agent").exists()
+
+
 def test_atomic_write_does_not_follow_predictable_temp_symlink(tmp_path: Path) -> None:
     from gpt2agent.install import _atomic_write
 
