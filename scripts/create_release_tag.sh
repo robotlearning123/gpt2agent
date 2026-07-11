@@ -513,8 +513,8 @@ if [[ ! $TAG_OBJECT_SHA =~ ^[0-9a-f]{40}$ ]]; then
   exit 1
 fi
 
-# No checkout-owned code or mutable local input is consumed between this final
-# same-user trust-boundary recheck and the one irreversible ref POST.
+# Reconfirm that the reviewed publication action still belongs to fetched main
+# before the final checkout-state check and irreversible ref mutation.
 if ! run_git --git-dir="$MAIN_GIT_DIR" merge-base --is-ancestor \
   "$ACTION_PIN" refs/remotes/origin/main; then
   echo "reviewed publication action pin is not an ancestor of fetched origin/main" >&2
@@ -522,6 +522,9 @@ if ! run_git --git-dir="$MAIN_GIT_DIR" merge-base --is-ancestor \
 fi
 
 REF_POST_OK=0
+verify_checkout_state
+# Persist the recovery marker only after every reversible checkout check passes,
+# then validate it immediately before recording and attempting the ref mutation.
 if ! (set -o noclobber; printf 'attempted refs/tags/%s object=%s commit=%s\n' \
   "$TAG" "$TAG_OBJECT_SHA" "$COMMIT" >"$IRREVERSIBLE_STATE_FILE"); then
   echo "irreversible state marker could not be created before ref mutation" >&2
@@ -534,7 +537,6 @@ if [[ ! -f $IRREVERSIBLE_STATE_FILE || -L $IRREVERSIBLE_STATE_FILE || \
   echo "irreversible state marker is invalid" >&2
   exit 1
 fi
-verify_checkout_state
 REF_MUTATION_ATTEMPTED=1
 if gh_app --method POST \
   "repos/$REPOSITORY/git/refs" \

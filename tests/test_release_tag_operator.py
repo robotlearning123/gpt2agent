@@ -93,6 +93,7 @@ def _run_real_checkout_probe(
     _write_executable(fake_gh, "#!/bin/sh\nexit 98\n")
     policy = support / "policy.json"
     receipt = support / "receipt.json"
+    irreversible_state = support / "irreversible-state"
     dist = support / "dist"
     policy.write_text("{}\n", encoding="utf-8")
     receipt.write_text("{}\n", encoding="utf-8")
@@ -139,6 +140,8 @@ def _run_real_checkout_probe(
         str(receipt),
         "--receipt-sha256",
         RECEIPT_SHA256,
+        "--irreversible-state-file",
+        str(irreversible_state),
         "--repository",
         "robotlearning123/gpt2agent",
         "--tag",
@@ -814,6 +817,7 @@ def test_third_checkout_drift_stops_after_tag_object_before_ref_post(tmp_path: P
     assert f"gh-tag token={APP_TOKEN}" in events
     assert not any(event.startswith("gh-ref") for event in events)
     assert "release checkout commit does not match" in result["stderr"]
+    assert not (tmp_path / "irreversible-state").exists()
 
 
 @pytest.mark.parametrize("mode", ("core-worktree-redirect", "assume-unchanged", "skip-worktree"))
@@ -950,9 +954,12 @@ def test_final_checkout_check_is_immediately_before_ref_post() -> None:
     source = COORDINATOR.read_text(encoding="utf-8")
     ref_post = source.index('if gh_app --method POST \\\n  "repos/$REPOSITORY/git/refs"')
     final_check = source.rindex("verify_checkout_state", 0, ref_post)
+    marker = source.index("set -o noclobber", final_check, ref_post)
+    mutation_flag = source.index("REF_MUTATION_ATTEMPTED=1", marker, ref_post)
     boundary = source[final_check:ref_post]
 
     assert source.count("\nverify_checkout_state\n") == 3
+    assert final_check < marker < mutation_flag < ref_post
     assert "merge-base" not in boundary
     assert "run_git" not in boundary
     assert "run_python" not in boundary
