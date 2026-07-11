@@ -819,7 +819,7 @@ def test_package_smoke_is_reused_in_ci_and_release() -> None:
     assert "TMP_ROOT=$(mktemp -d)" not in release
 
 
-def test_release_shell_paths_support_macos_system_bash() -> None:
+def test_release_shell_paths_do_not_require_mapfile() -> None:
     package_smoke = (PROJECT_ROOT / "scripts" / "package_smoke.sh").read_text(
         encoding="utf-8"
     )

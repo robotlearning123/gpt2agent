@@ -25,9 +25,9 @@ The MCP surface now contains exactly 32 tools. The seven additions are read-only
 - `sites_access` and `list_sites` read bounded Sites metadata without returning
   content or private URLs;
 - `account_capabilities` returns a live, shape-only capability inventory with
-  explicit unknown states. Conversation, memory, and custom-instruction
-  capability records remain unknown until their content-bearing tools are
-  explicitly invoked.
+  explicit unknown states. The inventory always keeps conversation, memory,
+  and custom-instruction capability records unknown; their explicit tools read
+  that private content separately when intentionally invoked.
 
 `list_tasks` still exists, but it represents generic asynchronous jobs. It is
 not an alias for `list_scheduled_tasks`. Apps/connectors from `list_apps` are
