@@ -12,7 +12,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const MODE = process.env.MODE || "vp";
-const PY = "/home/robot/workspace/47-chatgpt2agent/gpt2agent/.venv/bin/python";
+const PY = process.env.SDP_PY || "/home/robot/workspace/47-chatgpt2agent/gpt2agent/.venv/bin/python";
 const HELPER = fileURLToPath(new URL("./sdp_exchange.py", import.meta.url));
 
 function exchange(offerSdp) {

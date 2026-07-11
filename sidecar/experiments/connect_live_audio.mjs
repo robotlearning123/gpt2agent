@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 const MP3 = process.argv[2] || "/tmp/utter.mp3";
 const MODE = process.env.MODE || "vp";
 const PORT = 5006;
-const PY = "/home/robot/workspace/47-chatgpt2agent/gpt2agent/.venv/bin/python";
+const PY = process.env.SDP_PY || "/home/robot/workspace/47-chatgpt2agent/gpt2agent/.venv/bin/python";
 const HELPER = fileURLToPath(new URL("./sdp_exchange.py", import.meta.url));
 
 function exchange(offerSdp) {

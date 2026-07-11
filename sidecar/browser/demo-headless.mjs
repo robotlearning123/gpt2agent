@@ -15,8 +15,10 @@ import { fileURLToPath } from "node:url";
 
 const argv = process.argv;
 const AUDIO = argv[argv.indexOf("--audio") + 1] || "./q.wav";
-const CHROME = "/usr/bin/google-chrome";
-const PY = "/home/robot/workspace/47-chatgpt2agent/gpt2agent/.venv/bin/python";
+const CHROME = process.env.CHROME_BIN || (process.platform === "darwin"
+  ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+  : "/usr/bin/google-chrome");
+const PY = process.env.SDP_PY || "/home/robot/workspace/47-chatgpt2agent/gpt2agent/.venv/bin/python";
 const HELPER = fileURLToPath(new URL("../experiments/sdp_exchange.py", import.meta.url));
 
 function exchange(offerSdp) {
