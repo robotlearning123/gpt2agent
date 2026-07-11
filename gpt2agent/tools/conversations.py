@@ -354,7 +354,7 @@ def register(mcp, client: BackendClient) -> None:
             max_messages: Maximum number of messages to return (default 100).
 
         Returns:
-            Dict with title, create_time, mapping (all messages), and metadata.
+            Dict with allowlisted metadata and a bounded chronological messages list.
         """
         conversation_id = validate_path_id(conversation_id, kind="conversation ID")
         max_messages = validate_int(
