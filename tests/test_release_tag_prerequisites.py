@@ -178,7 +178,7 @@ def _action_fixture(tmp_path: Path, *, mode: str = "ok") -> tuple[Path, Path, di
 set -euo pipefail
 EVENT_LOG={event_literal}
 REMOTE_DIR={remote_literal}
-FAKE_MODE=$(/usr/bin/cat {mode_literal})
+FAKE_MODE=$(cat {mode_literal})
 printf 'host=%s config=%s debug=%s token=%s path=%s\n' "${{GH_HOST-unset}}" "${{GH_CONFIG_DIR-unset}}" "${{GH_DEBUG-unset}}" "${{GH_TOKEN-unset}}" "${{PATH-unset}}" >> "$EVENT_LOG"
 endpoint=${{@: -1}}
 printf 'endpoint=%s\n' "$endpoint" >> "$EVENT_LOG"
@@ -225,6 +225,14 @@ PY
         "FAKE_MODE": mode,
     }
     return fake_gh, workflow, environment
+
+
+def test_action_fixture_uses_portable_sanitized_path_lookup(tmp_path: Path) -> None:
+    fake_gh, _workflow, _environment = _action_fixture(tmp_path)
+    source = fake_gh.read_text(encoding="utf-8")
+
+    assert "/usr/bin/cat" not in source
+    assert "FAKE_MODE=$(cat " in source
 
 
 @LINUX_RELEASE_GATE_ONLY
