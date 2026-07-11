@@ -92,9 +92,11 @@ def _normalize_item(raw: Any, *, require_release: bool = False) -> dict:
     return item
 
 
-def _catalog_fingerprint(items: list[dict]) -> str:
+def _catalog_fingerprint(items: list[dict], *, scope: str) -> str:
     encoded = json.dumps(
-        [item["id"] for item in items], ensure_ascii=True, separators=(",", ":")
+        {"scope": scope, "ids": [item["id"] for item in items]},
+        ensure_ascii=True,
+        separators=(",", ":"),
     ).encode("utf-8")
     return hmac.digest(_LOCAL_CURSOR_KEY, encoded, "sha256").hex()
 
@@ -131,16 +133,20 @@ def _decode_local_cursor(cursor: str) -> tuple[str, int]:
         or offset < 0
     ):
         raise InputValidationError("cursor is not a valid g2a-local-v1 cursor")
+    if cursor != _encode_local_cursor(fingerprint, offset):
+        raise InputValidationError("cursor is not a valid g2a-local-v1 cursor")
     return fingerprint, offset
 
 
-def normalize_plugin_catalog(data: Any, *, limit: int, cursor: str | None) -> dict:
+def normalize_plugin_catalog(
+    data: Any, *, limit: int, cursor: str | None, scope: str = "USER"
+) -> dict:
     if isinstance(data, list):
         items = [_normalize_item(raw) for raw in data]
         # Bind pagination to the validated backend identities before redaction.
         # Different secret-shaped IDs can intentionally project to the same
         # placeholder, but must still invalidate a cursor when the catalog moves.
-        fingerprint = _catalog_fingerprint(data)
+        fingerprint = _catalog_fingerprint(data, scope=scope)
         offset = 0
         if cursor is not None:
             if not cursor.startswith(_LOCAL_PREFIX):
@@ -251,7 +257,7 @@ def register(mcp, client: BackendClient) -> None:
             target_path="/backend-api/plugins/list",
             fixed_probe=False,
         )
-        return normalize_plugin_catalog(data, limit=limit, cursor=cursor)
+        return normalize_plugin_catalog(data, limit=limit, cursor=cursor, scope=scope)
 
     @mcp.tool(annotations=tool_annotations("list_installed_plugins"))
     async def list_installed_plugins() -> dict:

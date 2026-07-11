@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 from typing import Any
@@ -74,6 +75,36 @@ def test_local_cursor_rejects_noncanonical_base64_pad_bits() -> None:
 
     with pytest.raises(ValueError, match="valid g2a-local-v1 cursor"):
         _run(tool, limit=10, cursor=noncanonical)
+
+
+def test_local_cursor_rejects_noncanonical_json_payload() -> None:
+    tool, cursor = _produced_local_cursor()
+    prefix, token = cursor.split(":", 1)
+    decoded = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
+    payload = json.loads(decoded)
+    payload["ignored"] = True
+    noncanonical_token = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode()
+    ).decode().rstrip("=")
+
+    with pytest.raises(ValueError, match="valid g2a-local-v1 cursor"):
+        _run(tool, limit=1, cursor=f"{prefix}:{noncanonical_token}")
+
+
+def test_local_cursor_is_bound_to_catalog_scope() -> None:
+    class ScopeClient(FakeClient):
+        def get(self, path, **kwargs):
+            scope = kwargs["params"]["scope"]
+            return [
+                {"id": "plugin-0", "name": f"{scope} zero"},
+                {"id": "plugin-1", "name": f"{scope} one"},
+            ]
+
+    tool = _tools(ScopeClient())["list_plugins"]
+    cursor = _run(tool, scope="USER", limit=1)["cursor"]
+
+    with pytest.raises(RuntimeError, match="fingerprint"):
+        _run(tool, scope="WORKSPACE", limit=1, cursor=cursor)
 
 
 def test_current_web_catalog_maps_only_release_version_and_backend_cursor() -> None:

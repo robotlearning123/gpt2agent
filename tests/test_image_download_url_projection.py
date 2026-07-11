@@ -10,7 +10,7 @@ def test_download_projection_preserves_valid_signed_https_url_exactly() -> None:
     signed_url = (
         "https://files.oaiusercontent.com/file-safe/image.png"
         "?se=2026-07-10T18%3A00%3A00Z&sp=r&sv=2024-11-04&sr=b"
-        "&sig=a%2Bb%2Fc%3D&response-content-disposition="
+        "&sig=a%2Bb%2Fc%3D&nested=a%252Bb&response-content-disposition="
         "attachment%3B%20filename%3Dimage.png"
     )
 
@@ -30,7 +30,11 @@ def test_download_projection_preserves_valid_signed_https_url_exactly() -> None:
         "https://download.example.com/file\nX-Injected: value",
         "https://download.example.com\\@localhost/file",
         "https://download.example.com/%5C..%5Cadmin",
+        "https://download.example.com/%255C..%255Cadmin",
+        "https://download.example.com/%25%35%43..%25%35%43admin",
         "https://download.example.com/file%0D%0AX-Injected%3Avalue",
+        "https://download.example.com/file%250D%250AX-Injected%253Avalue",
+        "https://download.example.com/file%25%30%44%25%30%41X-Injected",
         "https://download.example.com/file%ZZ",
         "https://download.example.com:bad/file",
         "https://download.example.com:8443/file",

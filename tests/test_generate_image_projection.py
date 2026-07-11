@@ -81,6 +81,65 @@ def test_generate_image_returns_a_fresh_closed_projection() -> None:
     assert secret not in repr(result)
 
 
+def test_generate_image_missing_download_url_reports_contract_changed() -> None:
+    upstream = {
+        "conversation_id": "conversation-safe",
+        "assets": [
+            {
+                "asset_pointer": "sediment://file-safe",
+                "file_id": "file-safe",
+            }
+        ],
+    }
+    client = FakeClient(
+        routes={
+            "/backend-api/files/file-safe/download": {},
+            "/backend-api/files/file-safe": {"id": "file-safe", "name": "safe.png"},
+        }
+    )
+
+    result, _ = _generate(upstream, client)
+    asset = result["assets"][0]
+
+    assert asset["download_error"] == "contract_changed"
+    assert "download_url" not in asset
+
+
+def test_generate_image_info_fallback_copies_documented_metadata() -> None:
+    upstream = {
+        "conversation_id": "conversation-safe",
+        "assets": [
+            {
+                "asset_pointer": "sediment://file-safe",
+                "file_id": "file-safe",
+            }
+        ],
+    }
+    client = FakeClient(
+        routes={
+            "/backend-api/files/file-safe/download": {
+                "download_url": "https://download.example/image",
+                "file_name": "",
+            },
+            "/backend-api/files/file-safe": {
+                "id": "file-safe",
+                "name": "safe.png",
+                "file_size_bytes": 1234,
+                "mime_type": "image/png",
+                "use_case": "generated",
+                "state": "ready",
+                "creation_time": 1234567890,
+            },
+        }
+    )
+
+    result, _ = _generate(upstream, client)
+    asset = result["assets"][0]
+
+    assert asset["file_size_bytes"] == 1234
+    assert asset["mime_type"] == "image/png"
+
+
 @pytest.mark.parametrize(
     "result",
     [

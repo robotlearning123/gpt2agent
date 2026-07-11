@@ -27,7 +27,11 @@ _DOWNLOAD_NUMERIC_HOST_LABEL_RE = re.compile(r"(?:0[xX][0-9A-Fa-f]+|[0-9]+)\Z")
 _INTERNAL_DOWNLOAD_SUFFIXES = frozenset(
     {"corp", "home", "home.arpa", "internal", "lan", "local", "localdomain", "localhost"}
 )
-_UNSAFE_ENCODED_URL_CHARACTER_RE = re.compile(r"%(?:0[0-9a-f]|1[0-9a-f]|5c|7f)", re.I)
+_PERCENT_ESCAPE_BYTES_RE = re.compile(rb"%([0-9a-f]{2})", re.I)
+_UNSAFE_ENCODED_URL_CHARACTER_RE = re.compile(
+    rb"%(?:0[0-9a-f]|1[0-9a-f]|5c|7f)", re.I
+)
+_MAX_PERCENT_DECODE_LAYERS = 8
 
 
 def _enrichment_error_code(error: Exception) -> str:
@@ -59,6 +63,21 @@ def _valid_percent_escapes(value: str) -> bool:
     return True
 
 
+def _contains_unsafe_encoded_url_character(value: str) -> bool:
+    """Inspect bounded percent-decoding layers without rewriting a signed URL."""
+    current = value.encode("utf-8")
+    for _ in range(_MAX_PERCENT_DECODE_LAYERS):
+        if _UNSAFE_ENCODED_URL_CHARACTER_RE.search(current) is not None:
+            return True
+        decoded = _PERCENT_ESCAPE_BYTES_RE.sub(
+            lambda match: bytes((int(match.group(1), 16),)), current
+        )
+        if decoded == current:
+            return False
+        current = decoded
+    return _PERCENT_ESCAPE_BYTES_RE.search(current) is not None
+
+
 def _project_download_url(value: Any) -> str:
     """Validate an untrusted download destination without rewriting its signature."""
     if value is None:
@@ -76,7 +95,7 @@ def _project_download_url(value: Any) -> str:
             for character in value
         )
         or not _valid_percent_escapes(value)
-        or _UNSAFE_ENCODED_URL_CHARACTER_RE.search(value) is not None
+        or _contains_unsafe_encoded_url_character(value)
     ):
         _invalid_download_url()
 
@@ -327,7 +346,12 @@ def register(mcp, client: BackendClient, conv=None) -> None:
                         auth_headers=auth_headers,
                         fixed_probe=True,
                     )
-                    asset.update(normalize_download_info(dl))
+                    normalized_download = normalize_download_info(dl)
+                    if not normalized_download["download_url"]:
+                        raise BackendContractError(
+                            "file_download", "download_url is required"
+                        )
+                    asset.update(normalized_download)
                 except Exception as exc:
                     # Enrichment is optional, but exception text can contain an
                     # upstream URL, header, or token. Return a stable status only.
@@ -343,8 +367,15 @@ def register(mcp, client: BackendClient, conv=None) -> None:
                     )
                     normalized = normalize_file_info(info, expected_id=file_id)
                     asset["file_name"] = normalized["name"] or ""
-                    for field in ("use_case", "state", "creation_time"):
-                        asset[field] = normalized[field]
+                    for field in (
+                        "file_size_bytes",
+                        "mime_type",
+                        "use_case",
+                        "state",
+                        "creation_time",
+                    ):
+                        if asset.get(field) is None:
+                            asset[field] = normalized[field]
                 except Exception as exc:
                     asset["info_error"] = _enrichment_error_code(exc)
 
