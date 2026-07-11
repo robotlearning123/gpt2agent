@@ -22,6 +22,41 @@ EXPECTED_BUILD_PINS = {
     "wheel": "0.47.0",
 }
 
+EXPECTED_LOCKED_PROJECTS = {
+    "build": "1.5.1",
+    "certifi": "2026.6.17",
+    "cffi": "2.1.0",
+    "charset-normalizer": "3.4.9",
+    "cryptography": "49.0.0",
+    "docutils": "0.23",
+    "id": "1.6.1",
+    "idna": "3.18",
+    "jaraco-classes": "3.4.0",
+    "jaraco-context": "6.1.2",
+    "jaraco-functools": "4.5.0",
+    "jeepney": "0.9.0",
+    "keyring": "25.7.0",
+    "markdown-it-py": "4.2.0",
+    "mdurl": "0.1.2",
+    "more-itertools": "11.1.0",
+    "nh3": "0.3.6",
+    "packaging": "26.2",
+    "pip": "26.1.2",
+    "pycparser": "3.0",
+    "pygments": "2.20.0",
+    "pyproject-hooks": "1.2.0",
+    "readme-renderer": "45.0",
+    "requests": "2.34.2",
+    "requests-toolbelt": "1.0.0",
+    "rfc3986": "2.0.0",
+    "rich": "15.0.0",
+    "secretstorage": "3.5.0",
+    "setuptools": "83.0.0",
+    "twine": "6.2.0",
+    "urllib3": "2.7.0",
+    "wheel": "0.47.0",
+}
+
 
 def _normalise_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
@@ -102,7 +137,7 @@ def test_build_system_and_direct_builder_inputs_use_exact_approved_pins() -> Non
 def test_build_lock_has_only_exact_hashed_requirements_from_the_approved_inputs() -> None:
     locked = _locked_requirements()
 
-    assert locked
+    assert {name: version for name, (version, _) in locked.items()} == EXPECTED_LOCKED_PROJECTS
     for name, (version, hashes) in locked.items():
         assert version, f"{name} has no exact version"
         assert hashes, f"{name} has no SHA256 hashes"
@@ -157,6 +192,7 @@ def test_dependency_audit_checks_the_locked_builder_closure_without_resolving() 
 
 def test_release_relay_validates_with_the_lock_without_rebuilding() -> None:
     build = _workflow_job(RELEASE_WORKFLOW, "build")
+    workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
     assert "runs-on: ubuntu-24.04" in build
     assert 'python-version: "3.12.13"' in build
@@ -166,7 +202,8 @@ def test_release_relay_validates_with_the_lock_without_rebuilding() -> None:
         in build
     )
     assert " -m build" not in build
-    assert build.count("scripts/package_smoke.sh") == 1
+    assert "Test built artifacts in clean environments" not in build
+    assert workflow.count("scripts/package_smoke.sh") == 0
 
 
 def test_dependabot_groups_only_the_approved_build_lock_inputs() -> None:

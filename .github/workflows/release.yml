@@ -266,12 +266,6 @@ jobs:
         run: |
           "$BUILD_VENV/bin/python" -m twine check --strict dist/*
 
-      - name: Test built artifacts in clean environments
-        env:
-          PROJECT_VERSION: ${{ needs.verify.outputs.version }}
-          DIST_VERSION: ${{ needs.verify.outputs.distribution_version }}
-        run: scripts/package_smoke.sh dist "$PROJECT_VERSION" "$DIST_VERSION"
-
       - name: Require the PyPI version to be absent before publication
         env:
           VERSION: ${{ needs.verify.outputs.distribution_version }}

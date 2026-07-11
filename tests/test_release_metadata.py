@@ -679,8 +679,8 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert '--commit "${{ steps.provenance.outputs.commit }}"' in release
     assert "distribution_version" in release
     assert "DIST_VERSION" in release
-    assert "Test built artifacts in clean environments" in release
-    assert 'scripts/package_smoke.sh dist "$PROJECT_VERSION" "$DIST_VERSION"' in release
+    assert "Test built artifacts in clean environments" not in release
+    assert "scripts/package_smoke.sh" not in release
     assert "name: Download the exact account-tested main-CI artifacts" in release
     assert "run-id: ${{ needs.verify.outputs.candidate_run_id }}" in release
     assert "artifact-ids: ${{ needs.verify.outputs.candidate_artifact_id }}" in release
@@ -1403,14 +1403,14 @@ def test_curl_cffi_floor_excludes_cve_2026_33752() -> None:
     assert "DEPENDENCY_AUDIT_RESULT" in ci
 
 
-def test_package_smoke_is_reused_in_ci_and_release() -> None:
+def test_package_smoke_runs_only_in_main_ci_candidate_job() -> None:
     script = PROJECT_ROOT / "scripts" / "package_smoke.sh"
     ci = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     release = (PROJECT_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 
     assert script.is_file()
     assert ci.count("scripts/package_smoke.sh") == 1
-    assert release.count("scripts/package_smoke.sh") == 1
+    assert release.count("scripts/package_smoke.sh") == 0
     assert "TMP_ROOT=$(mktemp -d)" not in release
 
 
