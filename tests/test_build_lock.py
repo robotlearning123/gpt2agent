@@ -179,8 +179,20 @@ def test_package_ci_uses_the_locked_builder_and_reproducible_build_settings() ->
     assert 'SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA")"' in package
     assert "PYTHONHASHSEED=0" in package
     assert "TZ=UTC" in package
-    assert '"$BUILD_VENV/bin/python" -m build --no-isolation' in package
-    assert '"$BUILD_VENV/bin/python" -m twine check --strict dist/*' in package
+    assert (
+        '"$BUILD_VENV/bin/python" -m build --no-isolation --outdir "$output"'
+        in package
+    )
+    assert (
+        '"$BUILD_VENV/bin/python" scripts/normalize_sdist.py '
+        '--epoch "$SOURCE_DATE_EPOCH" "${sdists[0]}"'
+    ) in package
+    assert '"$BUILD_VENV/bin/python" -m twine check --strict "${artifacts[@]}"' in package
+    assert "build_distribution_set dist" in package
+    assert 'build_distribution_set "$REPRO_DIST"' in package
+    assert 'cmp -s -- "${FIRST_WHEELS[0]}" "${SECOND_WHEELS[0]}"' in package
+    assert 'cmp -s -- "${FIRST_SDISTS[0]}" "${SECOND_SDISTS[0]}"' in package
+    assert 'sha256sum -- "${FIRST_WHEELS[0]}" "${FIRST_SDISTS[0]}"' in package
     assert package.count("scripts/package_smoke.sh") == 1
     assert "overwrite: false" in package
 

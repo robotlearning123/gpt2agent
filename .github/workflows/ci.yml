@@ -302,8 +302,53 @@ jobs:
           export SOURCE_DATE_EPOCH PYTHONHASHSEED=0 TZ=UTC
           printf 'SOURCE_DATE_EPOCH=%s\nPYTHONHASHSEED=%s\nTZ=%s\n' \
             "$SOURCE_DATE_EPOCH" "$PYTHONHASHSEED" "$TZ"
-          "$BUILD_VENV/bin/python" -m build --no-isolation
-          "$BUILD_VENV/bin/python" -m twine check --strict dist/*
+
+          REPRO_DIST="$RUNNER_TEMP/gpt2agent-repro-dist"
+          cleanup_repro_build() {
+            status=$?
+            trap - EXIT HUP INT TERM
+            rm -rf -- "$REPRO_DIST" build gpt2agent.egg-info
+            exit "$status"
+          }
+          trap cleanup_repro_build EXIT
+          trap 'exit 130' HUP INT TERM
+
+          shopt -s nullglob
+          build_distribution_set() {
+            local output=$1
+            rm -rf -- "$output" build gpt2agent.egg-info
+            "$BUILD_VENV/bin/python" -m build --no-isolation --outdir "$output"
+
+            local -a artifacts=("$output"/*)
+            local -a wheels=("$output"/*.whl)
+            local -a sdists=("$output"/*.tar.gz)
+            test "${#artifacts[@]}" -eq 2
+            test "${#wheels[@]}" -eq 1
+            test "${#sdists[@]}" -eq 1
+            test -f "${wheels[0]}" && test ! -L "${wheels[0]}"
+            test -f "${sdists[0]}" && test ! -L "${sdists[0]}"
+            "$BUILD_VENV/bin/python" scripts/normalize_sdist.py --epoch "$SOURCE_DATE_EPOCH" "${sdists[0]}"
+            "$BUILD_VENV/bin/python" -m twine check --strict "${artifacts[@]}"
+          }
+
+          build_distribution_set dist
+          build_distribution_set "$REPRO_DIST"
+
+          FIRST_WHEELS=(dist/*.whl)
+          FIRST_SDISTS=(dist/*.tar.gz)
+          SECOND_WHEELS=("$REPRO_DIST"/*.whl)
+          SECOND_SDISTS=("$REPRO_DIST"/*.tar.gz)
+          test "$(basename -- "${FIRST_WHEELS[0]}")" = \
+            "$(basename -- "${SECOND_WHEELS[0]}")"
+          test "$(basename -- "${FIRST_SDISTS[0]}")" = \
+            "$(basename -- "${SECOND_SDISTS[0]}")"
+          cmp -s -- "${FIRST_WHEELS[0]}" "${SECOND_WHEELS[0]}"
+          cmp -s -- "${FIRST_SDISTS[0]}" "${SECOND_SDISTS[0]}"
+          sha256sum -- "${FIRST_WHEELS[0]}" "${FIRST_SDISTS[0]}"
+          sha256sum -- "${SECOND_WHEELS[0]}" "${SECOND_SDISTS[0]}"
+
+          rm -rf -- "$REPRO_DIST" build gpt2agent.egg-info
+          trap - EXIT HUP INT TERM
 
       - name: Test wheel and sdist in clean environments
         run: |

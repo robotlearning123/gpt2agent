@@ -371,13 +371,14 @@ manifests. Python package metadata and PyPI use the corresponding canonical
 PEP 440 spelling (`X.Y.ZaN`, `X.Y.ZbN`, or `X.Y.ZrcN`).
 
 After the release PR is merged, run the private account gate on a trusted local
-machine against its exact merge SHA. Main CI builds the wheel and sdist once and
-retains them under an attempt-specific, immutable artifact ID. In its
-credential-free package job, main CI installs both formats, runs the same closed
-synthetic adapter corpus against each, requires byte-identical corpus results,
-and verifies that the distribution hashes do not change. The local account gate
-downloads that exact candidate but treats both files as inert bytes: it never
-installs, imports, builds, or executes them.
+machine against its exact merge SHA. Main CI independently builds two
+wheel/sdist sets, deterministically normalizes each sdist, requires both formats
+to be byte-identical across builds, and retains only the first set under an
+attempt-specific, immutable artifact ID. In its credential-free package job,
+main CI installs both retained formats, runs the same closed synthetic adapter
+corpus against each, and requires byte-identical corpus results. The local
+account gate downloads that exact candidate but treats both files as inert
+bytes: it never installs, imports, builds, or executes them.
 
 Bootstrap the verifier from `requirements-account-gate.txt` into a new
 owner-private CPython 3.12.13 for Linux x86_64 environment outside the checkout.
