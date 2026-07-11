@@ -32,7 +32,7 @@ CREATE_APP_TOKEN = (
 )
 EXACT_RELEASE_ACTION = (
     "robotlearning123/gpt2agent/.github/actions/publish-exact-github-release@"
-    "5f0f75f691ad20513cb8409b6f292bdea79de81e"
+    "bd9ab5412145ee2b1026e07d0c48b4fd2704315c"
 )
 
 

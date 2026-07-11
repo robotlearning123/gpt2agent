@@ -15,7 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TOOL_CHECK = PROJECT_ROOT / "scripts" / "verify_release_tools.py"
 ACTION_CHECK = PROJECT_ROOT / "scripts" / "verify_remote_action_pin.py"
 ACTION_DIRECTORY = PROJECT_ROOT / ".github" / "actions" / "publish-exact-github-release"
-ACTION_PIN = "5f0f75f691ad20513cb8409b6f292bdea79de81e"
+ACTION_PIN = "bd9ab5412145ee2b1026e07d0c48b4fd2704315c"
 
 
 def _write_executable(path: Path, source: str) -> None:

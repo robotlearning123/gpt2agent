@@ -544,7 +544,7 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-administration: read
       - name: Validate and publish the exact draft
-        uses: robotlearning123/gpt2agent/.github/actions/publish-exact-github-release@5f0f75f691ad20513cb8409b6f292bdea79de81e
+        uses: robotlearning123/gpt2agent/.github/actions/publish-exact-github-release@bd9ab5412145ee2b1026e07d0c48b4fd2704315c
         with:
           github-token: ${{ github.token }}
           immutability-token: ${{ steps.release-settings-token.outputs.token }}
