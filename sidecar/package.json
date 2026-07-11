@@ -1,0 +1,11 @@
+{
+  "name": "gpt2agent-live-voice-sidecar",
+  "version": "0.0.14",
+  "private": true,
+  "type": "module",
+  "description": "Experimental GPT-Live voice bridge sidecar (WebRTC) for gpt2agent. Audio stays here; MCP gets a control plane only.",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test"
+  }
+}
