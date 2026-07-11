@@ -636,6 +636,38 @@ def test_generate_image_treats_backend_generated_file_reads_as_fixed_probes() ->
     assert out["assets"][0]["info_error"] == "contract_changed"
 
 
+@pytest.mark.parametrize(
+    ("rejected_path", "error_field"),
+    [
+        ("/backend-api/files/f1/download", "download_error"),
+        ("/backend-api/files/f1", "info_error"),
+    ],
+)
+def test_generate_image_maps_backend_file_id_rejection_to_contract_changed(
+    rejected_path: str,
+    error_field: str,
+) -> None:
+    class RejectingClient(FakeClient):
+        def get(self, path: str, target_path: str | None = None, **kwargs: Any) -> Any:
+            self.gets.append(path)
+            if path == rejected_path:
+                raise BackendHTTPError(
+                    "GET", path, 422, code="invalid_input", retryable=False
+                )
+            if path.endswith("/download"):
+                return {
+                    "download_url": "https://downloads.example.com/img",
+                    "file_name": "",
+                }
+            return {"id": "f1", "name": "img.png"}
+
+    fn = _reg(images, RejectingClient(), _ToolConv()).tools["generate_image"]
+
+    out = asyncio.run(fn("a cat"))
+
+    assert out["assets"][0][error_field] == "contract_changed"
+
+
 def test_generate_image_rejects_backend_file_id_before_building_a_url() -> None:
     class MalformedConversation(_ToolConv):
         async def image_gen(self, prompt, *, model="gpt-5-3", auth_headers=None):
@@ -1056,6 +1088,62 @@ def test_deep_research_source_renderer_rejects_encoded_secrets_in_paths(
     ]
 
     assert server_mod._render_dr_sources(refs) == ""
+
+
+@pytest.mark.parametrize(
+    "encoded_field",
+    [
+        "who=owner%2540example.com",
+        "payload=sk%252Daaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ],
+)
+def test_deep_research_source_renderer_drops_double_encoded_query_values(
+    encoded_field: str,
+) -> None:
+    from gpt2agent import server as server_mod
+
+    refs = [
+        {
+            "items": [
+                {
+                    "url": f"https://example.com/report?safe=1&{encoded_field}",
+                    "title": "Source",
+                }
+            ]
+        }
+    ]
+
+    rendered = server_mod._render_dr_sources(refs)
+
+    assert rendered == (
+        "\n\n---\n**Sources:**\n"
+        "- [Source](<https://example.com/report?safe=1>)"
+    )
+
+
+def test_deep_research_source_renderer_drops_double_encoded_query_keys() -> None:
+    from gpt2agent import server as server_mod
+
+    refs = [
+        {
+            "items": [
+                {
+                    "url": (
+                        "https://example.com/report?safe=1&"
+                        "access%255Ftoken=synthetic-value"
+                    ),
+                    "title": "Source",
+                }
+            ]
+        }
+    ]
+
+    rendered = server_mod._render_dr_sources(refs)
+
+    assert rendered == (
+        "\n\n---\n**Sources:**\n"
+        "- [Source](<https://example.com/report?safe=1>)"
+    )
 
 
 def test_deep_research_heavy_appends_connector_warning(monkeypatch) -> None:

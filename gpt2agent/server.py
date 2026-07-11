@@ -244,6 +244,8 @@ def _project_citation_url(value: object) -> str | None:
                 not key
                 or len(key) > _MAX_CITATION_QUERY_KEY_LENGTH
                 or len(query_value) > _MAX_CITATION_QUERY_VALUE_LENGTH
+                or _contains_percent_escape(key)
+                or _contains_percent_escape(query_value)
                 or _sensitive_citation_query_name(key)
                 or redact(key) != key
                 or redact(query_value) != query_value

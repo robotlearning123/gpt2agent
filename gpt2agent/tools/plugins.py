@@ -20,6 +20,9 @@ from gpt2agent.tools._validation import (
 
 _LOCAL_PREFIX = "g2a-local-v1:"
 _LOCAL_CURSOR_KEY = secrets.token_bytes(32)
+_BASE64URL_ALPHABET = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+)
 _MAX_INSTALLED_ITEMS = 100
 _SCALAR_FIELDS = (
     "id",
@@ -105,7 +108,16 @@ def _encode_local_cursor(fingerprint: str, offset: int) -> str:
 def _decode_local_cursor(cursor: str) -> tuple[str, int]:
     try:
         token = cursor[len(_LOCAL_PREFIX) :]
-        payload = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
+        if not token or any(character not in _BASE64URL_ALPHABET for character in token):
+            raise ValueError
+        decoded = base64.b64decode(
+            token.encode("ascii") + b"=" * (-len(token) % 4),
+            altchars=b"-_",
+            validate=True,
+        )
+        if base64.urlsafe_b64encode(decoded).decode().rstrip("=") != token:
+            raise ValueError
+        payload = json.loads(decoded)
         fingerprint = payload["f"]
         offset = payload["o"]
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):

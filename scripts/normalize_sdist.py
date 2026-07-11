@@ -24,11 +24,21 @@ _MAX_MEMBER_BYTES = 256 * 1024 * 1024
 _MAX_TOTAL_BYTES = 512 * 1024 * 1024
 _MAX_MEMBERS = 10_000
 _MAX_NAME_BYTES = 4_096
+_MAX_EXTENDED_HEADER_BYTES = _MAX_NAME_BYTES + 1024
 _MAX_DECOMPRESS_BYTES = 1024 * 1024
 _MAX_TAR_BYTES = _MAX_TOTAL_BYTES + _MAX_MEMBERS * 8 * 1024 + 20 * 1024
 _COPY_CHUNK = 1024 * 1024
 _ARCHIVE_ROOT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}\Z")
 _VOLATILE_PAX_FIELDS = frozenset({"mtime"})
+_EXTENDED_HEADER_TYPES = frozenset(
+    {
+        tarfile.XHDTYPE,
+        tarfile.XGLTYPE,
+        tarfile.SOLARIS_XHDTYPE,
+        tarfile.GNUTYPE_LONGNAME,
+        tarfile.GNUTYPE_LONGLINK,
+    }
+)
 
 
 class SdistNormalizationError(ValueError):
@@ -151,6 +161,146 @@ def _validate_complete_gzip(stream: BinaryIO) -> None:
         stream.seek(0)
 
 
+def _read_tar_block(stream: BinaryIO, *, eof_ok: bool = False) -> bytes | None:
+    block = bytearray()
+    while len(block) < 512:
+        chunk = stream.read(512 - len(block))
+        if not chunk:
+            if eof_ok:
+                return bytes(block) if block else None
+            raise SdistNormalizationError("sdist tar stream is truncated")
+        block.extend(chunk)
+    return bytes(block)
+
+
+def _tar_header_size(header: bytes) -> int:
+    try:
+        size = tarfile.nti(header[124:136])
+    except (ValueError, tarfile.TarError) as error:
+        raise SdistNormalizationError("sdist tar header has an invalid size") from error
+    if size < 0:
+        raise SdistNormalizationError("sdist tar header has a negative size")
+    return size
+
+
+def _discard_exact(stream: BinaryIO, size: int) -> None:
+    remaining = size
+    while remaining:
+        chunk = stream.read(min(_COPY_CHUNK, remaining))
+        if not chunk:
+            raise SdistNormalizationError("sdist tar payload is truncated")
+        remaining -= len(chunk)
+
+
+def _validate_payload_and_padding(stream: BinaryIO, size: int) -> None:
+    _discard_exact(stream, size)
+    padding_size = (-size) % 512
+    if not padding_size:
+        return
+    padding = bytearray()
+    while len(padding) < padding_size:
+        chunk = stream.read(padding_size - len(padding))
+        if not chunk:
+            raise SdistNormalizationError("sdist tar payload padding is truncated")
+        padding.extend(chunk)
+    if any(padding):
+        raise SdistNormalizationError("sdist tar payload padding must be zero")
+
+
+def _preflight_tar_stream(stream: BinaryIO) -> None:
+    """Validate raw tar framing before ``tarfile`` parses extended metadata."""
+    header_count = 0
+    member_count = 0
+    total_size = 0
+    pending_extended_header = False
+    try:
+        stream.seek(0)
+        while True:
+            header = _read_tar_block(stream)
+            assert header is not None
+            if not any(header):
+                if pending_extended_header:
+                    raise SdistNormalizationError(
+                        "sdist local extended header is not followed by a member"
+                    )
+                zero_tail_size = 512
+                while True:
+                    tail = _read_tar_block(stream, eof_ok=True)
+                    if tail is None:
+                        break
+                    zero_tail_size += len(tail)
+                    if any(tail):
+                        raise SdistNormalizationError("sdist contains nonzero data after tar EOF")
+                    if len(tail) != 512:
+                        raise SdistNormalizationError(
+                            "sdist tar EOF padding is incomplete or noncanonical"
+                        )
+                if zero_tail_size < 1024:
+                    raise SdistNormalizationError(
+                        "sdist tar EOF padding is incomplete or noncanonical"
+                    )
+                if member_count == 0:
+                    raise SdistNormalizationError(
+                        "sdist member count is outside the supported bound"
+                    )
+                return
+
+            header_count += 1
+            if header_count > _MAX_MEMBERS * 2:
+                raise SdistNormalizationError(
+                    "sdist tar header count is outside the supported bound"
+                )
+            size = _tar_header_size(header)
+            member_type = header[156:157]
+            if member_type in _EXTENDED_HEADER_TYPES:
+                if size > _MAX_EXTENDED_HEADER_BYTES:
+                    raise SdistNormalizationError(
+                        "sdist extended header payload is outside the supported bound"
+                    )
+                if member_type == tarfile.XGLTYPE:
+                    raise SdistNormalizationError("sdist global PAX metadata is unsupported")
+                if member_type == tarfile.GNUTYPE_LONGLINK:
+                    raise SdistNormalizationError("sdist contains unsupported link metadata")
+                if pending_extended_header:
+                    raise SdistNormalizationError(
+                        "sdist contains consecutive local extended headers"
+                    )
+                pending_extended_header = True
+            else:
+                pending_extended_header = False
+                member_count += 1
+                if member_count > _MAX_MEMBERS:
+                    raise SdistNormalizationError(
+                        "sdist member count is outside the supported bound"
+                    )
+                if size > _MAX_MEMBER_BYTES:
+                    raise SdistNormalizationError(
+                        "sdist member size is outside the supported bound"
+                    )
+                if member_type in {tarfile.REGTYPE, tarfile.AREGTYPE}:
+                    total_size += size
+                    if total_size > _MAX_TOTAL_BYTES:
+                        raise SdistNormalizationError(
+                            "sdist payload exceeds the supported total bound"
+                        )
+            _validate_payload_and_padding(stream, size)
+    finally:
+        stream.seek(0)
+
+
+def _bounded_members(archive: tarfile.TarFile) -> list[tarfile.TarInfo]:
+    members: list[tarfile.TarInfo] = []
+    for member in archive:
+        if len(members) >= _MAX_MEMBERS:
+            raise SdistNormalizationError(
+                "sdist member count is outside the supported bound"
+            )
+        members.append(member)
+    if not members:
+        raise SdistNormalizationError("sdist member count is outside the supported bound")
+    return members
+
+
 def _validate_tar_tail(stream: BinaryIO, parsed_offset: int) -> None:
     """Reject unparsed data hidden after tar's logical end-of-archive marker."""
     try:
@@ -259,16 +409,13 @@ def _scan_archive(
         _validate_complete_gzip(raw)
         try:
             with gzip.GzipFile(fileobj=raw, mode="rb") as expanded:
+                _preflight_tar_stream(expanded)
                 with tarfile.open(fileobj=expanded, mode="r:") as archive:
                     if archive.pax_headers:
                         raise SdistNormalizationError("sdist global PAX metadata is unsupported")
-                    members = archive.getmembers()
+                    members = _bounded_members(archive)
                     _validate_header_string_fields(expanded, members)
                     _validate_tar_tail(expanded, archive.offset)
-                    if not 0 < len(members) <= _MAX_MEMBERS:
-                        raise SdistNormalizationError(
-                            "sdist member count is outside the supported bound"
-                        )
 
                     names: set[str] = set()
                     types: dict[str, str] = {}
@@ -383,8 +530,9 @@ def _write_normalized(
         _validate_complete_gzip(raw_source)
         try:
             with gzip.GzipFile(fileobj=raw_source, mode="rb") as expanded:
+                _preflight_tar_stream(expanded)
                 with tarfile.open(fileobj=expanded, mode="r:") as source:
-                    members = source.getmembers()
+                    members = _bounded_members(source)
                     _validate_tar_tail(expanded, source.offset)
                     with gzip.GzipFile(
                         filename="",

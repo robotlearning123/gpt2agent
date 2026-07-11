@@ -141,7 +141,7 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 
 | Tool | What it does |
 |---|---|
-| `generate_image` | Generate images through the observed private prepare/conduit + `/f` v1 flow. Returns relationally validated, allowlisted asset fields + download URLs |
+| `generate_image` | Generate images through the observed private prepare/conduit + `/f` v1 flow. Returns relationally validated base asset fields; per-asset download/info enrichment is optional and reports typed `download_error` / `info_error` statuses when unavailable |
 | `get_file_info` | Metadata for any ChatGPT file (images, uploads) |
 | `get_file_download_url` | Validated public HTTPS download URL for a ChatGPT file (~1h expiry; signed query preserved) |
 
@@ -288,7 +288,9 @@ Plugin bundles distribution.
   website generated an image and the account catalog advertised image-capable
   models, but the direct client failed closed on a changed required Turnstile
   challenge before the prepare request. Catalog entitlement is not execution
-  reachability; do not treat `generate_image` as currently verified.
+  reachability; do not treat `generate_image` as currently verified. Per-asset
+  download and metadata reads are optional enrichment: successful fields may be
+  absent, with a typed `download_error` or `info_error` status returned instead.
 - Requires an active ChatGPT Plus or Pro subscription.
 
 ---

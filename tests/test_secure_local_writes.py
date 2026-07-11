@@ -101,6 +101,18 @@ def test_backup_binds_symlink_content_and_mode_to_one_open_file(
     assert stat.S_IMODE(backup.stat().st_mode) == 0o600
 
 
+def test_backup_rejects_non_regular_source(tmp_path: Path) -> None:
+    from gpt2agent.install import _backup
+
+    config = tmp_path / "config.json"
+    config.mkdir()
+
+    with pytest.raises(RuntimeError, match="must resolve to a regular file"):
+        _backup(config)
+
+    assert not config.with_name(config.name + ".bak-gpt2agent").exists()
+
+
 def test_atomic_write_does_not_follow_predictable_temp_symlink(tmp_path: Path) -> None:
     from gpt2agent.install import _atomic_write
 

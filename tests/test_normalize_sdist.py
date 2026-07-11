@@ -109,6 +109,18 @@ def _write_custom_archive(
                         archive.addfile(member)
 
 
+def _raw_tar_header(name: str, *, size: int = 0, member_type: bytes = tarfile.REGTYPE) -> bytes:
+    member = tarfile.TarInfo(name)
+    member.type = member_type
+    member.size = size
+    return member.tobuf(format=tarfile.GNU_FORMAT)
+
+
+def _octal_header_size(header: bytes) -> int:
+    field = header[124:136].rstrip(b"\0 ").lstrip(b" ")
+    return int(field or b"0", 8)
+
+
 def test_normalizer_makes_order_and_metadata_distinct_archives_byte_identical(
     tmp_path: Path,
 ) -> None:
@@ -367,6 +379,119 @@ def test_gzip_validation_bounds_each_decompression_call(
 
     assert limits
     assert max(limits) <= module._MAX_DECOMPRESS_BYTES
+
+
+def test_raw_tar_preflight_stops_on_member_limit_plus_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    monkeypatch.setattr(module, "_MAX_MEMBERS", 3)
+
+    class TrackingStream(io.BytesIO):
+        furthest_offset = 0
+
+        def read(self, size: int = -1) -> bytes:
+            result = super().read(size)
+            self.furthest_offset = max(self.furthest_offset, self.tell())
+            return result
+
+    stream = TrackingStream(
+        b"".join(_raw_tar_header(f"{ROOT}/member-{index}") for index in range(5))
+        + b"\0" * 1024
+    )
+
+    with pytest.raises(module.SdistNormalizationError, match="member count"):
+        module._preflight_tar_stream(stream)
+
+    assert stream.furthest_offset == 4 * 512
+
+
+@pytest.mark.parametrize(
+    "member_type",
+    [
+        tarfile.XHDTYPE,
+        tarfile.XGLTYPE,
+        tarfile.SOLARIS_XHDTYPE,
+        tarfile.GNUTYPE_LONGNAME,
+        tarfile.GNUTYPE_LONGLINK,
+    ],
+    ids=["pax", "global-pax", "solaris-pax", "gnu-longname", "gnu-longlink"],
+)
+def test_raw_tar_preflight_rejects_oversized_extended_header_without_reading_payload(
+    member_type: bytes,
+) -> None:
+    module = _load_module()
+    declared_size = module._MAX_EXTENDED_HEADER_BYTES + 1
+
+    class HeaderOnlyStream(io.BytesIO):
+        def read(self, size: int = -1) -> bytes:
+            if self.tell() >= 512:
+                raise AssertionError("oversized extended-header payload was read")
+            return super().read(size)
+
+    stream = HeaderOnlyStream(
+        _raw_tar_header("././@LongLink", size=declared_size, member_type=member_type)
+    )
+
+    with pytest.raises(module.SdistNormalizationError, match="extended header.*bound"):
+        module._preflight_tar_stream(stream)
+
+
+def test_raw_tar_preflight_rejects_consecutive_local_extended_headers() -> None:
+    module = _load_module()
+    header = _raw_tar_header("././@PaxHeader", member_type=tarfile.XHDTYPE)
+
+    with pytest.raises(module.SdistNormalizationError, match="consecutive"):
+        module._preflight_tar_stream(io.BytesIO(header + header + b"\0" * 1024))
+
+
+def test_raw_tar_preflight_requires_extended_header_to_have_a_member() -> None:
+    module = _load_module()
+    header = _raw_tar_header("././@PaxHeader", member_type=tarfile.XHDTYPE)
+
+    with pytest.raises(module.SdistNormalizationError, match="followed by a member"):
+        module._preflight_tar_stream(io.BytesIO(header + b"\0" * 1024))
+
+
+def test_normalizer_rejects_nonzero_regular_member_padding(tmp_path: Path) -> None:
+    module = _load_module()
+    archive = tmp_path / f"{ROOT}.tar.gz"
+    target_name = f"{ROOT}/padding-test"
+    _write_custom_archive(archive, [*_required_entries(), _file(target_name, b"x")])
+    expanded = bytearray(gzip.decompress(archive.read_bytes()))
+    with tarfile.open(fileobj=io.BytesIO(expanded), mode="r:") as parsed:
+        target = parsed.getmember(target_name)
+    padding_offset = target.offset_data + target.size
+    assert padding_offset % 512 != 0
+    expanded[padding_offset] = 1
+    archive.write_bytes(gzip.compress(bytes(expanded), mtime=EPOCH))
+
+    with pytest.raises(module.SdistNormalizationError, match="payload padding"):
+        module.normalize_sdist(archive, epoch=EPOCH)
+
+
+def test_normalizer_rejects_nonzero_extended_header_padding(tmp_path: Path) -> None:
+    module = _load_module()
+    archive = tmp_path / f"{ROOT}.tar.gz"
+    _write_custom_archive(archive, _source_entries())
+    expanded = bytearray(gzip.decompress(archive.read_bytes()))
+
+    offset = 0
+    while True:
+        header = bytes(expanded[offset : offset + 512])
+        assert len(header) == 512 and any(header), "test archive has no extended header"
+        payload_size = _octal_header_size(header)
+        if header[156:157] == tarfile.XHDTYPE:
+            break
+        offset += 512 + ((payload_size + 511) // 512) * 512
+
+    padding_offset = offset + 512 + payload_size
+    assert padding_offset % 512 != 0
+    expanded[padding_offset] = 1
+    archive.write_bytes(gzip.compress(bytes(expanded), mtime=EPOCH))
+
+    with pytest.raises(module.SdistNormalizationError, match="payload padding"):
+        module.normalize_sdist(archive, epoch=EPOCH)
 
 
 def test_normalizer_enforces_member_size_bound(

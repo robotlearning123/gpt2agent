@@ -165,7 +165,12 @@ they are not an authorization boundary.
   - `model` (str, default: `"gpt-5-3"`) -- model to use (must have `image_gen_tool_enabled`).
 - **Returns**: `dict` with keys:
   - `conversation_id` (str)
-  - `assets` (list) -- each asset contains: `asset_pointer`, `file_id`, `width`, `height`, `size_bytes`, `download_url`, `file_name`, `mime_type`
+  - `assets` (list) -- each asset always contains the validated base fields
+    `asset_pointer`, `file_id`, `width`, `height`, and `size_bytes`. Optional
+    download/info enrichment may add `download_url`, `file_name`,
+    `file_size_bytes`, `mime_type`, `use_case`, `state`, and `creation_time`.
+    A failed optional read instead adds a status-only `download_error` or
+    `info_error` field; it never returns the upstream exception text.
 - **When to use**: Illustrations, diagrams, concept art, visual aids.
 - **Example**:
   ```python
@@ -180,7 +185,14 @@ they are not an authorization boundary.
   - A visible asset carrier must be relationally bound to the observed assistant
     dispatch and carry image-generation provenance before it is accepted.
   - Timeout: 300 seconds for complex prompts.
-  - Each asset automatically gets a `download_url` fetched from `/backend-api/files/{file_id}/download`.
+  - Each asset attempts an optional download read from
+    `/backend-api/files/{file_id}/download` and, when needed, an optional info
+    read from `/backend-api/files/{file_id}`. These enrichments are not required
+    for a successful image result.
+  - `download_error` and `info_error` use typed statuses such as
+    `contract_changed`, `temporarily_failed`, `access_indeterminate`, and
+    `login_required`. A 422 for the backend-produced file ID is
+    `contract_changed`, not caller `invalid_input`.
   - Download URLs are temporary (~1 hour expiry). Use `get_file_download_url` to refresh.
   - If `conv` is not injected, the tool creates its own `ConversationClient` instance.
 
