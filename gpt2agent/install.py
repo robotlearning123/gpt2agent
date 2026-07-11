@@ -630,6 +630,9 @@ def install_claude_skill(
     (bypasses MCP) so it works even before restarting Claude Code.
     The gpt2agent skill provides full account access instructions and
     pre-approves all 32 MCP tools.
+
+    The historical top-level result describes the final skill; ``skills``
+    reports every attempted bundle without breaking existing callers.
     """
     skills_src = Path(__file__).parent / "skills"
     target_dir = dst_dir or Path.home() / ".claude" / "skills"
@@ -645,7 +648,7 @@ def install_claude_skill(
     if not results:
         return {"path": None, "skipped": True}
 
-    return results[-1]
+    return {**results[-1], "skills": results}
 
 
 # ── auto-detect ────────────────────────────────────────────────────────────

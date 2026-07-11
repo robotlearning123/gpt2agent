@@ -286,6 +286,12 @@ def test_skill_install(tmp_path: Path) -> None:
     assert ga.exists()
     assert (ga / "SKILL.md").exists()
     assert (ga / "tools-reference.md").exists()
+    assert [entry["path"].name for entry in result["skills"]] == [
+        "deep-research",
+        "gpt2agent",
+    ]
+    # Preserve the historical top-level result for existing callers.
+    assert result["path"] == ga
 
 
 def test_skill_backup_on_overwrite(tmp_path: Path) -> None:

@@ -211,6 +211,7 @@ def test_github_release_draft_writer_is_action_only_and_closed_to_approved_pins(
         "${{ github.run_attempt }}/release-evidence/release-workflow-artifacts.json",
     ]
     assert all("*" not in path for path in files)
+    assert "          name: ${{ github.ref_name }}" in job
     assert "          fail_on_unmatched_files: true" in job
     assert "          overwrite_files: false" in job
     assert "          draft: true" in job
