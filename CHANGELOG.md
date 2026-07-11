@@ -6,6 +6,57 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.0.14] - 2026-07-11
+
+### Added — GPT-Live voice → coding agent (lane: `sidecar/`)
+
+- **Full GPT-Live reverse-engineering** (live capture + the 4.5 MB shipped voice
+  client bundle, all cited): the authoritative protocol spec at
+  `docs/superpowers/plans/2026-07-11-gpt-live-protocol-spec.md`. Resolves every gap
+  the earlier investigation left open — handshake, WebRTC, the real datachannel
+  event vocabulary, the turn lifecycle, capabilities, and the anti-bot boundary.
+- **Voice → coding-agent bridge**: taps the real consumer GPT-Live datachannel,
+  reconstructs each human utterance from the real `chat_message_delta`
+  (`direction:"in"`) protocol, and routes it to a pluggable coding agent
+  (`--agent-cmd`, default `claude -p`). Audio stays in the browser; only the
+  transcript crosses to the agent.
+- **`VoiceProvider` abstraction** (`sidecar/src/voice-provider.mjs`):
+  `ConsumerGptLiveVoiceProvider` (production: real mic, the irreplaceable GPT-Live
+  voice) and `RealtimeVoiceProvider` (test double: OpenAI Realtime API). The
+  agent-wiring is provider-agnostic, so the loop is regression-tested human-free.
+- **Human-free voice testing stack**:
+  - `sidecar/src/transcript.mjs` + `test/transcript.test.mjs` — the consumer
+    transcript parser as pure logic (8 unit tests; no voice/human/LLM).
+  - `sidecar/src/realtime-provider.mjs` + `test/realtime-stt.test.mjs` — a
+    human-free STT test double via the Realtime API (synthetic TTS → transcript,
+    no mic/human/browser).
+  - `test/voice-loop.test.mjs` — opt-in full human-free loop (TTS → STT → agent).
+  - `sidecar/test/voice-test-cases.md` — the layered voice test-case suite.
+
+### Changed
+
+- `sidecar/src/events.mjs` corrected to the REAL consumer protocol
+  (`CONSUMER_EVENTS` + `TranscriptAssembler`). The previous Realtime-API event
+  names and the `buildSpeakWire`/`response.create` speak-injection are now
+  `@deprecated`: verified 2026-07-11, the consumer channel silently drops
+  `response.create` / `conversation.item.create` / `session.update` (5 candidates,
+  all `dc.send→true`, 0 replies). Behavior is retained for source/test compat.
+- `sidecar` test scope narrowed to `test/*.test.mjs` so one-off experiment scripts
+  (`experiments/`) are no longer picked up by `npm test`.
+
+### Findings (documented, evidence-backed)
+
+- Consumer GPT-Live transcribes ONLY real-microphone audio. Synthetic audio —
+  Chrome fake-device AND `RTCRtpSender.replaceTrack` of real TTS (confirmed
+  `ctx.state=running`, real-speech amplitude, `sender.track===injected`, audio
+  egressing) — is NOT transcribed, while the real mic is. ⇒ GPT-Live's STT is not
+  drivable human-free; that's why the Realtime API is the test double.
+- Cloudflare Turnstile gates session create; only a headed, non-automated Chrome on
+  a signed-in profile clears it. Headless/token-only/copied-profile + automation
+  flags are SCTP-aborted ~1 s after `listening`.
+- Voice conversations ARE normal ChatGPT backend conversations — readable by the
+  existing `list_conversations`/`get_conversation` MCP tools; memory is shared.
+
 ## [0.0.13] - 2026-07-11
 
 ### Added
