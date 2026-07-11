@@ -6,11 +6,18 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the account-gate runtime is an explicit Linux x86_64 release boundary",
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]

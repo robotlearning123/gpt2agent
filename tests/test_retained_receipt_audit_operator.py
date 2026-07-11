@@ -7,7 +7,16 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
+
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the retained-receipt audit operator is Linux-only by contract",
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

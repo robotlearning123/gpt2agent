@@ -4,6 +4,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -11,6 +12,12 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the reviewed CPython artifact and installer require Linux GNU userland",
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]

@@ -481,6 +481,13 @@ scripts/run_account_release.sh \
   --git /usr/bin/git
 ```
 
+Immediately before the remote tag-ref POST, the coordinator atomically creates
+a mode-0600 `*.irreversible-ref-state` record in that evidence directory. It
+contains the exact tag, attempted annotated-tag object SHA, and commit. Preserve
+it with the receipt and candidate bytes after success or any ambiguous
+interruption; the temporary runtime is disposable, but this recovery identity
+is not.
+
 The release workflow (`.github/workflows/release.yml`) verifies every version
 surface and the CHANGELOG, reads the remote annotated tag target independently
 of checkout's runner-local tag ref, binds it to the event SHA, and proves that

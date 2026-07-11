@@ -164,6 +164,9 @@ producing attempt, numeric artifact ID, REST digest, size, and expiry to both
 account-receipt commands. Give the downloaded distribution, receipt, and trusted
 runtime new paths outside the checkout. The runtime is temporary; retain the
 mode-0600 receipt and inert candidate only under the reviewed evidence policy.
+Also retain the mode-0600 `*.irreversible-ref-state` record written immediately
+before a tag-ref POST; it binds any successful or ambiguous attempt to the exact
+annotated-tag object SHA and must survive disposable-runtime cleanup.
 
 Main CI's credential-free package job installs both exact distributions and
 runs the same closed synthetic adapter corpus against each, requiring identical

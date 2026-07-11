@@ -252,7 +252,7 @@ DIST=
 RECEIPT=
 DIST_MOVED=0
 RECEIPT_MOVED=0
-IRREVERSIBLE_STATE_FILE="$RUNTIME_ROOT/irreversible-ref-state"
+IRREVERSIBLE_STATE_FILE=
 
 cleanup_release_runtime() {
   local status=$?
@@ -262,7 +262,8 @@ cleanup_release_runtime() {
     run_git --git-dir="$FETCH_REPOSITORY" worktree remove --force "$CHECKOUT" \
       >/dev/null 2>&1 || status=1
   fi
-  if [[ -e $IRREVERSIBLE_STATE_FILE || -L $IRREVERSIBLE_STATE_FILE ]]; then
+  if [[ -n $IRREVERSIBLE_STATE_FILE && \
+    ( -e $IRREVERSIBLE_STATE_FILE || -L $IRREVERSIBLE_STATE_FILE ) ]]; then
     preserve_evidence=1
   fi
   if (( preserve_evidence == 0 )); then
@@ -396,7 +397,9 @@ TAG="v$VERSION"
 run_python_clean "$CHECKOUT/scripts/verify_release.py" --tag "$TAG"
 DIST="$EVIDENCE_DIRECTORY/gpt2agent-$TAG-$COMMIT-main-ci-candidate"
 RECEIPT="$EVIDENCE_DIRECTORY/gpt2agent-$TAG-$COMMIT.account-receipt.json"
-[[ ! -e $DIST && ! -L $DIST && ! -e $RECEIPT && ! -L $RECEIPT ]] \
+IRREVERSIBLE_STATE_FILE="$EVIDENCE_DIRECTORY/gpt2agent-$TAG-$COMMIT.irreversible-ref-state"
+[[ ! -e $DIST && ! -L $DIST && ! -e $RECEIPT && ! -L $RECEIPT && \
+  ! -e $IRREVERSIBLE_STATE_FILE && ! -L $IRREVERSIBLE_STATE_FILE ]] \
   || die "release evidence output already exists"
 EVIDENCE_STAGE=$(/usr/bin/mktemp -d -- \
   "$EVIDENCE_DIRECTORY/.gpt2agent-release-evidence.XXXXXXXX")
@@ -464,8 +467,8 @@ EVIDENCE_STAGE=
 DIST_MOVED=0
 RECEIPT_MOVED=0
 
-printf 'account receipt: %s\nreceipt sha256: %s\ncandidate artifacts: %s\n' \
-  "$RECEIPT" "$RECEIPT_SHA256" "$DIST"
+printf 'account receipt: %s\nreceipt sha256: %s\ncandidate artifacts: %s\ntag attempt state: %s\n' \
+  "$RECEIPT" "$RECEIPT_SHA256" "$DIST" "$IRREVERSIBLE_STATE_FILE"
 
 trap - EXIT HUP INT TERM
 cleanup_release_runtime

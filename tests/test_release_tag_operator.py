@@ -7,11 +7,18 @@ import signal
 import shlex
 import stat
 import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the immutable release-tag coordinator requires Linux GNU userland",
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

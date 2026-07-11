@@ -684,6 +684,8 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert "release-id: ${{ needs.github-release-draft.outputs.release_id }}" in release
     assert "scripts/run_account_release.sh" in readme
     assert "scripts/audit_retained_receipt.sh" in readme
+    assert "*.irreversible-ref-state" in readme
+    assert "*.irreversible-ref-state" in migration
     assert "--trusted-python-archive" in readme
     assert "--trusted-python-base" not in readme
     assert 'GH_BIN=' in account_operator
@@ -769,6 +771,22 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert "Re-run failed jobs" in readme_flat
     assert "Do not re-run the whole workflow" in readme_flat
     assert not re.search(r"python scripts/verify_release\.py --tag v\d+\.\d+\.\d+", readme)
+
+
+def test_linux_only_release_operator_suites_are_platform_gated() -> None:
+    linux_only_suites = (
+        "test_account_gate_bootstrap.py",
+        "test_account_gate_runtime_installer.py",
+        "test_runtime_tree_hash.py",
+        "test_account_release_operator.py",
+        "test_retained_receipt_audit_operator.py",
+        "test_release_tag_operator.py",
+    )
+
+    for filename in linux_only_suites:
+        source = (PROJECT_ROOT / "tests" / filename).read_text(encoding="utf-8")
+        assert 'sys.platform != "linux"' in source
+        assert "pytestmark = pytest.mark.skipif(" in source
 
 
 def test_release_workflow_uses_distinct_admin_read_tokens_for_immutable_settings() -> None:
