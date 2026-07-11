@@ -50,7 +50,7 @@ and skipped by default). Also run `ruff check gpt2agent tests scripts` and
 - `BackendClient` (backend.py): synchronous HTTP via `curl_cffi`. Handles token loading, sentinel challenges, REST endpoints.
 - `ConversationClient` (sse.py): async SSE streaming. Handles `/backend-api/conversation` and `/backend-api/f/conversation` for chat, DR, agent mode, image gen, code interpreter, canvas.
 - `server.py`: FastMCP tool registration. Creates `BackendClient` + `ConversationClient` singletons.
-- `tools/`: 10 registration modules exposing 25 MCP tools. REST-backed handlers
+- `tools/`: 11 registration modules exposing 26 MCP tools. REST-backed handlers
   are async and offload the synchronous `BackendClient` through the shared
   tool backend helper.
 

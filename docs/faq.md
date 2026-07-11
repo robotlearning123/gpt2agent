@@ -49,6 +49,9 @@ redacts token/secret values from error output.
 
 ### What's NOT supported?
 
-Sora video, Operator/CUA, and voice sessions — those endpoints aren't reverse-engineered
-yet. Everything else (chat, agent mode, deep research, image gen, code interpreter,
-canvas, memory, custom instructions, Codex tasks) is exposed via the 25 MCP tools.
+Sora video and Operator/CUA are not supported. The read-only `list_voices` tool
+does expose the account's current Voice catalog, but that is not a Voice
+session: GPT-Live realtime audio, microphone/playback transport, speech
+synthesis, and guaranteed transcript extraction remain unsupported. The
+catalog route is a private website contract and may change. The server exposes
+26 MCP tools in total.

@@ -11,10 +11,10 @@ python -m gpt2agent run   # start MCP server (stdio)
 
 ## Key Files
 
-- `gpt2agent/server.py` — MCP tool registration (25 tools), config loading
+- `gpt2agent/server.py` — MCP tool registration (26 tools), config loading
 - `gpt2agent/sse.py` — Async SSE client for `/backend-api/conversation` (chat, DR, agent, image gen, code interpreter, canvas)
 - `gpt2agent/backend.py` — Sync HTTP client (`curl_cffi`), token management, sentinel challenges
-- `gpt2agent/tools/` — 10 tool modules (19 of the 25 tools; the 6 SSE chat/DR/agent tools live in server.py), each with `register(mcp, client, conv=None)`
+- `gpt2agent/tools/` — 11 tool modules (20 of the 26 tools; the 6 SSE chat/DR/agent tools live in server.py), each with `register(mcp, client, conv=None)`
 - `gpt2agent/sentinel.py` — POW + Turnstile solver
 - `gpt2agent/install.py` — `gpt2agent install` subcommand
 

@@ -1,6 +1,6 @@
 # gpt2agent MCP Tools Reference
 
-Complete parameter reference for all 25 MCP tools exposed by the gpt2agent server.
+Complete parameter reference for all 26 MCP tools exposed by the gpt2agent server.
 Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 
 ---
@@ -10,7 +10,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - [Chat & Reasoning (5)](#chat--reasoning)
 - [Image & File (3)](#image--file)
 - [Code Execution (2)](#code-execution)
-- [Account Introspection (7)](#account-introspection)
+- [Account Introspection (8)](#account-introspection)
 - [Memory & Instructions (5)](#memory--instructions)
 - [Codex (3)](#codex)
 
@@ -299,6 +299,32 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
   ```
 - **Notes**:
   - Returns models for `history_and_training_disabled=false` variant. Some models may differ in capabilities between temporary/non-temporary modes.
+  - Async handler; offloads the REST call to the synchronous backend client.
+
+---
+
+### list_voices
+
+- **Purpose**: Return the Voice choices currently available to the signed-in ChatGPT account.
+- **Parameters**: None.
+- **Returns**: `list[dict]` -- each dict contains exactly:
+  - `id` (str) -- the opaque backend Voice ID; preserved verbatim and not derived from the display name
+  - `name` (str) -- display name, with common PII/secret patterns redacted
+  - `description` (str) -- display description, with common PII/secret patterns redacted
+  - `selected` (bool or None) -- `True`/`False` only when the response identifies a selected ID present in the returned catalog; otherwise `None`
+  - `has_preview` (bool) -- whether the private response advertised preview media
+- **When to use**: Discover account/rollout-specific Voice IDs and display metadata.
+- **Example**:
+  ```python
+  voices = list_voices()
+  selected = next((voice for voice in voices if voice["selected"] is True), None)
+  ```
+- **Notes**:
+  - Uses the private `GET /backend-api/settings/voices` website route. Voice is an official ChatGPT product, but this adapter is not an official API and may drift.
+  - The catalog is live and rollout-specific; names, IDs, ordering, selection, and count are not hard-coded.
+  - Raw preview URLs, colors, gain values, unknown response fields, and account identifiers are not returned.
+  - This tool does not fetch preview audio, start a Voice session, capture a microphone, synthesize speech, stream GPT-Live audio, or guarantee transcript extraction.
+  - A malformed private response fails closed with `voice catalog contract changed` rather than pretending the catalog is empty.
   - Async handler; offloads the REST call to the synchronous backend client.
 
 ---

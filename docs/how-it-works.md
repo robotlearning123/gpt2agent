@@ -12,8 +12,9 @@ $CODEX_HOME/auth.json (default ~/.codex/auth.json) ← bearer, auto-refreshed by
    curl_cffi  ──TLS-impersonates Chrome──▶  chatgpt.com /backend-api/...
         │                                     ├── /conversation, /f/conversation   (SSE)
         │                                     └── /me, /models, /memories, /codex,  (REST)
-        │                                         /gizmos, /files, /apps, ...
-   25 MCP tools
+        │                                         /gizmos, /files, /apps,
+        │                                         /settings/voices, ...
+   26 MCP tools
 ```
 
 ## Request path
@@ -21,9 +22,10 @@ $CODEX_HOME/auth.json (default ~/.codex/auth.json) ← bearer, auto-refreshed by
 - **SSE tools** (`chat`, `agent`, `deep_research[_heavy]`, `gpt_chat`, image gen,
   code interpreter, canvas) stream from `/backend-api/conversation` and are parsed
   incrementally in `gpt2agent/sse.py`.
-- **REST tools** (account, models, memory, instructions, conversations, codex, apps,
-  files) are thin wrappers over `gpt2agent/backend.py`'s sync HTTP client, exposed
-  from `gpt2agent/tools/*.py`.
+- **REST tools** (account, models, Voice catalog, memory, instructions,
+  conversations, codex, apps, files) are thin wrappers over
+  `gpt2agent/backend.py`'s sync HTTP client, exposed from
+  `gpt2agent/tools/*.py`.
 
 ## The Sentinel challenge
 

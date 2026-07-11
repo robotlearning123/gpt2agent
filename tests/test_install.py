@@ -276,6 +276,18 @@ def test_skill_install(tmp_path: Path) -> None:
     assert ga.exists()
     assert (ga / "SKILL.md").exists()
     assert (ga / "tools-reference.md").exists()
+    skill = (ga / "SKILL.md").read_text()
+    reference = (ga / "tools-reference.md").read_text()
+    allowed = [
+        line.strip()
+        for line in skill.splitlines()
+        if line.strip().startswith("- mcp__gpt2agent__")
+    ]
+    assert len(allowed) == 26
+    assert allowed.count("- mcp__gpt2agent__list_voices") == 1
+    assert "Complete parameter reference for all 26 MCP tools" in reference
+    assert reference.count("### list_voices") == 1
+    assert "GPT-Live" in reference
 
 
 def test_skill_backup_on_overwrite(tmp_path: Path) -> None:

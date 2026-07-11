@@ -13,13 +13,13 @@ Zed, and any MCP client.
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://pypi.org/project/gpt2agent/)
 
-📖 **[Quickstart](./docs/quickstart.md)** · **[Client setup](./docs/clients.md)** · **[Troubleshooting](./docs/troubleshooting.md)** · **[FAQ](./docs/faq.md)** · **[Docs index](./docs/README.md)**
+📖 **[Quickstart](./docs/quickstart.md)** · **[Client setup](./docs/clients.md)** · **[Troubleshooting](./docs/troubleshooting.md)** · **[FAQ](./docs/faq.md)** · **[Roadmap](./docs/roadmap.md)** · **[Docs index](./docs/README.md)**
 
 ---
 
 ## What it does
 
-gpt2agent exposes **25 MCP tools** that forward requests directly to ChatGPT's backend API.
+gpt2agent exposes **26 MCP tools** that forward requests directly to ChatGPT's backend API.
 No proxy process. No separate account. No platform API key. Your `codex login`,
 your token, your quota.
 
@@ -126,7 +126,7 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 
 ---
 
-## Tools (25)
+## Tools (26)
 
 ### Chat & reasoning
 
@@ -159,6 +159,7 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 |---|---|
 | `account_status` | Plan, country, groups, feature count, subscription expiry |
 | `list_models` | All models on your account (slug, max_tokens, reasoning_type, capabilities, enabled_tools) |
+| `list_voices` | Available Voice catalog (backend ID, display metadata, selected state, preview availability) |
 | `list_conversations` | Recent ChatGPT conversations (titles: emails/phones redacted) |
 | `get_conversation` | Full message history for a specific conversation (multimodal, code, images) |
 | `list_tasks` | Scheduled / completed ChatGPT tasks |
@@ -200,11 +201,13 @@ $CODEX_HOME/auth.json (default ~/.codex/auth.json) ← auto-refreshed by Codex
    gpt2agent  (stdio MCP server, token reloaded on each call)
         |
    curl_cffi  →  chatgpt.com /backend-api/{conversation,f/conversation,me,
-                                          models, memories, codex, gizmos, ...}
+                                          models, memories, settings/voices,
+                                          codex, gizmos, ...}
         |
-   25 MCP tools  (chat, agent, DR ×2, GPT chat, image gen,
+   26 MCP tools  (chat, agent, DR ×2, GPT chat, image gen,
                   code interpreter, canvas, memory r/w,
-                  instructions r/w, codex r/w, account introspect)
+                  instructions r/w, codex r/w, Voice catalog,
+                  account introspect)
 ```
 
 ---
@@ -232,9 +235,12 @@ heavy_dr = "gpt-5-5-pro"    # override slug for deep_research_heavy
 - **Deep Research quota:** limits and reset timing are account-reported and can
   change. Run the bundled `deep-research/bin/quota.sh` before heavy work and run
   heavy Deep Research serially.
-- **Account-tier features not yet supported:** Sora video, Operator/CUA, voice
-  sessions. These use HTTP endpoints that return 404 or haven't yet been
-  reverse-engineered out of the chatgpt.com web bundle.
+- **Voice scope:** `list_voices` reads the account's current Voice catalog, but
+  it does not start a Voice session or fetch its preview media. GPT-Live
+  realtime audio, microphone/playback transport, speech synthesis, and a
+  guaranteed post-session transcript adapter are not supported.
+- **Other account-tier features not yet supported:** Sora video and
+  Operator/CUA.
 - **`gpt_chat`** is experimental — `gizmo_id` payload field verified against
   web traffic but not load-tested across all g-p-* types.
 - Requires an active ChatGPT Plus or Pro subscription.
