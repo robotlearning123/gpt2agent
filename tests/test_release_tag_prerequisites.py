@@ -7,6 +7,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -59,36 +60,76 @@ def test_tool_check_rejects_user_owned_or_noncanonical_tools(tmp_path: Path) -> 
         assert result.stdout == ""
 
 
-def test_tool_check_requires_a_protected_nonlinked_reviewed_policy(tmp_path: Path) -> None:
-    policy = tmp_path / "policy.json"
-    policy.write_text("{}\n", encoding="utf-8")
-    policy.chmod(0o600)
-    command = [
-        sys.executable,
-        str(TOOL_CHECK),
-        "check",
-        "--gh",
-        "/usr/bin/gh",
-        "--git",
-        "/usr/bin/git",
-        "--policy",
-        str(policy),
-    ]
+def test_tool_check_requires_a_protected_nonlinked_reviewed_policy() -> None:
+    with tempfile.TemporaryDirectory(
+        prefix=".gpt2agent-policy-test-",
+        dir=Path.home(),
+    ) as temporary:
+        private_root = Path(temporary)
+        private_root.chmod(0o700)
+        policy = private_root / "policy.json"
+        policy.write_text("{}\n", encoding="utf-8")
+        policy.chmod(0o600)
+        command = [
+            sys.executable,
+            str(TOOL_CHECK),
+            "check",
+            "--gh",
+            "/usr/bin/gh",
+            "--git",
+            "/usr/bin/git",
+            "--policy",
+            str(policy),
+        ]
 
-    accepted = subprocess.run(command, capture_output=True, text=True, check=False)
-    assert accepted.returncode == 0, accepted.stderr
+        accepted = subprocess.run(command, capture_output=True, text=True, check=False)
+        assert accepted.returncode == 0, accepted.stderr
 
-    policy.chmod(0o622)
-    writable = subprocess.run(command, capture_output=True, text=True, check=False)
-    assert writable.returncode != 0
+        policy.chmod(0o622)
+        writable = subprocess.run(command, capture_output=True, text=True, check=False)
+        assert writable.returncode != 0
 
-    policy.chmod(0o600)
-    linked = tmp_path / "policy-link.json"
-    linked.symlink_to(policy)
-    symbolic = subprocess.run(
-        [*command[:-1], str(linked)], capture_output=True, text=True, check=False
-    )
-    assert symbolic.returncode != 0
+        policy.chmod(0o600)
+        linked = private_root / "policy-link.json"
+        linked.symlink_to(policy)
+        symbolic = subprocess.run(
+            [*command[:-1], str(linked)], capture_output=True, text=True, check=False
+        )
+        assert symbolic.returncode != 0
+
+
+def test_tool_check_rejects_policy_below_a_writable_ancestor() -> None:
+    with tempfile.TemporaryDirectory(
+        prefix=".gpt2agent-policy-test-",
+        dir=Path.home(),
+    ) as temporary:
+        unsafe_root = Path(temporary)
+        unsafe_root.chmod(0o770)
+        private_child = unsafe_root / "private"
+        private_child.mkdir(mode=0o700)
+        policy = private_child / "policy.json"
+        policy.write_text("{}\n", encoding="utf-8")
+        policy.chmod(0o600)
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(TOOL_CHECK),
+                "check",
+                "--gh",
+                "/usr/bin/gh",
+                "--git",
+                "/usr/bin/git",
+                "--policy",
+                str(policy),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode != 0
+        assert "parent path is not protected" in result.stderr
 
 
 def _action_fixture(tmp_path: Path, *, mode: str = "ok") -> tuple[Path, Path, dict[str, str]]:

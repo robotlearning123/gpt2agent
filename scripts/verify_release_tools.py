@@ -58,7 +58,7 @@ def validate_tool(path: Path, expected_name: str) -> None:
 
 def validate_policy(path: Path) -> None:
     """Require one canonical, non-linked, owner-controlled reviewed policy file."""
-    _, metadata = _canonical(path, "governance policy")
+    resolved, metadata = _canonical(path, "governance policy")
     if (
         not stat.S_ISREG(metadata.st_mode)
         or metadata.st_uid not in {0, os.geteuid()}
@@ -68,6 +68,18 @@ def validate_policy(path: Path) -> None:
         or metadata.st_size > _MAX_POLICY_BYTES
     ):
         raise ToolValidationError("governance policy is not a protected regular file")
+    for parent in (resolved.parent, *resolved.parent.parents):
+        try:
+            parent_metadata = parent.lstat()
+        except OSError:
+            raise ToolValidationError("governance policy parent path is unavailable") from None
+        if (
+            not stat.S_ISDIR(parent_metadata.st_mode)
+            or stat.S_ISLNK(parent_metadata.st_mode)
+            or parent_metadata.st_uid not in {0, os.geteuid()}
+            or parent_metadata.st_mode & 0o022
+        ):
+            raise ToolValidationError("governance policy parent path is not protected")
 
 
 def main(argv: list[str] | None = None) -> int:
