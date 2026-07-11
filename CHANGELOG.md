@@ -6,6 +6,28 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.0.13] - 2026-07-11
+
+### Added
+
+- `list_voices` — read-only MCP tool exposing the signed-in account's Voice
+  catalog from the private `GET /backend-api/settings/voices` route. Returns a
+  bounded, stable shape per voice (`id`, `name`, `description`, `selected`,
+  `has_preview`); backend voice IDs are preserved verbatim and display text is
+  redacted. Brings the server to 26 MCP tools.
+- `docs/roadmap.md` — version lanes, the GPT-Live boundary, the language policy
+  (Python core with an optional TypeScript sidecar for a future live-voice
+  lane), and the release gates.
+
+### Notes
+
+- This release adds Voice **catalog discovery only**. It does not start a Voice
+  session, fetch preview media, capture a microphone, synthesize speech, stream
+  GPT-Live realtime audio, or guarantee transcript extraction.
+- The catalog route is a private, reverse-engineered website contract. A
+  malformed response fails closed with `voice catalog contract changed` rather
+  than pretending the catalog is empty.
+
 ## [0.0.11] - 2026-07-10
 
 Recovery release carrying forward every change in the
