@@ -203,6 +203,13 @@ jobs:
       - name: Validate fresh isolated account-gate runtime without auth
         run: |
           set -euo pipefail
+          ACCOUNT_GATE_PYTHON="$(python -I -S -B -c \
+            'import os, sys; print(os.path.realpath(sys.executable), end="")')"
+          test -n "$ACCOUNT_GATE_PYTHON"
+          test "$ACCOUNT_GATE_PYTHON" = "$(realpath -e -- "$ACCOUNT_GATE_PYTHON")"
+          test -f "$ACCOUNT_GATE_PYTHON"
+          test -x "$ACCOUNT_GATE_PYTHON"
+          test ! -L "$ACCOUNT_GATE_PYTHON"
           ACCOUNT_GATE_PARENT="$RUNNER_TEMP/gpt2agent-account-gate-parent"
           ACCOUNT_GATE_VENV="$ACCOUNT_GATE_PARENT/venv"
           rm -rf -- "$ACCOUNT_GATE_PARENT"
@@ -213,7 +220,7 @@ jobs:
           }
           trap cleanup_account_gate EXIT
           SITE_PACKAGES="$(scripts/bootstrap_account_gate.sh \
-            --python /usr/bin/python3.12 --venv "$ACCOUNT_GATE_VENV")"
+            --python "$ACCOUNT_GATE_PYTHON" --venv "$ACCOUNT_GATE_VENV")"
           test "$SITE_PACKAGES" = "$ACCOUNT_GATE_VENV/lib/python3.12/site-packages"
           "$ACCOUNT_GATE_VENV/bin/python" -I -S -B \
             scripts/verify_account_receipt.py check-runtime \

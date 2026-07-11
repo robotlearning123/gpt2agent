@@ -14,7 +14,6 @@ ROOT = Path(__file__).resolve().parents[1]
 BOOTSTRAP = ROOT / "scripts" / "bootstrap_account_gate.sh"
 LOCK = ROOT / "requirements-account-gate.txt"
 INPUT = ROOT / "requirements-account-gate.in"
-SYSTEM_PYTHON = Path("/usr/bin/python3.12")
 EXPECTED_LOCK = {
     "certifi": "2026.6.17",
     "cffi": "2.1.0",
@@ -87,27 +86,34 @@ def _fake_python(tmp_path: Path, *, fail_stage: str = "") -> tuple[Path, Path]:
     python = trusted_dir / "python3.12"
     quoted_log = shlex.quote(str(log))
     quoted_failure = shlex.quote(fail_stage)
+    quoted_base = shlex.quote(str(trusted_dir))
     _write_executable(
         python,
         f"""#!/usr/bin/env bash
 set -euo pipefail
 log={quoted_log}
 fail_stage={quoted_failure}
+base={quoted_base}
 {{
   printf 'exe=%s home=%s openai=%s pythonpath=%s args=' "$0" "${{HOME-}}" \
     "${{OPENAI_API_KEY-}}" "${{PYTHONPATH-}}"
   printf '%q ' "$@"
   printf '\n'
 }} >> "$log"
-if [[ "${{1-}}" == "-I" && "${{2-}}" == "-S" && "${{3-}}" == "-c" ]]; then
-  printf 'cpython 3.12\n'
+if [[ "${{1-}}" == "-I" && "${{2-}}" == "-S" && "${{3-}}" == "-B" \
+  && "${{4-}}" == "-c" ]]; then
+  [[ "${{5-}}" == *"(3, 12, 13)"* ]]
+  [[ "${{5-}}" == *"linux"* ]]
+  [[ "${{5-}}" == *"x86_64"* ]]
+  printf '%s\n' "$base"
   exit 0
 fi
-if [[ "${{1-}}" == "-I" && "${{2-}}" == "-S" && "${{3-}}" == "-" ]]; then
-  exit 0
+if [[ "${{1-}}" == "-I" && "${{2-}}" == "-S" && "${{3-}}" == "-B" \
+  && "${{4-}}" == "-" ]]; then
+  exec /usr/bin/python3 "$@"
 fi
-if [[ "${{1-}}" == "-I" && "${{2-}}" == "-S" && "${{3-}}" == "-m" \
-  && "${{4-}}" == "venv" ]]; then
+if [[ "${{1-}}" == "-I" && "${{2-}}" == "-S" && "${{3-}}" == "-B" \
+  && "${{4-}}" == "-m" && "${{5-}}" == "venv" ]]; then
   destination="${{@: -1}}"
   mkdir -p "$destination/bin" "$destination/lib/python3.12/site-packages"
   cp "$0" "$destination/bin/python"
@@ -195,12 +201,23 @@ def test_main_ci_validates_the_fresh_runtime_without_account_auth() -> None:
     step = workflow[step_start:step_end]
 
     assert "scripts/bootstrap_account_gate.sh" in step
-    assert "--python /usr/bin/python3" in step
+    assert "python -I -S -B -c" in step
+    assert "os.path.realpath(sys.executable)" in step
+    assert '--python "$ACCOUNT_GATE_PYTHON"' in step
+    assert "/usr/bin/python" not in step
     assert "verify_account_receipt.py check-runtime" in step
     assert "--trusted-site-packages" in step
     assert "OPENAI_API_KEY" not in step
     assert "CHATGPT_ACCESS_TOKEN" not in step
     assert "GH_TOKEN" not in step
+
+
+def test_main_ci_pins_the_reviewed_setup_python_patch() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    package_start = workflow.index("  package:")
+    package = workflow[package_start:]
+
+    assert 'python-version: "3.12.13"' in package
 
 
 @pytest.mark.parametrize(
@@ -220,13 +237,12 @@ def test_main_ci_validates_the_fresh_runtime_without_account_auth() -> None:
 def test_bootstrap_rejects_unsafe_lock_before_creating_venv(
     tmp_path: Path, mutation
 ) -> None:
-    if not SYSTEM_PYTHON.is_file():
-        pytest.skip("the trusted CPython 3.12 test interpreter is unavailable")
+    python, _log = _fake_python(tmp_path)
     script = _isolated_bootstrap_tree(tmp_path, mutation(LOCK.read_text(encoding="utf-8")))
     parent = _private_parent(tmp_path)
     venv = parent / "venv"
 
-    result = _run_bootstrap(SYSTEM_PYTHON, venv, script=script)
+    result = _run_bootstrap(python, venv, script=script)
 
     assert result.returncode != 0
     assert "invalid account-gate lock:" in result.stderr
@@ -259,18 +275,19 @@ def test_bootstrap_uses_isolated_hash_locked_commands_in_order(tmp_path: Path) -
     assert "must-not-cross-bootstrap-boundary" not in joined
     assert "/attacker/pythonpath" not in joined
     assert all(" openai= pythonpath=" in line for line in lines)
-    assert "-I -S -m venv --copies" in joined
+    assert "-I -S -B -m venv --copies" in joined
     install_index = next(index for index, line in enumerate(lines) if " install " in line)
     check_index = next(index for index, line in enumerate(lines) if " check " in line)
     runtime_index = next(index for index, line in enumerate(lines) if "check-runtime" in line)
     assert install_index < check_index < runtime_index
     install = lines[install_index]
     for required in (
-        "-I -m pip --isolated --disable-pip-version-check install",
+        "-I -B -m pip --isolated --disable-pip-version-check install",
         "--index-url https://pypi.org/simple",
         "--require-hashes",
         "--only-binary=:all:",
         "--no-deps",
+        "--no-compile",
         "--no-cache-dir",
         "--no-input",
     ):
@@ -316,11 +333,13 @@ def test_bootstrap_refuses_relative_existing_or_unsafe_destinations(tmp_path: Pa
     assert not (unsafe / "venv").exists()
 
 
-def test_bootstrap_requires_canonical_cpython_312(tmp_path: Path) -> None:
+def test_bootstrap_requires_canonical_cpython_31213_linux_x86_64(tmp_path: Path) -> None:
     python, _log = _fake_python(tmp_path)
     python.write_text(
         python.read_text(encoding="utf-8").replace(
-            "printf 'cpython 3.12\n'", "printf 'cpython 3.11\n'"
+            "  exit 0\nfi",
+            "  exit 86\nfi",
+            1,
         ),
         encoding="utf-8",
     )
@@ -345,7 +364,9 @@ def test_bootstrap_rejects_non_cpython_implementation(tmp_path: Path) -> None:
     python, _log = _fake_python(tmp_path)
     python.write_text(
         python.read_text(encoding="utf-8").replace(
-            "printf 'cpython 3.12\n'", "printf 'pypy 3.12\n'"
+            "  exit 0\nfi",
+            "  exit 86\nfi",
+            1,
         ),
         encoding="utf-8",
     )
@@ -356,4 +377,53 @@ def test_bootstrap_rejects_non_cpython_implementation(tmp_path: Path) -> None:
     result = _run_bootstrap(python, venv)
 
     assert result.returncode != 0
+    assert not venv.exists()
+
+
+def test_bootstrap_rejects_non_reviewed_system_python_patch(tmp_path: Path) -> None:
+    python = Path("/usr/bin/python3.12")
+    if not python.is_file() or python.is_symlink():
+        pytest.skip("a canonical system CPython 3.12 is unavailable")
+    identity = subprocess.run(
+        [
+            str(python),
+            "-I",
+            "-S",
+            "-B",
+            "-c",
+            "import os,sys; print(sys.version_info[:3], sys.platform, os.uname().machine)",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if identity == "(3, 12, 13) linux x86_64":
+        pytest.skip("the system interpreter now matches the reviewed target")
+    parent = _private_parent(tmp_path)
+    venv = parent / "venv"
+
+    result = _run_bootstrap(python, venv)
+
+    assert result.returncode != 0
+    assert "must be CPython 3.12.13 for Linux x86_64" in result.stderr
+    assert not venv.exists()
+
+
+@pytest.mark.parametrize("unsafe_component", ("tool", "base"))
+def test_bootstrap_rejects_group_writable_user_installation(
+    tmp_path: Path, unsafe_component: str
+) -> None:
+    python, _log = _fake_python(tmp_path)
+    if unsafe_component == "tool":
+        python.chmod(0o770)
+    else:
+        python.parent.chmod(0o770)
+    parent = _private_parent(tmp_path)
+    venv = parent / "venv"
+
+    result = _run_bootstrap(python, venv)
+
+    assert result.returncode != 0
+    assert "group- or world-writable" in result.stderr
+    assert "install or copy CPython into an owner-private base" in result.stderr
     assert not venv.exists()

@@ -52,21 +52,10 @@ CURRENT_UID=$(id -u)
 
 PYTHON_UID=$(stat -Lc '%u' -- "$PYTHON")
 PYTHON_MODE=$(stat -Lc '%a' -- "$PYTHON")
-PYTHON_DIR=$(dirname -- "$PYTHON")
 [[ "$PYTHON_UID" == 0 || "$PYTHON_UID" == "$CURRENT_UID" ]] \
   || die "--python must be owned by root or the current user"
-(( (8#$PYTHON_MODE & 0022) == 0 )) || die "--python must not be group- or world-writable"
-if [[ "$PYTHON_UID" == "$CURRENT_UID" ]]; then
-  [[ "$(stat -Lc '%u' -- "$PYTHON_DIR")" == "$CURRENT_UID" \
-    && "$(stat -Lc '%a' -- "$PYTHON_DIR")" == 700 ]] \
-    || die "a user-owned --python must be inside an owner-private 0700 directory"
-else
-  PYTHON_DIR_MODE=$(stat -Lc '%a' -- "$PYTHON_DIR")
-  [[ "$(stat -Lc '%u' -- "$PYTHON_DIR")" == 0 ]] \
-    || die "a root-owned --python must be inside a root-owned directory"
-  (( (8#$PYTHON_DIR_MODE & 0022) == 0 )) \
-    || die "the root-owned --python directory must not be group- or world-writable"
-fi
+(( (8#$PYTHON_MODE & 0022) == 0 )) \
+  || die "--python must not be group- or world-writable; install or copy CPython into an owner-private base"
 
 VENV_PARENT=$(dirname -- "$VENV")
 [[ -d "$VENV_PARENT" && ! -L "$VENV_PARENT" ]] \
@@ -119,11 +108,77 @@ run_scrubbed() {
     "$@"
 }
 
-PYTHON_VERSION=$(run_scrubbed "$PYTHON" -I -S -c \
-  'import sys; print(sys.implementation.name, f"{sys.version_info.major}.{sys.version_info.minor}")')
-[[ "$PYTHON_VERSION" == "cpython 3.12" ]] || die "--python must be CPython 3.12"
+PYTHON_BASE=$(run_scrubbed "$PYTHON" -I -S -B -c '
+import os
+import sys
 
-run_scrubbed "$PYTHON" -I -S - "$LOCK_SNAPSHOT" <<'PY'
+identity = (
+    sys.implementation.name,
+    sys.version_info[:3],
+    sys.platform,
+    os.uname().machine,
+)
+if identity != ("cpython", (3, 12, 13), "linux", "x86_64"):
+    raise SystemExit("unexpected interpreter target")
+base = sys.base_prefix
+if not isinstance(base, str) or not base or "\n" in base or "\r" in base:
+    raise SystemExit("invalid interpreter base")
+print(base, end="")
+') || die "--python must be CPython 3.12.13 for Linux x86_64"
+
+[[ "$PYTHON_BASE" == /* && "$PYTHON_BASE" != / ]] \
+  || die "--python reported an invalid base installation"
+[[ -d "$PYTHON_BASE" && ! -L "$PYTHON_BASE" ]] \
+  || die "--python base must be a regular directory"
+[[ "$PYTHON_BASE" == "$(realpath -e -- "$PYTHON_BASE")" ]] \
+  || die "--python base must use its canonical path"
+case "$PYTHON" in
+  "$PYTHON_BASE"/*) ;;
+  *) die "--python must be contained by its base installation" ;;
+esac
+
+PYTHON_BASE_UID=$(stat -Lc '%u' -- "$PYTHON_BASE")
+[[ "$PYTHON_BASE_UID" == 0 || "$PYTHON_BASE_UID" == "$CURRENT_UID" ]] \
+  || die "--python base must be owned by root or the current user"
+[[ "$PYTHON_UID" == "$PYTHON_BASE_UID" ]] \
+  || die "--python and its base installation must have the same owner"
+
+require_secure_installation_chain() {
+  local root=$1
+  local target=$2
+  local owner=$3
+  local current=$target
+  local first=1
+  local mode uid parent
+
+  while :; do
+    [[ ! -L "$current" ]] \
+      || die "--python base/tool path chain must not contain symlinks"
+    if (( first == 1 )); then
+      [[ -f "$current" ]] \
+        || die "--python tool path must remain a regular file"
+      first=0
+    else
+      [[ -d "$current" ]] \
+        || die "--python base/tool path chain must contain only directories"
+    fi
+    uid=$(stat -Lc '%u' -- "$current")
+    mode=$(stat -Lc '%a' -- "$current")
+    [[ "$uid" == "$owner" ]] \
+      || die "--python base/tool path chain ownership is inconsistent"
+    (( (8#$mode & 0022) == 0 )) \
+      || die "--python base/tool path chain must not be group- or world-writable; install or copy CPython into an owner-private base"
+    [[ "$current" != "$root" ]] || break
+    parent=$(dirname -- "$current")
+    [[ "$parent" != "$current" && ( "$parent" == "$root" || "$parent" == "$root"/* ) ]] \
+      || die "--python escaped its base installation"
+    current=$parent
+  done
+}
+
+require_secure_installation_chain "$PYTHON_BASE" "$PYTHON" "$PYTHON_BASE_UID"
+
+run_scrubbed "$PYTHON" -I -S -B - "$LOCK_SNAPSHOT" <<'PY'
 from __future__ import annotations
 
 import re
@@ -199,7 +254,7 @@ if parsed != EXPECTED:
 PY
 
 VENV_CREATED=1
-run_scrubbed "$PYTHON" -I -S -m venv --copies "$VENV"
+run_scrubbed "$PYTHON" -I -S -B -m venv --copies "$VENV"
 chmod 700 -- "$VENV"
 VENV_PYTHON="$VENV/bin/python"
 SITE_PACKAGES="$VENV/lib/python3.12/site-packages"
@@ -208,15 +263,16 @@ SITE_PACKAGES="$VENV/lib/python3.12/site-packages"
 [[ -d "$SITE_PACKAGES" && ! -L "$SITE_PACKAGES" ]] \
   || die "the virtual environment has an unexpected site-packages layout"
 
-run_scrubbed "$VENV_PYTHON" -I -m pip --isolated --disable-pip-version-check install \
+run_scrubbed "$VENV_PYTHON" -I -B -m pip --isolated --disable-pip-version-check install \
   --index-url https://pypi.org/simple \
   --require-hashes \
   --only-binary=:all: \
   --no-deps \
+  --no-compile \
   --no-cache-dir \
   --no-input \
   --requirement "$LOCK_SNAPSHOT" 1>&2
-run_scrubbed "$VENV_PYTHON" -I -m pip --isolated --disable-pip-version-check check 1>&2
+run_scrubbed "$VENV_PYTHON" -I -B -m pip --isolated --disable-pip-version-check check 1>&2
 run_scrubbed "$VENV_PYTHON" -I -S -B "$VERIFIER" check-runtime \
   --trusted-site-packages "$SITE_PACKAGES" 1>&2
 

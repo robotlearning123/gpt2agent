@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import ast
+import base64
 import builtins
+import csv
+import hashlib
+import io
 import json
 import os
 import subprocess
@@ -16,6 +20,55 @@ import pytest
 
 
 TOKEN_CANARY = "eyJtrusted.canary.signature"
+
+
+def _record_digest(payload: bytes) -> str:
+    digest = base64.urlsafe_b64encode(hashlib.sha256(payload).digest())
+    return "sha256=" + digest.rstrip(b"=").decode("ascii")
+
+
+def _exact_distribution_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
+    from scripts.verify_account_receipt import _TRUSTED_DISTRIBUTIONS
+
+    venv = tmp_path / "venv"
+    site = venv / "lib" / "python3.12" / "site-packages"
+    site.mkdir(parents=True)
+    for directory in (venv, venv / "lib", venv / "lib" / "python3.12", site):
+        directory.chmod(0o700)
+    first_payload: Path | None = None
+    for index, (name, version) in enumerate(_TRUSTED_DISTRIBUTIONS.items()):
+        module = site / f"reviewed_dependency_{index}.py"
+        module.write_bytes(f'VALUE = "{name}=={version}"\n'.encode())
+        module.chmod(0o600)
+        if first_payload is None:
+            first_payload = module
+        dist_info = site / f"{name.replace('-', '_')}-{version}.dist-info"
+        dist_info.mkdir()
+        dist_info.chmod(0o700)
+        metadata = dist_info / "METADATA"
+        metadata.write_text(
+            f"Metadata-Version: 2.4\nName: {name}\nVersion: {version}\n",
+            encoding="utf-8",
+        )
+        metadata.chmod(0o600)
+        record = dist_info / "RECORD"
+        rows: list[tuple[str, str, str]] = []
+        for installed in (module, metadata):
+            payload = installed.read_bytes()
+            rows.append(
+                (
+                    installed.relative_to(site).as_posix(),
+                    _record_digest(payload),
+                    str(len(payload)),
+                )
+            )
+        rows.append((record.relative_to(site).as_posix(), "", ""))
+        stream = io.StringIO(newline="")
+        csv.writer(stream, lineterminator="\n").writerows(rows)
+        record.write_text(stream.getvalue(), encoding="utf-8")
+        record.chmod(0o600)
+    assert first_payload is not None
+    return venv, site, first_payload
 
 
 def _git(checkout: Path, *args: str) -> str:
@@ -522,6 +575,67 @@ def test_trusted_transport_requires_an_explicit_isolated_site_packages() -> None
     with pytest.raises(ReceiptError, match="runtime"):
         with trusted_curl_cffi_requester():
             raise AssertionError("ambient dependency context must not open")
+
+
+@pytest.mark.parametrize(
+    ("implementation", "version", "platform_name", "machine", "expected"),
+    (
+        ("cpython", (3, 12, 13), "linux", "x86_64", True),
+        ("cpython", (3, 12, 12), "linux", "x86_64", False),
+        ("cpython", (3, 12, 13), "darwin", "x86_64", False),
+        ("cpython", (3, 12, 13), "linux", "aarch64", False),
+        ("pypy", (3, 12, 13), "linux", "x86_64", False),
+    ),
+)
+def test_trusted_runtime_identity_is_exactly_reviewed_target(
+    implementation: str,
+    version: tuple[int, int, int],
+    platform_name: str,
+    machine: str,
+    expected: bool,
+) -> None:
+    from scripts.verify_account_receipt import _trusted_runtime_identity_is_exact
+
+    assert (
+        _trusted_runtime_identity_is_exact(
+            implementation=implementation,
+            version=version,
+            platform_name=platform_name,
+            machine=machine,
+        )
+        is expected
+    )
+
+
+def test_trusted_runtime_rejects_record_hash_tampering(tmp_path: Path) -> None:
+    from scripts.verify_account_receipt import ReceiptError, _require_exact_distribution_closure
+
+    venv, site, payload = _exact_distribution_fixture(tmp_path)
+    original = payload.read_bytes()
+    payload.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+
+    with pytest.raises(ReceiptError, match="integrity"):
+        _require_exact_distribution_closure(site, venv)
+
+
+def test_trusted_runtime_rejects_record_size_tampering(tmp_path: Path) -> None:
+    from scripts.verify_account_receipt import ReceiptError, _require_exact_distribution_closure
+
+    venv, site, payload = _exact_distribution_fixture(tmp_path)
+    payload.write_bytes(payload.read_bytes() + b"#")
+
+    with pytest.raises(ReceiptError, match="integrity"):
+        _require_exact_distribution_closure(site, venv)
+
+
+def test_trusted_runtime_rejects_unrecorded_importable_file(tmp_path: Path) -> None:
+    from scripts.verify_account_receipt import ReceiptError, _require_exact_distribution_closure
+
+    venv, site, _payload = _exact_distribution_fixture(tmp_path)
+    (site / "unrecorded_backdoor.py").write_text("raise SystemExit(86)\n", encoding="utf-8")
+
+    with pytest.raises(ReceiptError, match="unrecorded importable"):
+        _require_exact_distribution_closure(site, venv)
 
 
 def test_trusted_transport_rejects_symlinked_dependency_origin(tmp_path: Path) -> None:

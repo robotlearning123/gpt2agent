@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import importlib
+import importlib.machinery
 import importlib.metadata
 import importlib.util
 import json
@@ -56,7 +58,9 @@ _CHROME_131_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/131.0.0.0 Safari/537.36"
 )
-_TRUSTED_PYTHON_VERSION = (3, 12)
+_TRUSTED_PYTHON_VERSION = (3, 12, 13)
+_TRUSTED_PYTHON_PLATFORM = "linux"
+_TRUSTED_PYTHON_MACHINE = "x86_64"
 _TRUSTED_DISTRIBUTIONS = {
     "certifi": "2026.6.17",
     "cffi": "2.1.0",
@@ -1755,14 +1759,33 @@ def _normalized_distribution_name(value: str) -> str:
     return re.sub(r"[-_.]+", "-", value).lower()
 
 
+def _trusted_runtime_identity_is_exact(
+    *,
+    implementation: str,
+    version: tuple[int, int, int],
+    platform_name: str,
+    machine: str,
+) -> bool:
+    return (
+        implementation == "cpython"
+        and version == _TRUSTED_PYTHON_VERSION
+        and platform_name == _TRUSTED_PYTHON_PLATFORM
+        and machine == _TRUSTED_PYTHON_MACHINE
+    )
+
+
 def _require_isolated_runtime_site(
     trusted_site_packages: Path,
     forbidden_roots: tuple[Path, ...],
 ) -> tuple[Path, Path]:
     flags = sys.flags
     if (
-        sys.implementation.name != "cpython"
-        or sys.version_info[:2] != _TRUSTED_PYTHON_VERSION
+        not _trusted_runtime_identity_is_exact(
+            implementation=sys.implementation.name,
+            version=sys.version_info[:3],
+            platform_name=sys.platform,
+            machine=os.uname().machine,
+        )
         or flags.isolated != 1
         or flags.no_site != 1
         or flags.no_user_site != 1
@@ -1834,17 +1857,42 @@ def _require_isolated_runtime_site(
     if (
         not stat.S_ISDIR(base_metadata.st_mode)
         or stat.S_ISLNK(base_metadata.st_mode)
-        or base_metadata.st_uid != 0
+        or base_metadata.st_uid not in (0, owner)
         or base_metadata.st_mode & 0o022
     ):
         raise ReceiptError("trusted account runtime base is invalid")
+    base_owner = base_metadata.st_uid
+    try:
+        resolved_base = base.resolve(strict=True)
+    except OSError:
+        raise ReceiptError("trusted account runtime base is invalid") from None
+    if resolved_base != base or not _secure_path_chain(base, base, owner=base_owner):
+        raise ReceiptError("trusted account runtime base is invalid")
+    for root in forbidden_roots:
+        try:
+            resolved_root = Path(root).resolve(strict=True)
+        except OSError:
+            raise ReceiptError("trusted account runtime boundary is invalid") from None
+        if _path_is_within(resolved_base, resolved_root) or _path_is_within(
+            resolved_root, resolved_base
+        ):
+            raise ReceiptError("trusted account runtime base overlaps candidate data")
     base_library = base / "lib" / "python3.12"
     base_zip = base / "lib" / "python312.zip"
+    if not _secure_path_chain(base_library, base, owner=base_owner) or not _safe_lstat(
+        base_library, owner=base_owner, directory=True
+    ):
+        raise ReceiptError("trusted account runtime path is invalid")
     for entry in sys.path:
         candidate = Path(entry)
         if not candidate.is_absolute():
             raise ReceiptError("trusted account runtime path is invalid")
         if candidate == base_zip:
+            if base_zip.exists() and (
+                not _secure_path_chain(base_zip, base, owner=base_owner)
+                or not _safe_lstat(base_zip, owner=base_owner, directory=False)
+            ):
+                raise ReceiptError("trusted account runtime path is invalid")
             continue
         try:
             resolved_entry = candidate.resolve(strict=True)
@@ -1859,7 +1907,11 @@ def _require_isolated_runtime_site(
                 metadata = current.lstat()
             except OSError:
                 raise ReceiptError("trusted account runtime path is invalid") from None
-            if stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_mode & 0o022:
+            if (
+                stat.S_ISLNK(metadata.st_mode)
+                or metadata.st_uid != base_owner
+                or metadata.st_mode & 0o022
+            ):
                 raise ReceiptError("trusted account runtime path is invalid")
             current = current.parent
 
@@ -1890,19 +1942,88 @@ def _require_exact_distribution_closure(site: Path, venv: Path) -> None:
         raise ReceiptError("trusted account dependency closure is invalid")
 
     owner = os.getuid()
+    recorded_files: set[Path] = set()
     for distribution in distributions.values():
         files = distribution.files
         if not files:
             raise ReceiptError("trusted account dependency metadata is invalid")
+        dist_info_directories = {
+            Path(str(relative)).parent
+            for relative in files
+            if Path(str(relative)).name == "METADATA"
+            and Path(str(relative)).parent.name.endswith(".dist-info")
+        }
+        if len(dist_info_directories) != 1:
+            raise ReceiptError("trusted account dependency metadata is invalid")
+        expected_record = next(iter(dist_info_directories)) / "RECORD"
+        if sum(Path(str(relative)) == expected_record for relative in files) != 1:
+            raise ReceiptError("trusted account dependency metadata is invalid")
         for relative in files:
             try:
                 installed = Path(distribution.locate_file(relative))
+                resolved_installed = installed.resolve(strict=True)
             except Exception:
                 raise ReceiptError("trusted account dependency metadata is invalid") from None
-            if not _secure_path_chain(installed, venv, owner=owner) or not _safe_lstat(
-                installed, owner=owner, directory=False
+            if (
+                resolved_installed in recorded_files
+                or not _secure_path_chain(resolved_installed, venv, owner=owner)
+                or not _safe_lstat(resolved_installed, owner=owner, directory=False)
             ):
                 raise ReceiptError("trusted account dependency file is invalid")
+            recorded_files.add(resolved_installed)
+
+            relative_path = Path(str(relative))
+            try:
+                record_hash = relative.hash
+                record_size = relative.size
+            except Exception:
+                raise ReceiptError("trusted account dependency metadata is invalid") from None
+            if relative_path == expected_record:
+                if record_hash is not None or record_size is not None:
+                    raise ReceiptError("trusted account dependency metadata is invalid")
+                continue
+            if (
+                record_hash is None
+                or record_hash.mode != "sha256"
+                or not re.fullmatch(r"[A-Za-z0-9_-]{43}", record_hash.value)
+                or not isinstance(record_size, int)
+                or isinstance(record_size, bool)
+                or record_size < 0
+            ):
+                raise ReceiptError("trusted account dependency RECORD is incomplete")
+            try:
+                if resolved_installed.stat().st_size != record_size:
+                    raise ReceiptError("trusted account dependency integrity check failed")
+                digest = hashlib.sha256()
+                with resolved_installed.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+            except OSError:
+                raise ReceiptError("trusted account dependency file is invalid") from None
+            encoded_digest = base64.urlsafe_b64encode(digest.digest()).rstrip(b"=")
+            if encoded_digest.decode("ascii") != record_hash.value:
+                raise ReceiptError("trusted account dependency integrity check failed")
+
+    importable_suffixes = tuple(importlib.machinery.all_suffixes())
+    try:
+        site_entries = tuple(site.rglob("*"))
+    except OSError:
+        raise ReceiptError("trusted account dependency directory is invalid") from None
+    for entry in site_entries:
+        try:
+            metadata = entry.lstat()
+        except OSError:
+            raise ReceiptError("trusted account dependency directory is invalid") from None
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ReceiptError("trusted account dependency symlink is forbidden")
+        if not stat.S_ISREG(metadata.st_mode) or not entry.name.endswith(importable_suffixes):
+            continue
+        try:
+            resolved_entry = entry.resolve(strict=True)
+        except OSError:
+            raise ReceiptError("trusted account dependency file is invalid") from None
+        if resolved_entry not in recorded_files:
+            raise ReceiptError("trusted account dependency has an unrecorded importable file")
 
     for forbidden_name in ("sitecustomize.py", "usercustomize.py"):
         if (site / forbidden_name).exists() or (site / forbidden_name).is_symlink():
