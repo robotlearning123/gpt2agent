@@ -25,9 +25,9 @@ _ACTION_FILES = ("action.yml", "publish.py")
 _PUBLISH_JOB = "github-release"
 _PUBLISH_STEP_NAME = "Validate and publish the exact draft"
 _REVIEWED_WORKFLOW_SHA256 = (
-    "6adda8afd5cbe5b45be6bde58bff4088c7361f9affab880f5a3cbb8128ec9e3c"
+    "a39ba42159c114604d671c9579fb03761860909b9a867c4ef2ef1e300364ed3c"
 )
-_REVIEWED_ACTION_PIN = "15f56b2c16c5923e81df9428c69256237a004c20"
+_REVIEWED_ACTION_PIN = "530db492615ad42a1dde733de89d8893e05ede49"
 
 
 class ActionVerificationError(ValueError):
@@ -138,8 +138,10 @@ def _extract_pin(workflow: bytes, repository: str) -> str:
         re.MULTILINE,
     )
     references = pattern.findall(source)
-    if references != [_REVIEWED_ACTION_PIN]:
-        raise ActionVerificationError("release workflow lacks one exact publication action pin")
+    if references != [_REVIEWED_ACTION_PIN, _REVIEWED_ACTION_PIN]:
+        raise ActionVerificationError(
+            "release workflow lacks the exact preflight and publication action pins"
+        )
     return references[0]
 
 

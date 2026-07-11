@@ -19,7 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TOOL_CHECK = PROJECT_ROOT / "scripts" / "verify_release_tools.py"
 ACTION_CHECK = PROJECT_ROOT / "scripts" / "verify_remote_action_pin.py"
 ACTION_DIRECTORY = PROJECT_ROOT / ".github" / "actions" / "publish-exact-github-release"
-ACTION_PIN = "15f56b2c16c5923e81df9428c69256237a004c20"
+ACTION_PIN = "530db492615ad42a1dde733de89d8893e05ede49"
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -248,91 +248,36 @@ def test_remote_action_pin_verifies_full_sha_and_exact_bytes(tmp_path: Path) -> 
     assert result.stdout == ""
 
 
-def test_repository_release_workflow_has_one_executable_exact_action_pin() -> None:
+def test_repository_release_workflow_uses_one_reviewed_pin_for_both_modes() -> None:
     workflow = PROJECT_ROOT / ".github" / "workflows" / "release.yml"
+    payload = workflow.read_bytes()
 
-    assert _extract_pin(workflow.read_bytes(), "robotlearning123/gpt2agent") == ACTION_PIN
+    assert _extract_pin(payload, "robotlearning123/gpt2agent") == ACTION_PIN
+    assert payload.count(f"publish-exact-github-release@{ACTION_PIN}".encode()) == 2
 
 
-def test_action_pin_extractor_rejects_yaml_equivalent_overrides() -> None:
-    source = (PROJECT_ROOT / ".github" / "workflows" / "release.yml").read_text(
-        encoding="utf-8"
-    )
-    target = "      - name: Validate and publish the exact draft\n"
-    uses = (
-        "        uses: robotlearning123/gpt2agent/.github/actions/"
-        f"publish-exact-github-release@{ACTION_PIN}\n"
-    )
-    job = "  github-release:\n"
-    cases = {
-        "flow mapping action": source.replace(
-            target,
-            "      - {uses: robotlearning123/gpt2agent/.github/actions/"
-            "publish-exact-github-release@main}\n" + target,
-            1,
-        ),
-        "explicit mapping action": source.replace(
-            target,
-            "      - ? uses\n"
-            "        : robotlearning123/gpt2agent/.github/actions/"
-            "publish-exact-github-release@main\n"
-            + target,
-            1,
-        ),
-        "escaped quoted action": source.replace(
-            target,
-            '      - "uses": "robotlearning123/gpt2agent/\\u002egithub/actions/'
-            'publish-exact-github-release@main"\n'
-            + target,
-            1,
-        ),
-        "folded action ref": source.replace(
-            target,
-            "      - uses: >\n"
-            "          robotlearning123/gpt2agent/.github/actions/"
-            "publish-exact-github-release@main\n"
-            + target,
-            1,
-        ),
-        "explicit block indentation": source.replace(
-            target,
-            "      - run: |9\n"
-            "        uses: robotlearning123/gpt2agent/.github/actions/"
-            "publish-exact-github-release@main\n"
-            + target,
-            1,
-        ),
-        "continued target ref": source.replace(uses, uses + "          attacker\n", 1),
-        "ref suffix": source.replace(
-            uses,
-            uses.removesuffix("\n") + "#attacker\n",
-            1,
-        ),
-        "quoted duplicate jobs": source + '\n"jobs":\n  decoy:\n    steps: []\n',
-        "spaced duplicate jobs": source + "\njobs :\n  decoy:\n    steps: []\n",
-        "quoted duplicate publication job": source.replace(
-            job,
-            job + '  "github-release":\n    steps: []\n',
-            1,
-        ),
-        "spaced duplicate publication job": source.replace(
-            job,
-            job + "  github-release :\n    steps: []\n",
-            1,
-        ),
-        "quoted conditional job": source.replace(
-            job,
-            job + '    "if": false\n',
-            1,
-        ),
-    }
+@pytest.mark.parametrize(
+    "mutation",
+    ["append-comment", "change-title-byte", "change-action-pin", "append-decoy"],
+)
+def test_action_pin_extractor_rejects_any_workflow_byte_mutation_by_digest(
+    mutation: str,
+) -> None:
+    source = (PROJECT_ROOT / ".github" / "workflows" / "release.yml").read_bytes()
+    if mutation == "append-comment":
+        mutated = source + b"# byte mutation\n"
+    elif mutation == "change-title-byte":
+        mutated = source.replace(b"name: Release", b"name: release", 1)
+    elif mutation == "change-action-pin":
+        mutated = source.replace(ACTION_PIN.encode(), b"f" * 40)
+    else:
+        mutated = source + b"jobs: {}\n"
 
-    for label, mutated in cases.items():
-        try:
-            _extract_pin(mutated.encode(), "robotlearning123/gpt2agent")
-        except ActionVerificationError:
-            continue
-        pytest.fail(f"accepted noncanonical release workflow: {label}")
+    with pytest.raises(
+        ActionVerificationError,
+        match="release workflow differs from the reviewed exact bytes",
+    ):
+        _extract_pin(mutated, "robotlearning123/gpt2agent")
 
 
 def test_remote_action_pin_fails_closed_for_unresolved_or_mismatched_remote(
@@ -365,13 +310,13 @@ def test_remote_action_pin_fails_closed_for_unresolved_or_mismatched_remote(
         assert "publication action verification failed" in result.stderr
 
 
-def test_remote_action_pin_rejects_missing_multiple_or_symbolic_local_inputs(
+def test_remote_action_gate_reports_digest_error_for_mutated_workflow_bytes(
     tmp_path: Path,
 ) -> None:
     fake_gh, workflow, environment = _action_fixture(tmp_path)
     exact = workflow.read_text(encoding="utf-8")
     symbolic = exact.replace(ACTION_PIN, "main")
-    for source in ("name: missing\n", exact * 2, symbolic, exact + symbolic):
+    for source in ("name: missing\n", exact * 2, symbolic, exact + "# mutation\n"):
         workflow.write_text(source, encoding="utf-8")
         result = subprocess.run(
             [
@@ -394,118 +339,4 @@ def test_remote_action_pin_rejects_missing_multiple_or_symbolic_local_inputs(
 
         assert result.returncode != 0
         assert result.stdout == ""
-
-
-@pytest.mark.parametrize(
-    "source",
-    [
-        (
-            "jobs:\n"
-            "  github-release:\n"
-            "    steps:\n"
-            "      - run: |\n"
-            "          uses: robotlearning123/gpt2agent/.github/actions/"
-            f"publish-exact-github-release@{ACTION_PIN}\n"
-        ),
-        (
-            "uses: robotlearning123/gpt2agent/.github/actions/"
-            f"publish-exact-github-release@{ACTION_PIN}\n"
-        ),
-        (
-            "jobs:\n"
-            "  decoy:\n"
-            "    steps:\n"
-            "      - name: Validate and publish the exact draft\n"
-            "        uses: robotlearning123/gpt2agent/.github/actions/"
-            f"publish-exact-github-release@{ACTION_PIN}\n"
-            "        with:\n"
-        ),
-        (
-            "jobs:\n"
-            "  github-release:\n"
-            "    if: false\n"
-            "    steps:\n"
-            "      - name: Validate and publish the exact draft\n"
-            "        uses: robotlearning123/gpt2agent/.github/actions/"
-            f"publish-exact-github-release@{ACTION_PIN}\n"
-            "        with:\n"
-        ),
-        (
-            "jobs:\n"
-            "  github-release:\n"
-            '    "if": false\n'
-            "    steps:\n"
-            "      - name: Validate and publish the exact draft\n"
-            "        uses: robotlearning123/gpt2agent/.github/actions/"
-            f"publish-exact-github-release@{ACTION_PIN}\n"
-            "        with:\n"
-        ),
-        (
-            "jobs:\n"
-            "  github-release:\n"
-            "    steps:\n"
-            "      - name: Validate and publish the exact draft\n"
-            "        if: false\n"
-            "        uses: robotlearning123/gpt2agent/.github/actions/"
-            f"publish-exact-github-release@{ACTION_PIN}\n"
-            "        with:\n"
-        ),
-        (
-            "jobs:\n"
-            "  github-release:\n"
-            "    steps:\n"
-            "      - name: Validate and publish the exact draft\n"
-            "        uses: robotlearning123/gpt2agent/.github/actions/"
-            f"publish-exact-github-release@{ACTION_PIN}\n"
-            "        with:\n"
-            "      - uses: ./.github/actions/publish-exact-github-release\n"
-        ),
-        (
-            "jobs:\n"
-            "  github-release:\n"
-            "    steps:\n"
-            "      - uses: robotlearning123/gpt2agent/.github/actions/"
-            "publish-exact-github-release@main\n"
-            "      - name: Validate and publish the exact draft\n"
-            "        uses: robotlearning123/gpt2agent/.github/actions/"
-            f"publish-exact-github-release@{ACTION_PIN}\n"
-            "        with:\n"
-        ),
-        (
-            "jobs:\n"
-            "  github-release:\n"
-            "    steps:\n"
-            "      - name: symbolic decoy\n"
-            '        "uses": robotlearning123/gpt2agent/.github/actions/'
-            "publish-exact-github-release@main\n"
-            "      - name: Validate and publish the exact draft\n"
-            "        uses: robotlearning123/gpt2agent/.github/actions/"
-            f"publish-exact-github-release@{ACTION_PIN}\n"
-            "        with:\n"
-        ),
-        (
-            "jobs:\n"
-            "  github-release:\n"
-            "    steps:\n"
-            "      - name: Validate and publish the exact draft\n"
-            "        uses: robotlearning123/gpt2agent/.github/actions/"
-            f"publish-exact-github-release@{ACTION_PIN}#attacker\n"
-            "        with:\n"
-        ),
-        (
-            "jobs:\n"
-            "  github-release:\n"
-            "    name: Publisher\x85    if: false\n"
-            "    steps:\n"
-            "      - name: Validate and publish the exact draft\n"
-            "        uses: robotlearning123/gpt2agent/.github/actions/"
-            f"publish-exact-github-release@{ACTION_PIN}\n"
-            "        with:\n"
-        ),
-    ],
-)
-def test_action_pin_extractor_rejects_non_executable_or_conditional_yaml_context(
-    source: str,
-) -> None:
-    with pytest.raises(ActionVerificationError):
-        _extract_pin(source.encode(), "robotlearning123/gpt2agent")
+        assert "release workflow differs from the reviewed exact bytes" in result.stderr

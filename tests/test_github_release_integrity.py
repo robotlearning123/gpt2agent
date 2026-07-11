@@ -32,7 +32,7 @@ CREATE_APP_TOKEN = (
 )
 EXACT_RELEASE_ACTION = (
     "robotlearning123/gpt2agent/.github/actions/publish-exact-github-release@"
-    "15f56b2c16c5923e81df9428c69256237a004c20"
+    "530db492615ad42a1dde733de89d8893e05ede49"
 )
 TAG_OBJECT = "1" * 40
 COMMIT = "2" * 40
@@ -236,6 +236,7 @@ def test_github_release_publisher_is_action_only_and_binds_exact_draft_id() -> N
     ]
     assert all(re.search(r"@[0-9a-f]{40}\Z", action) for action in _job_actions(job))
     assert "          name: release-notes-${{ github.run_id }}" in job
+    assert "          mode: publish" in job
     assert "          release-id: ${{ needs.github-release-draft.outputs.release_id }}" in job
     assert "          tag: ${{ github.ref_name }}" in job
     assert "          tag-object: ${{ needs.verify.outputs.tag_object }}" in job
@@ -257,13 +258,39 @@ def test_github_release_publisher_is_action_only_and_binds_exact_draft_id() -> N
     assert SOFTPROPS_RELEASE not in _job_actions(job)
 
 
+def test_github_release_draft_preflight_runs_the_exact_read_only_validator() -> None:
+    job = _workflow_job("github-release-preflight")
+    text = "\n".join(job)
+
+    assert _job_permissions(job) == {"actions": "read", "contents": "read"}
+    assert "    needs: [build, github-release-draft, prepare-release-notes, verify]" in job
+    assert not any(re.match(r"^\s+(?:- )?run:", line) for line in job)
+    assert not any(action.startswith("actions/checkout@") for action in _job_actions(job))
+    assert _job_actions(job) == [DOWNLOAD, DOWNLOAD, DOWNLOAD, EXACT_RELEASE_ACTION]
+    assert "          mode: preflight" in job
+    assert "          github-token: ${{ github.token }}" in job
+    assert "          immutability-token:" not in job
+    assert "          release-id: ${{ needs.github-release-draft.outputs.release_id }}" in job
+    assert "          tag: ${{ github.ref_name }}" in job
+    assert "          tag-object: ${{ needs.verify.outputs.tag_object }}" in job
+    assert "          commit: ${{ needs.verify.outputs.commit }}" in job
+    assert "          tree: ${{ needs.verify.outputs.tree }}" in job
+    assert "          version: ${{ needs.verify.outputs.distribution_version }}" in job
+    assert "          expected-prerelease: ${{ contains(github.ref_name, '-rc') ||" in text
+    for input_name in ("notes", "dist", "evidence"):
+        assert any(line.startswith(f"          {input_name}:") for line in job)
+
+
 def test_complete_github_draft_precedes_irreversible_pypi_publication() -> None:
     pypi = _workflow_job("pypi-publish")
     draft = _workflow_job("github-release-draft")
+    preflight = _workflow_job("github-release-preflight")
     publication = _workflow_job("github-release")
 
-    assert "    needs: [build, github-release-draft]" in pypi
+    assert "    needs: [build, github-release-preflight]" in pypi
     assert "    needs: [build, prepare-release-notes, verify]" in draft
+    assert EXACT_RELEASE_ACTION in _job_actions(preflight)
+    assert "          mode: preflight" in preflight
     assert "    needs: [github-release-draft, pypi-canary, verify]" in publication
 
 

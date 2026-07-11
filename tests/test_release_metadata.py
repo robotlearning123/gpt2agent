@@ -666,7 +666,7 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert '"gpt2agent==$DIST_VERSION"' in release
     assert "needs: [build, verify]" in release
     assert "needs: [build, prepare-release-notes, verify]" in release
-    assert "needs: [build, github-release-draft]" in release
+    assert "needs: [build, github-release-preflight]" in release
     assert "needs: [github-release-draft, pypi-canary, verify]" in release
     assert "scripts/release_evidence.py create" in release
     assert "scripts/release_evidence.py verify" in release
