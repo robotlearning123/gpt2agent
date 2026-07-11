@@ -233,8 +233,15 @@ def write_private_json(path: Path, value: Any, *, indent: int | None = None) -> 
     regular files are atomically replaced, so even a hard link is never
     modified in place.
     """
-    if path.name in {"", ".", ".."} or path.parent == path:
-        raise ValueError("private JSON path must include a file name")
+    working_directory = Path.cwd()
+    if not path.is_absolute():
+        path = working_directory / path
+    path = Path(os.path.normpath(path))
+    invalid_parents = {path, working_directory, Path(path.anchor)}
+    if path.name in {"", ".", ".."} or path.parent in invalid_parents:
+        raise ValueError(
+            "private JSON path must use a dedicated non-root parent directory"
+        )
 
     content = json.dumps(value, indent=indent).encode()
     try:

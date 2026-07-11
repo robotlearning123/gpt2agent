@@ -105,6 +105,44 @@ canonical_file() {
   printf '%s/%s\n' "$(canonical_directory "$parent")" "$name"
 }
 
+require_protected_state_parent() {
+  local supplied=$1
+  local parent canonical current owner mode uid
+  local is_parent=1
+  parent=${supplied%/*}
+  canonical=$(canonical_directory "$parent") || {
+    echo "irreversible state parent is not protected" >&2
+    exit 1
+  }
+  if [[ $canonical != "$parent" ]]; then
+    echo "irreversible state parent is not protected" >&2
+    exit 1
+  fi
+  uid=$(/usr/bin/id -u)
+  current=$canonical
+  while :; do
+    if [[ ! -d $current || -L $current ]]; then
+      echo "irreversible state parent is not protected" >&2
+      exit 1
+    fi
+    read -r owner mode < <(/usr/bin/stat --format='%u %a' -- "$current")
+    if [[ ($owner != 0 && $owner != "$uid") || ! $mode =~ ^[0-7]{3,4}$ ]]; then
+      echo "irreversible state parent is not protected" >&2
+      exit 1
+    fi
+    if (( (8#$mode & 0022) != 0 )); then
+      if (( is_parent == 1 )) || [[ $owner != 0 ]] || \
+        (( (8#$mode & 01000) == 0 )); then
+        echo "irreversible state parent is not protected" >&2
+        exit 1
+      fi
+    fi
+    [[ $current == / ]] && break
+    is_parent=0
+    current=$(/usr/bin/dirname -- "$current")
+  done
+}
+
 require_canonical_file() {
   local supplied=$1
   local canonical
@@ -149,6 +187,7 @@ if [[ $(canonical_file "$IRREVERSIBLE_STATE_FILE") != "$IRREVERSIBLE_STATE_FILE"
   echo "irreversible state path is not canonical" >&2
   exit 1
 fi
+require_protected_state_parent "$IRREVERSIBLE_STATE_FILE"
 require_root_protected_tool "$GH_BIN" gh
 require_root_protected_tool "$GIT_BIN" git
 CHECKOUT=$(canonical_directory "$CHECKOUT")
@@ -160,9 +199,22 @@ run_python_clean() {
     "$VERIFIER_PYTHON" -I -S -B "$@"
 }
 
+run_with_gh_token() {
+  local token=$1
+  shift
+  # The token crosses the clean-environment boundary over stdin, not argv.
+  printf '%s\n' "$token" | /usr/bin/env -i \
+    GH_CONFIG_DIR=/nonexistent GH_PROMPT_DISABLED=1 HOME=/nonexistent \
+    LANG=C LC_ALL=C PATH=/usr/bin:/bin \
+    /usr/bin/bash -p -c '
+      IFS= read -r GH_TOKEN || exit 1
+      export GH_TOKEN
+      exec "$@"
+    ' gpt2agent-token-child "$@"
+}
+
 run_python_operator() {
-  /usr/bin/env -i \
-    GH_TOKEN="$OPERATOR_TOKEN" HOME=/nonexistent LC_ALL=C PATH=/usr/bin:/bin \
+  run_with_gh_token "$OPERATOR_TOKEN" \
     "$VERIFIER_PYTHON" -I -S -B "$@"
 }
 
@@ -477,16 +529,12 @@ if [[ ! -s $TAG_REQUEST || -L $TAG_REQUEST ]]; then
 fi
 
 gh_app() {
-  /usr/bin/env -i \
-    GH_CONFIG_DIR=/nonexistent GH_PROMPT_DISABLED=1 GH_TOKEN="$RELEASE_APP_TOKEN" \
-    HOME=/nonexistent LC_ALL=C PATH=/usr/bin:/bin \
+  run_with_gh_token "$RELEASE_APP_TOKEN" \
     "$GH_BIN" api --hostname github.com "$@"
 }
 
 gh_operator_api() {
-  /usr/bin/env -i \
-    GH_CONFIG_DIR=/nonexistent GH_PROMPT_DISABLED=1 GH_TOKEN="$OPERATOR_TOKEN" \
-    HOME=/nonexistent LC_ALL=C PATH=/usr/bin:/bin \
+  run_with_gh_token "$OPERATOR_TOKEN" \
     "$GH_BIN" api --hostname github.com "$@"
 }
 
@@ -525,12 +573,14 @@ REF_POST_OK=0
 verify_checkout_state
 # Persist the recovery marker only after every reversible checkout check passes,
 # then validate it immediately before recording and attempting the ref mutation.
+require_protected_state_parent "$IRREVERSIBLE_STATE_FILE"
 if ! (set -o noclobber; printf 'attempted refs/tags/%s object=%s commit=%s\n' \
   "$TAG" "$TAG_OBJECT_SHA" "$COMMIT" >"$IRREVERSIBLE_STATE_FILE"); then
   echo "irreversible state marker could not be created before ref mutation" >&2
   exit 1
 fi
 /usr/bin/chmod 600 -- "$IRREVERSIBLE_STATE_FILE"
+require_protected_state_parent "$IRREVERSIBLE_STATE_FILE"
 if [[ ! -f $IRREVERSIBLE_STATE_FILE || -L $IRREVERSIBLE_STATE_FILE || \
   $(/usr/bin/stat -c '%u:%a:%h' -- "$IRREVERSIBLE_STATE_FILE") != \
   "$(/usr/bin/id -u):600:1" ]]; then

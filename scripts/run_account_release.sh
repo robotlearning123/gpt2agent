@@ -214,10 +214,15 @@ run_python_operator() {
   local token
   local status=0
   token=$(operator_token)
-  /usr/bin/env -i \
-    GH_TOKEN="$token" HOME=/nonexistent LANG=C.UTF-8 LC_ALL=C.UTF-8 \
-    PATH=/usr/bin:/bin \
-    "$VERIFIER_PYTHON" -I -S -B "$@" || status=$?
+  # Feed the token over a pipe so it never appears in env(1) or Bash argv.
+  printf '%s\n' "$token" | /usr/bin/env -i \
+    GH_CONFIG_DIR=/nonexistent GH_PROMPT_DISABLED=1 HOME=/nonexistent \
+    LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/bin:/bin \
+    /usr/bin/bash -p -c '
+      IFS= read -r GH_TOKEN || exit 1
+      export GH_TOKEN
+      exec "$@"
+    ' gpt2agent-token-child "$VERIFIER_PYTHON" -I -S -B "$@" || status=$?
   token=
   return "$status"
 }

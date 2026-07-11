@@ -49,6 +49,20 @@ def test_operator_starts_privileged_and_reexecutes_with_a_closed_environment() -
     assert "local status=0" in source
 
 
+def test_operator_read_token_never_appears_in_env_process_arguments() -> None:
+    source = OPERATOR.read_text(encoding="utf-8")
+    helper_start = source.index("run_python_operator() {")
+    helper_end = source.index("\n}\n", helper_start) + 3
+    helper = source[helper_start:helper_end]
+
+    assert 'GH_TOKEN="$token"' not in helper
+    assert "printf '%s\\n' \"$token\" |" in helper
+    assert "/usr/bin/env -i" in helper
+    assert "IFS= read -r GH_TOKEN" in helper
+    assert "export GH_TOKEN" in helper
+    assert 'exec "$@"' in helper
+
+
 def test_operator_preflights_pypi_and_publishes_evidence_only_after_tag() -> None:
     source = OPERATOR.read_text(encoding="utf-8")
 

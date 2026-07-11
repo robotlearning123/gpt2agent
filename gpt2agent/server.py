@@ -631,7 +631,11 @@ def main() -> None:
     )
 
     # run (default)
-    run_p = sub.add_parser("run", help="Start the MCP server")
+    run_p = sub.add_parser(
+        "run",
+        help="Start the MCP server",
+        argument_default=argparse.SUPPRESS,
+    )
     run_p.add_argument("--config", type=Path, help="Path to config.toml")
     run_p.add_argument("--port", type=int)
     run_p.add_argument("--host")

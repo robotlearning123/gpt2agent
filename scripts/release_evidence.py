@@ -154,7 +154,7 @@ def verify_account_artifact_handoff(
         raise ValueError("account-tested artifact set does not match the release handoff")
 
 
-def _account_handoff_record(
+def _account_evidence_snapshot(
     dist: Path,
     *,
     commit: str,
@@ -167,32 +167,42 @@ def _account_handoff_record(
     candidate_artifact_size: str,
     candidate_artifact_expires_at: str,
     account_artifact_set_sha256: str,
-) -> dict[str, Any]:
-    identity = {
-        "source_commit": commit,
-        "source_tree": tree,
-        "repository": repository,
-        "run_id": candidate_run_id,
-        "run_attempt": candidate_run_attempt,
-        "artifact_id": candidate_artifact_id,
-        "artifact_digest": candidate_artifact_digest,
-        "artifact_size": candidate_artifact_size,
-        "artifact_expires_at": candidate_artifact_expires_at,
-    }
-    verify_account_artifact_handoff(
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Bind account handoff and manifest records to one dist snapshot."""
+    artifact_set = account_artifact_set(
         dist,
-        artifact_set_sha256=account_artifact_set_sha256,
-        **identity,
+        source_commit=commit,
+        source_tree=tree,
+        repository=repository,
+        run_id=candidate_run_id,
+        run_attempt=candidate_run_attempt,
+        artifact_id=candidate_artifact_id,
+        artifact_digest=candidate_artifact_digest,
+        artifact_size=candidate_artifact_size,
+        artifact_expires_at=candidate_artifact_expires_at,
     )
-    artifacts = account_artifact_set(dist, **identity)
-    return {
-        "artifact_set_sha256": _require(
-            HEX64,
-            account_artifact_set_sha256,
-            "account artifact-set SHA-256",
-        ),
-        "candidate": artifacts["workflow"],
-    }
+    expected = _require(
+        HEX64,
+        account_artifact_set_sha256,
+        "account artifact-set SHA-256",
+    )
+    if hashlib.sha256(canonical_json(artifact_set)).hexdigest() != expected:
+        raise ValueError("account-tested artifact set does not match the release handoff")
+    records = [
+        {
+            "filename": artifact_set[kind]["filename"],
+            "sha256": artifact_set[kind]["sha256"],
+            "size": artifact_set[kind]["size_bytes"],
+        }
+        for kind in ("sdist", "wheel")
+    ]
+    return (
+        {
+            "artifact_set_sha256": expected,
+            "candidate": artifact_set["workflow"],
+        },
+        records,
+    )
 
 
 def build_manifest(
@@ -216,7 +226,7 @@ def build_manifest(
     account_artifact_set_sha256: str,
 ) -> dict[str, Any]:
     """Return canonical-data-ready provenance for one immutable artifact set."""
-    return {
+    manifest = {
         "schema_version": "2",
         "artifact_set": "release_workflow_artifacts",
         "tag": _require(TAG, tag, "tag"),
@@ -232,21 +242,23 @@ def build_manifest(
             "run_attempt": _require(RUN_NUMBER, run_attempt, "workflow run attempt"),
             "job": _require_build_job(job),
         },
-        "account_handoff": _account_handoff_record(
-            dist,
-            commit=commit,
-            tree=tree,
-            repository=repository,
-            candidate_run_id=candidate_run_id,
-            candidate_run_attempt=candidate_run_attempt,
-            candidate_artifact_id=candidate_artifact_id,
-            candidate_artifact_digest=candidate_artifact_digest,
-            candidate_artifact_size=candidate_artifact_size,
-            candidate_artifact_expires_at=candidate_artifact_expires_at,
-            account_artifact_set_sha256=account_artifact_set_sha256,
-        ),
-        "artifacts": _artifact_records(dist),
     }
+    account_handoff, artifacts = _account_evidence_snapshot(
+        dist,
+        commit=commit,
+        tree=tree,
+        repository=repository,
+        candidate_run_id=candidate_run_id,
+        candidate_run_attempt=candidate_run_attempt,
+        candidate_artifact_id=candidate_artifact_id,
+        candidate_artifact_digest=candidate_artifact_digest,
+        candidate_artifact_size=candidate_artifact_size,
+        candidate_artifact_expires_at=candidate_artifact_expires_at,
+        account_artifact_set_sha256=account_artifact_set_sha256,
+    )
+    manifest["account_handoff"] = account_handoff
+    manifest["artifacts"] = artifacts
+    return manifest
 
 
 def canonical_json(value: Any) -> bytes:
@@ -336,7 +348,7 @@ def verify_manifest(
         raise ValueError("release evidence comes from a future workflow run attempt")
     _require_build_job(workflow.get("job", ""))
 
-    expected_handoff = _account_handoff_record(
+    expected_handoff, expected_artifacts = _account_evidence_snapshot(
         dist,
         commit=commit,
         tree=tree,
@@ -352,7 +364,7 @@ def verify_manifest(
     if manifest.get("account_handoff") != expected_handoff:
         raise ValueError("release evidence account handoff does not match")
 
-    if manifest.get("artifacts") != _artifact_records(dist):
+    if manifest.get("artifacts") != expected_artifacts:
         raise ValueError("artifact metadata does not match release evidence")
 
 

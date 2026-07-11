@@ -1003,8 +1003,8 @@ def test_release_operator_revalidates_pinned_candidate_immediately_before_tag() 
     receipt_command = operator[receipt_verify:receipt_verify_end]
     assert "/usr/bin/env -i" in operator
     assert "RELEASE_APP_TOKEN" not in receipt_command
-    assert 'GH_TOKEN="$OPERATOR_TOKEN"' in operator
-    assert 'GH_TOKEN="$RELEASE_APP_TOKEN"' in operator
+    assert 'run_with_gh_token "$OPERATOR_TOKEN"' in operator
+    assert 'run_with_gh_token "$RELEASE_APP_TOKEN"' in operator
     assert operator.count('"repos/$REPOSITORY/git/refs"') == 1
 
 
@@ -1785,6 +1785,86 @@ def test_account_artifact_handoff_digest_is_shared_and_fails_closed(tmp_path: Pa
             artifact_set_sha256=digest,
             **identity,
         )
+
+
+def test_release_evidence_build_and_verify_each_use_one_artifact_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import release_evidence
+
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    wheel = dist / "gpt2agent-1.2.3-py3-none-any.whl"
+    sdist = dist / "gpt2agent-1.2.3.tar.gz"
+    wheel.write_bytes(b"wheel")
+    sdist.write_bytes(b"sdist")
+    commit = "1" * 40
+    tree = "2" * 40
+    candidate = {
+        "candidate_run_id": "54321",
+        "candidate_run_attempt": "2",
+        "candidate_artifact_id": "67890",
+        "candidate_artifact_digest": "sha256:" + "6" * 64,
+        "candidate_artifact_size": "31415",
+        "candidate_artifact_expires_at": "2099-07-10T13:17:42Z",
+    }
+    artifact_set_sha256 = release_evidence.account_artifact_set_sha256(
+        dist,
+        source_commit=commit,
+        source_tree=tree,
+        repository="robotlearning123/gpt2agent",
+        run_id=candidate["candidate_run_id"],
+        run_attempt=candidate["candidate_run_attempt"],
+        artifact_id=candidate["candidate_artifact_id"],
+        artifact_digest=candidate["candidate_artifact_digest"],
+        artifact_size=candidate["candidate_artifact_size"],
+        artifact_expires_at=candidate["candidate_artifact_expires_at"],
+    )
+    candidate["account_artifact_set_sha256"] = artifact_set_sha256
+    original_artifact_records = release_evidence._artifact_records
+    calls = 0
+
+    def one_snapshot(path: Path) -> list[dict[str, object]]:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            pytest.fail("release evidence rescanned the mutable distribution directory")
+        return original_artifact_records(path)
+
+    monkeypatch.setattr(release_evidence, "_artifact_records", one_snapshot)
+    manifest = release_evidence.build_manifest(
+        dist,
+        tag="v1.2.3",
+        tag_object="3" * 40,
+        commit=commit,
+        tree=tree,
+        receipt_sha256="4" * 64,
+        repository="robotlearning123/gpt2agent",
+        run_id="12345",
+        run_attempt="1",
+        job="build",
+        **candidate,
+    )
+
+    assert calls == 1
+    assert manifest["artifacts"] == original_artifact_records(dist)
+
+    calls = 0
+    release_evidence.verify_manifest(
+        manifest,
+        dist,
+        tag="v1.2.3",
+        tag_object="3" * 40,
+        commit=commit,
+        tree=tree,
+        receipt_sha256="4" * 64,
+        repository="robotlearning123/gpt2agent",
+        run_id="12345",
+        run_attempt="2",
+        **candidate,
+    )
+    assert calls == 1
 
 
 def test_release_evidence_binds_source_receipt_and_artifact_hashes(tmp_path: Path) -> None:

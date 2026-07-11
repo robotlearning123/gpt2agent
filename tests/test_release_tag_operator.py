@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import shlex
 import stat
@@ -75,6 +76,8 @@ def _run_real_checkout_probe(
     checkout: Path,
     commit: str,
     tree: str,
+    *,
+    state_parent_mode: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
     stat_probe = subprocess.run(
         ["/usr/bin/stat", "--format=%u", str(checkout)],
@@ -87,6 +90,8 @@ def _run_real_checkout_probe(
 
     support = tmp_path / f"shell-probe-{checkout.name}"
     support.mkdir()
+    if state_parent_mode is not None:
+        support.chmod(state_parent_mode)
     fake_python = support / "python"
     fake_gh = support / "gh"
     _write_executable(fake_python, "#!/bin/sh\nexit 97\n")
@@ -581,6 +586,23 @@ def test_real_shell_checkout_accepts_normal_clone_and_linked_worktree(tmp_path: 
     assert linked_result.returncode == 0, linked_result.stderr
 
 
+def test_coordinator_rejects_world_writable_irreversible_state_parent(
+    tmp_path: Path,
+) -> None:
+    checkout, commit, tree = _create_real_checkout(tmp_path)
+
+    result = _run_real_checkout_probe(
+        tmp_path,
+        checkout,
+        commit,
+        tree,
+        state_parent_mode=0o777,
+    )
+
+    assert result.returncode != 0
+    assert "irreversible state parent is not protected" in result.stderr
+
+
 def test_real_shell_checkout_rejects_linked_worktree_with_wrong_admin_backlink(
     tmp_path: Path,
 ) -> None:
@@ -926,6 +948,42 @@ def test_coordinator_source_never_updates_or_deletes_a_remote_ref() -> None:
     assert "--method PATCH" not in source
     assert "${TMPDIR" not in source
     assert '[[ $GH_BIN != /usr/bin/gh || $GIT_BIN != /usr/bin/git ]]' in source
+
+
+def test_coordinator_protects_marker_parent_at_each_irreversible_boundary() -> None:
+    source = COORDINATOR.read_text(encoding="utf-8")
+    initial_path_check = source.index("irreversible state path is not canonical")
+    marker_create = source.index("set -o noclobber")
+    marker_metadata = source.index("irreversible state marker is invalid")
+    validations = [
+        match.start()
+        for match in re.finditer(
+            r'require_protected_state_parent "\$IRREVERSIBLE_STATE_FILE"',
+            source,
+        )
+    ]
+
+    assert len(validations) == 3
+    assert initial_path_check < validations[0] < marker_create
+    assert validations[0] < validations[1] < marker_create
+    assert marker_create < validations[2] < marker_metadata
+
+
+def test_coordinator_tokens_never_appear_in_env_process_arguments() -> None:
+    source = COORDINATOR.read_text(encoding="utf-8")
+    bridge_start = source.index("run_with_gh_token() {")
+    bridge_end = source.index("\n}\n", bridge_start) + 3
+    bridge = source[bridge_start:bridge_end]
+
+    assert 'GH_TOKEN="$OPERATOR_TOKEN" HOME=/nonexistent' not in source
+    assert 'GH_TOKEN="$RELEASE_APP_TOKEN" \\\n' not in source
+    assert "printf '%s\\n' \"$token\" |" in bridge
+    assert "/usr/bin/env -i" in bridge
+    assert "IFS= read -r GH_TOKEN" in bridge
+    assert "export GH_TOKEN" in bridge
+    assert 'exec "$@"' in bridge
+    assert source.count('run_with_gh_token "$OPERATOR_TOKEN"') == 2
+    assert source.count('run_with_gh_token "$RELEASE_APP_TOKEN"') == 1
 
 
 def test_coordinator_ignores_bash_startup_environment(tmp_path: Path) -> None:

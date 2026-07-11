@@ -10,6 +10,50 @@ from pathlib import Path
 import pytest
 
 
+@pytest.mark.parametrize("path_kind", ["bare", "absolute-cwd", "traversal", "root"])
+def test_private_json_rejects_paths_without_a_dedicated_parent(
+    path_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gpt2agent import _secure_file
+
+    path = Path("auth.json")
+    if path_kind == "absolute-cwd":
+        path = Path.cwd() / "auth.json"
+    elif path_kind == "traversal":
+        path = Path("nested") / ".." / "auth.json"
+    elif path_kind == "root":
+        path = Path(Path.cwd().anchor or "/") / "auth.json"
+
+    monkeypatch.setattr(
+        _secure_file,
+        "_open_private_directory",
+        lambda parent: pytest.fail(f"must not open or chmod unsafe parent {parent}"),
+    )
+
+    with pytest.raises(ValueError, match="dedicated non-root parent"):
+        _secure_file.write_private_json(path, {"access_token": "synthetic"})
+
+
+def test_private_json_preserves_valid_nested_relative_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gpt2agent._secure_file import write_private_json
+
+    monkeypatch.chdir(tmp_path)
+    destination = Path("private") / "auth.json"
+
+    write_private_json(destination, {"access_token": "synthetic"})
+
+    assert json.loads(destination.read_text(encoding="utf-8")) == {
+        "access_token": "synthetic"
+    }
+    if os.name != "nt":
+        assert stat.S_IMODE(destination.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+
+
 def _save_token(kind: str, home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(home))
     token_path = home / ".gpt2agent" / "token.json"

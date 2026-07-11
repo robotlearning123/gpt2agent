@@ -85,6 +85,15 @@ def test_runtime_tree_hash_rejects_writable_runtime_entry(tmp_path: Path) -> Non
     assert "group- or world-writable" in result.stderr
 
 
+def test_runtime_root_cannot_use_the_sticky_ancestor_exception() -> None:
+    source = HASHER.read_text(encoding="utf-8")
+    root_device = source.index('ROOT_DEVICE=$(/usr/bin/stat -c \'%d\' -- "$ROOT")')
+    root_mode_guard = source.index('check_protected_mode "$ROOT"')
+    ancestor_loop = source.index("ancestor=$ROOT")
+
+    assert root_device < root_mode_guard < ancestor_loop
+
+
 def test_runtime_tree_hash_rejects_unreadable_subtree_without_partial_digest(
     tmp_path: Path,
 ) -> None:

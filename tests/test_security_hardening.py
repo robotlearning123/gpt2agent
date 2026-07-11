@@ -281,10 +281,18 @@ def test_cli_defaults_to_stdio(monkeypatch: pytest.MonkeyPatch, argv: list[str])
     assert mcp.transports == ["stdio"]
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["gpt2agent", "run", "--http"],
+        ["gpt2agent", "--http", "run"],
+    ],
+)
 def test_cli_http_transport_is_disabled_before_server_construction(
     monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
 ) -> None:
-    monkeypatch.setattr(sys, "argv", ["gpt2agent", "run", "--http"])
+    monkeypatch.setattr(sys, "argv", argv)
     monkeypatch.setattr(
         server_mod,
         "load_config",
@@ -301,6 +309,48 @@ def test_cli_http_transport_is_disabled_before_server_construction(
 
     with pytest.raises(SystemExit, match="HTTP transport is disabled"):
         server_mod.main()
+
+
+def test_cli_leading_run_options_survive_subparser_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    loaded: list[Path | None] = []
+    built: list[dict[str, Any]] = []
+    mcp = _RecordingMCP()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "gpt2agent",
+            "--config",
+            str(config_path),
+            "--port",
+            "8123",
+            "run",
+        ],
+    )
+
+    def _load(path: Path | None = None) -> dict[str, Any]:
+        loaded.append(path)
+        return {
+            "server": {"host": "127.0.0.1", "port": 9000},
+            "models": {"chat": "gpt-5-3"},
+        }
+
+    def _build(cfg: dict[str, Any]) -> _RecordingMCP:
+        built.append(cfg)
+        return mcp
+
+    monkeypatch.setattr(server_mod, "load_config", _load)
+    monkeypatch.setattr(server_mod, "build_server", _build)
+
+    server_mod.main()
+
+    assert loaded == [config_path]
+    assert built[0]["server"]["port"] == 8123
+    assert mcp.transports == ["stdio"]
 
 def test_cli_stdio_ignores_legacy_non_loopback_http_host(
     monkeypatch: pytest.MonkeyPatch,

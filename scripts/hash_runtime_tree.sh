@@ -49,6 +49,8 @@ check_protected_mode() {
     || die "runtime path is group- or world-writable: $path"
 }
 
+check_protected_mode "$ROOT"
+
 # Protect the pathname itself against replacement. A root-owned sticky
 # directory such as /tmp is an accepted ancestor because sticky ownership
 # prevents another UID from renaming this user's private child directory.
