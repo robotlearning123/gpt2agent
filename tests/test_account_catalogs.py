@@ -207,6 +207,45 @@ def test_get_conversation_projects_and_redacts_every_private_scalar() -> None:
     }
 
 
+def test_get_conversation_fallback_preserves_adjacent_large_integer_order() -> None:
+    def message(message_id: str, text: str, create_time: int) -> dict:
+        return {
+            "id": message_id,
+            "author": {"role": "assistant"},
+            "content": {"content_type": "text", "parts": [text]},
+            "status": "finished_successfully",
+            "create_time": create_time,
+        }
+
+    result = conversations.normalize_conversation_detail(
+        {
+            "id": "conversation-1",
+            "mapping": {
+                # Reverse chronological insertion order: converting these
+                # adjacent integers to float collapses them into one key.
+                "newer": {
+                    "message": message("message-newer", "newer", 2**53 + 1)
+                },
+                "stale": {"message": message("message-stale", "stale", 2**53)},
+            },
+        },
+        expected_id="conversation-1",
+        max_messages=1,
+    )
+
+    assert result["messages"] == [
+        {
+            "id": "message-newer",
+            "role": "assistant",
+            "recipient": None,
+            "content_type": "text",
+            "status": "finished_successfully",
+            "create_time": 2**53 + 1,
+            "text": "newer",
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     "payload",
     [

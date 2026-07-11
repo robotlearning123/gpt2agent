@@ -108,13 +108,15 @@ def normalize_conversation_detail(
             if isinstance(node, dict)
         ]
 
-        def sort_key(indexed_node: tuple[int, dict]) -> tuple[int, float | str, int]:
+        def sort_key(
+            indexed_node: tuple[int, dict],
+        ) -> tuple[int, int | float | str, int]:
             index, node = indexed_node
             message = node.get("message")
             value = message.get("create_time") if isinstance(message, dict) else None
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 if isinstance(value, int) or math.isfinite(value):
-                    return (0, float(value), index)
+                    return (0, value, index)
             if isinstance(value, str) and len(value) <= 2_048:
                 return (1, value, index)
             return (2, "", index)
