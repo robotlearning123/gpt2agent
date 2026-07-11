@@ -7,6 +7,7 @@ import json
 import os
 import secrets
 import stat
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -75,18 +76,28 @@ def _sync_directory_path(path: Path) -> None:
         os.close(fd)
 
 
-def atomic_replace_bytes(path: Path, content: bytes, *, mode: int = 0o600) -> None:
+def atomic_replace_bytes(
+    path: Path,
+    content: bytes,
+    *,
+    mode: int = 0o600,
+    before_replace: Callable[[], None] | None = None,
+) -> None:
     """Atomically replace *path* without opening an existing destination.
 
     The temporary file is random, same-directory, exclusive, and no-follow
     where the platform exposes ``O_NOFOLLOW``.  Therefore a pre-planted temp
-    symlink or destination symlink is replaced rather than followed.
+    symlink or destination symlink is replaced rather than followed.  An
+    optional ``before_replace`` validator runs after the temporary file is
+    durable and immediately before the destination rename.
     """
     fd, temp_path = _open_random_temp_path(path)
     try:
         _write_and_sync(fd, content, mode)
         os.close(fd)
         fd = -1
+        if before_replace is not None:
+            before_replace()
         os.replace(temp_path, path)
         _sync_directory_path(path.parent)
     except BaseException:

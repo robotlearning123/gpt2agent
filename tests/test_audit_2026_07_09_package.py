@@ -239,6 +239,47 @@ def test_installer_rejects_non_directory_pipx_environment_before_mutation(
         assert venv.read_text(encoding="utf-8") == "not a virtual environment\n"
 
 
+def test_signal_after_environment_move_restores_previous_install(tmp_path: Path) -> None:
+    env, _ = _recording_installer_env(tmp_path)
+    fake_bin = Path(env["PATH"].split(os.pathsep, 1)[0])
+    real_mv = shutil.which("mv", path=os.defpath)
+    assert real_mv is not None
+    signal_marker = tmp_path / "mv-signalled"
+    env["FAKE_MV_SIGNAL_MARKER"] = str(signal_marker)
+    _write_executable(
+        fake_bin / "mv",
+        textwrap.dedent(
+            f"""\
+            #!/bin/sh
+            {real_mv!r} "$@"
+            status=$?
+            if [ "$status" -eq 0 ] && [ ! -e "$FAKE_MV_SIGNAL_MARKER" ]; then
+                : > "$FAKE_MV_SIGNAL_MARKER"
+                kill -TERM "$PPID"
+            fi
+            exit "$status"
+            """
+        ),
+    )
+    venv = Path(env["FAKE_PIPX_HOME"]) / "venvs" / "gpt2agent"
+    venv.mkdir(parents=True)
+    marker = venv / "installed-version"
+    marker.write_text("old\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [str(INSTALLER), "--no-register"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 130, result.stdout + result.stderr
+    assert marker.read_text(encoding="utf-8") == "old\n"
+    assert not list(Path(env["FAKE_PIPX_HOME"]).glob(".gpt2agent-upgrade.*"))
+
+
 def test_failed_upgrade_restores_existing_pipx_environment(
     tmp_path: Path,
 ) -> None:

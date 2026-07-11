@@ -176,7 +176,7 @@ MCP_PORT = 9000
 
 
 def write_mcp_config(plan: str) -> None:
-    from gpt2agent.install import _atomic_write, _backup
+    from gpt2agent.install import _ConfigTransaction
 
     chat_model = "gpt-5-5-pro" if plan == "pro" else "gpt-5-3"
     cfg = f"""[server]
@@ -190,11 +190,10 @@ chat = "{chat_model}"
 """
     # Users hand-edit this file (models, host opt-ins); don't clobber their
     # copy silently — keep a .bak and write atomically.
-    if MCP_CONFIG_PATH.exists():
-        if MCP_CONFIG_PATH.read_text() == cfg:
-            return
-        _backup(MCP_CONFIG_PATH)
-    _atomic_write(MCP_CONFIG_PATH, cfg)
+    transaction = _ConfigTransaction(MCP_CONFIG_PATH)
+    if transaction.exists and transaction.text == cfg:
+        return
+    transaction.commit(cfg)
 
 
 # ── final summary ────────────────────────────────────────────────────────────

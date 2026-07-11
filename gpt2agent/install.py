@@ -63,36 +63,109 @@ def _codex_home() -> Path:
     return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
 
 
+class _ConfigTransaction:
+    """Bind one config target and its bytes to a guarded replacement."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        try:
+            # Resolve once so a stable user-managed symlink remains in place
+            # while every read and write applies to the same target.
+            self.target = path.resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
+            raise RuntimeError(f"Could not resolve config path {path}: {exc}") from exc
+
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NONBLOCK", 0)
+        try:
+            descriptor = os.open(path, flags)
+        except FileNotFoundError:
+            self.data = b""
+            self.identity: tuple[int, int] | None = None
+            self.mode = 0o600
+            return
+
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise RuntimeError(f"{path} must resolve to a regular file")
+            self.identity = (metadata.st_dev, metadata.st_ino)
+            self.mode = stat.S_IMODE(metadata.st_mode) & 0o777
+            with os.fdopen(descriptor, "rb") as source:
+                descriptor = -1
+                self.data = source.read()
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    @property
+    def exists(self) -> bool:
+        return self.identity is not None
+
+    @property
+    def text(self) -> str:
+        return self.data.decode("utf-8")
+
+    def _backup(self) -> Path | None:
+        if not self.exists:
+            return None
+        backup = self.path.with_name(self.path.name + ".bak-gpt2agent")
+        # Backups can contain credentials.  Always make them private rather
+        # than copying ACL masks into broader owning-group mode bits.
+        atomic_replace_bytes(backup, self.data, mode=0o600)
+        return backup
+
+    def _assert_unchanged(self) -> None:
+        try:
+            current_target = self.path.resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
+            raise RuntimeError(
+                f"{self.path} changed during installation; refusing to overwrite it"
+            ) from exc
+        if current_target != self.target:
+            raise RuntimeError(
+                f"{self.path} changed during installation; refusing to overwrite it"
+            )
+
+        try:
+            metadata = self.target.stat()
+        except FileNotFoundError:
+            current_identity = None
+        except OSError as exc:
+            raise RuntimeError(
+                f"{self.path} changed during installation; refusing to overwrite it"
+            ) from exc
+        else:
+            if not stat.S_ISREG(metadata.st_mode):
+                raise RuntimeError(
+                    f"{self.path} changed during installation; refusing to overwrite it"
+                )
+            current_identity = (metadata.st_dev, metadata.st_ino)
+
+        if current_identity != self.identity:
+            raise RuntimeError(
+                f"{self.path} changed during installation; refusing to overwrite it"
+            )
+
+    def commit(self, content: str) -> Path | None:
+        backup = self._backup()
+        self.target.parent.mkdir(parents=True, exist_ok=True)
+        atomic_replace_bytes(
+            self.target,
+            content.encode("utf-8"),
+            mode=self.mode,
+            before_replace=self._assert_unchanged,
+        )
+        return backup
+
+
 def _backup(path: Path) -> Path | None:
     """Snapshot ``path`` to ``path.bak-gpt2agent`` so the user can undo.
 
-    Preserves the source file's mode. Agent configs (~/.claude.json,
-    ~/.codex/config.toml) hold MCP server commands and can hold secrets; a
-    plain ``write_bytes`` would create the backup with the process umask
-    (often world-readable), exposing a ``0600`` config in its ``.bak`` copy.
+    Agent configs (~/.claude.json, ~/.codex/config.toml) hold MCP server
+    commands and can hold secrets, so backups are always written as ``0600``.
     """
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-    flags |= getattr(os, "O_NONBLOCK", 0)
-    try:
-        descriptor = os.open(path, flags)
-    except FileNotFoundError:
-        return None
-    try:
-        metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode):
-            raise RuntimeError(f"{path} must resolve to a regular file before backup")
-        mode = stat.S_IMODE(metadata.st_mode)
-        with os.fdopen(descriptor, "rb") as source:
-            descriptor = -1
-            data = source.read()
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-    bak = path.with_name(path.name + ".bak-gpt2agent")
-    # Write a random sibling and replace the backup path.  In particular, do
-    # not open a pre-planted ``.bak-gpt2agent`` symlink and truncate its target.
-    atomic_replace_bytes(bak, data, mode=mode)
-    return bak
+    return _ConfigTransaction(path)._backup()
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -151,9 +224,10 @@ def install_claude_code(
 
     cfg_path = config_path or Path.home() / ".claude.json"
 
-    if cfg_path.exists():
+    transaction = _ConfigTransaction(cfg_path)
+    if transaction.exists:
         try:
-            data = json.loads(cfg_path.read_text())
+            data = json.loads(transaction.text)
         except json.JSONDecodeError as exc:
             raise RuntimeError(
                 f"{cfg_path} is not valid JSON ({exc}). Refusing to overwrite — "
@@ -190,8 +264,7 @@ def install_claude_code(
             _info("claude-code: would also drop stale legacy 'openai' entry")
         return {"path": cfg_path, "backup": None, "changed": False}
 
-    backup = _backup(cfg_path)
-    _atomic_write(cfg_path, json.dumps(data, indent=2) + "\n")
+    backup = transaction.commit(json.dumps(data, indent=2) + "\n")
     _ok(
         f"claude-code: wrote mcpServers.{server_name} to {cfg_path} "
         f"(backup: {backup.name if backup else 'none'})"
@@ -382,7 +455,8 @@ def install_codex(
     Preserves all other sections (codex agent definitions, model config, …).
     """
     cfg_path = config_path or _codex_home() / "config.toml"
-    existing = cfg_path.read_text() if cfg_path.exists() else ""
+    transaction = _ConfigTransaction(cfg_path)
+    existing = transaction.text if transaction.exists else ""
     if existing:
         try:
             tomllib.loads(existing)
@@ -424,8 +498,7 @@ def install_codex(
             _info("codex: would also drop stale legacy [mcp_servers.openai] block")
         return {"path": cfg_path, "backup": None, "changed": False}
 
-    backup = _backup(cfg_path)
-    _atomic_write(cfg_path, new_content)
+    backup = transaction.commit(new_content)
     _ok(
         f"codex: wrote [{section_name}] to {cfg_path} "
         f"(backup: {backup.name if backup else 'none'})"
@@ -469,9 +542,10 @@ def _install_json_host(
     Used for Cursor, Windsurf, Claude Desktop, and Zed (see callers). VS Code and
     Cline use the same shape but are documented as manual setup (docs/clients.md).
     """
-    if cfg_path.exists():
+    transaction = _ConfigTransaction(cfg_path)
+    if transaction.exists:
         try:
-            data = json.loads(cfg_path.read_text() or "{}")
+            data = json.loads(transaction.text or "{}")
         except json.JSONDecodeError as exc:
             raise RuntimeError(
                 f"{cfg_path} is not valid JSON ({exc}). Refusing to overwrite — "
@@ -495,8 +569,7 @@ def _install_json_host(
         _info(f"{label}: would write {top_key}.{server_name} to {cfg_path}")
         return {"path": cfg_path, "backup": None, "changed": False}
 
-    backup = _backup(cfg_path)
-    _atomic_write(cfg_path, json.dumps(data, indent=2) + "\n")
+    backup = transaction.commit(json.dumps(data, indent=2) + "\n")
     _ok(f"{label}: wrote {top_key}.{server_name} to {cfg_path} "
         f"(backup: {backup.name if backup else 'none'})")
     return {"path": cfg_path, "backup": backup, "changed": True}

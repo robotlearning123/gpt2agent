@@ -127,9 +127,9 @@ if [[ -d "$PIPX_VENV_DIR" && ! -L "$PIPX_VENV_DIR" ]]; then
   info "Replacing existing gpt2agent pipx environment (restored automatically on failure)"
   PIPX_BACKUP_DIR=$(mktemp -d "$PIPX_HOME_DIR/.gpt2agent-upgrade.XXXXXXXX")
   rmdir -- "$PIPX_BACKUP_DIR"
-  mv -- "$PIPX_VENV_DIR" "$PIPX_BACKUP_DIR"
   trap restore_pipx_environment EXIT
   trap 'exit 130' HUP INT TERM
+  mv -- "$PIPX_VENV_DIR" "$PIPX_BACKUP_DIR"
 fi
 
 if [[ $SOURCE_EXPLICIT -eq 1 && -d "$SOURCE" ]]; then

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -155,6 +157,217 @@ def test_backup_rejects_non_regular_source(tmp_path: Path) -> None:
         _backup(config)
 
     assert not config.with_name(config.name + ".bak-gpt2agent").exists()
+
+
+def test_backup_is_private_even_when_source_is_group_or_world_readable(tmp_path: Path) -> None:
+    from gpt2agent.install import _backup
+
+    config = tmp_path / "config.json"
+    config.write_text('{"secret": "config"}', encoding="utf-8")
+    config.chmod(0o644)
+
+    backup = _backup(config)
+
+    assert backup is not None
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+
+
+def test_backup_acl_cannot_widen_effective_group_access(tmp_path: Path) -> None:
+    if os.name != "posix":
+        pytest.skip("POSIX ACLs are unavailable")
+    setfacl = shutil.which("setfacl")
+    getfacl = shutil.which("getfacl")
+    if setfacl is None or getfacl is None:
+        pytest.skip("setfacl/getfacl are unavailable")
+
+    import grp
+
+    from gpt2agent.install import _backup
+
+    config = tmp_path / "config.json"
+    config.write_text('{"secret": "config"}', encoding="utf-8")
+    config.chmod(0o600)
+    source_gid = config.stat().st_gid
+    named_group = next(
+        (group.gr_gid for group in grp.getgrall() if group.gr_gid != source_gid), None
+    )
+    if named_group is None:
+        pytest.skip("no distinct group is available for an ACL entry")
+
+    subprocess.run(
+        [setfacl, "-m", f"g::---,g:{named_group}:r--,m::r--", str(config)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    source_acl = subprocess.run(
+        [getfacl, "-cpn", str(config)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert f"group:{named_group}:r--" in source_acl
+    assert "group::---" in source_acl
+
+    backup = _backup(config)
+
+    assert backup is not None
+    assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+    backup_acl = subprocess.run(
+        [getfacl, "-cpn", str(backup)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert all(
+        line.endswith("---")
+        for line in backup_acl.splitlines()
+        if line.startswith(("group:", "mask:"))
+    )
+
+
+@pytest.mark.parametrize(
+    ("installer_name", "original_content", "replacement_content"),
+    [
+        ("install_claude_code", '{"original": true}\n', '{"replacement": true}\n'),
+        ("install_codex", "original = true\n", "replacement = true\n"),
+        ("install_cursor", '{"original": true}\n', '{"replacement": true}\n'),
+    ],
+)
+def test_config_install_aborts_if_symlink_target_changes_after_backup(
+    installer_name: str,
+    original_content: str,
+    replacement_content: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from gpt2agent import install
+
+    original = tmp_path / "original-config"
+    original.write_text(original_content, encoding="utf-8")
+    replacement = tmp_path / "replacement-config"
+    replacement.write_text(replacement_content, encoding="utf-8")
+    config = tmp_path / "config"
+    config.symlink_to(original)
+    backup = config.with_name(config.name + ".bak-gpt2agent")
+    real_atomic_replace = install.atomic_replace_bytes
+    swapped = False
+
+    def replace_then_swap(path: Path, content: bytes, **kwargs) -> None:
+        nonlocal swapped
+        real_atomic_replace(path, content, **kwargs)
+        if Path(path) == backup and not swapped:
+            config.unlink()
+            config.symlink_to(replacement)
+            swapped = True
+
+    monkeypatch.setattr(install, "atomic_replace_bytes", replace_then_swap)
+
+    with pytest.raises(RuntimeError, match="changed during installation"):
+        getattr(install, installer_name)(config_path=config)
+
+    assert swapped
+    assert original.read_text(encoding="utf-8") == original_content
+    assert replacement.read_text(encoding="utf-8") == replacement_content
+    assert backup.read_text(encoding="utf-8") == original_content
+    assert not list(tmp_path.glob(".original-config.tmp-*"))
+    assert "wrote" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("installer_name", "original_content"),
+    [
+        ("install_claude_code", '{"original": true}\n'),
+        ("install_codex", "original = true\n"),
+        ("install_cursor", '{"original": true}\n'),
+    ],
+)
+def test_config_install_preserves_stable_symlink(
+    installer_name: str,
+    original_content: str,
+    tmp_path: Path,
+) -> None:
+    from gpt2agent import install
+
+    target = tmp_path / "target-config"
+    target.write_text(original_content, encoding="utf-8")
+    config = tmp_path / "config"
+    config.symlink_to(target)
+
+    result = getattr(install, installer_name)(config_path=config)
+
+    assert result["changed"] is True
+    assert config.is_symlink()
+    assert "gpt2agent" in target.read_text(encoding="utf-8")
+    assert "original" in target.read_text(encoding="utf-8")
+
+
+def test_config_install_aborts_if_stable_target_inode_changes_after_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gpt2agent import install
+
+    original_content = '{"original": true}\n'
+    replacement_content = '{"replacement": true}\n'
+    target = tmp_path / "target-config"
+    target.write_text(original_content, encoding="utf-8")
+    replacement = tmp_path / "replacement-config"
+    replacement.write_text(replacement_content, encoding="utf-8")
+    config = tmp_path / "config"
+    config.symlink_to(target)
+    backup = config.with_name(config.name + ".bak-gpt2agent")
+    real_atomic_replace = install.atomic_replace_bytes
+
+    def replace_then_change_inode(path: Path, content: bytes, **kwargs) -> None:
+        real_atomic_replace(path, content, **kwargs)
+        if Path(path) == backup:
+            os.replace(replacement, target)
+
+    monkeypatch.setattr(install, "atomic_replace_bytes", replace_then_change_inode)
+
+    with pytest.raises(RuntimeError, match="changed during installation"):
+        install.install_claude_code(config_path=config)
+
+    assert config.is_symlink()
+    assert target.read_text(encoding="utf-8") == replacement_content
+    assert backup.read_text(encoding="utf-8") == original_content
+    assert not list(tmp_path.glob(".target-config.tmp-*"))
+
+
+def test_setup_config_aborts_if_symlink_target_changes_after_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gpt2agent import install, setup
+
+    original_content = "# original\n"
+    replacement_content = "# replacement\n"
+    original = tmp_path / "original-config"
+    original.write_text(original_content, encoding="utf-8")
+    replacement = tmp_path / "replacement-config"
+    replacement.write_text(replacement_content, encoding="utf-8")
+    config = tmp_path / "config"
+    config.symlink_to(original)
+    backup = config.with_name(config.name + ".bak-gpt2agent")
+    monkeypatch.setattr(setup, "MCP_CONFIG_PATH", config)
+    real_atomic_replace = install.atomic_replace_bytes
+
+    def replace_then_swap(path: Path, content: bytes, **kwargs) -> None:
+        real_atomic_replace(path, content, **kwargs)
+        if Path(path) == backup:
+            config.unlink()
+            config.symlink_to(replacement)
+
+    monkeypatch.setattr(install, "atomic_replace_bytes", replace_then_swap)
+
+    with pytest.raises(RuntimeError, match="changed during installation"):
+        setup.write_mcp_config("pro")
+
+    assert original.read_text(encoding="utf-8") == original_content
+    assert replacement.read_text(encoding="utf-8") == replacement_content
+    assert backup.read_text(encoding="utf-8") == original_content
 
 
 def test_atomic_write_does_not_follow_predictable_temp_symlink(tmp_path: Path) -> None:
