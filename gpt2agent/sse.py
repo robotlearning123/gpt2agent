@@ -1842,12 +1842,16 @@ class ConversationClient:
                 det = await asyncio.to_thread(
                     self._backend.get, detail_path, auth_headers=auth_headers
                 )
-            except BackendHTTPError:
+            except BackendHTTPError as exc:
+                if not exc.retryable:
+                    raise
                 poll_errors += 1
                 if poll_errors >= 5:
                     raise
                 _log.warning("Agent poll request failed — continuing")
                 continue
+            except BackendContractError:
+                raise
             except Exception:
                 poll_errors += 1
                 fatal_unknown = poll_errors >= 5
@@ -2132,7 +2136,9 @@ class ConversationClient:
                     self._backend.get, detail_path, auth_headers=auth_headers
                 )
                 poll_errors = 0  # reset on success
-            except BackendHTTPError:
+            except BackendHTTPError as exc:
+                if not exc.retryable:
+                    raise
                 poll_errors += 1
                 if poll_errors >= 5:
                     raise
@@ -2140,6 +2146,8 @@ class ConversationClient:
                 _log.warning("Image poll request failed — retrying in %.0fs", backoff)
                 await asyncio.sleep(backoff)
                 continue
+            except BackendContractError:
+                raise
             except Exception:
                 poll_errors += 1
                 fatal_unknown = poll_errors >= 5

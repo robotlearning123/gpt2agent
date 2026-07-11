@@ -1164,6 +1164,49 @@ def test_poll_retry_exhaustion_discards_unsafe_exception_chain(poller: str) -> N
     assert secret not in "\n".join(str(item) for item in _exception_tree(error))
 
 
+@pytest.mark.parametrize("poller", ["agent", "image"])
+@pytest.mark.parametrize("failure_kind", ["contract", "nonretryable_http"])
+def test_pollers_propagate_nonretryable_backend_failures(
+    poller: str, failure_kind: str
+) -> None:
+    class _Backend:
+        calls = 0
+
+        def get(self, *_: Any, **__: Any) -> dict:
+            self.calls += 1
+            if failure_kind == "contract":
+                raise BackendContractError(
+                    poller, "conversation response exceeds the size limit"
+                )
+            raise BackendHTTPError(
+                "GET",
+                "/backend-api/conversation/PRIVATE_CONVERSATION_ID",
+                401,
+                code="login_required",
+                retryable=False,
+            )
+
+    backend = _Backend()
+    client = sse_mod.ConversationClient(backend)  # type: ignore[arg-type]
+    if poller == "agent":
+        awaitable = client._poll_async_response(
+            "PRIVATE_CONVERSATION_ID", poll_interval=0, max_wait=1
+        )
+    else:
+        awaitable = client._poll_image_result(
+            "PRIVATE_CONVERSATION_ID", poll_interval=0, max_wait=1
+        )
+
+    expected_error = BackendContractError if failure_kind == "contract" else BackendHTTPError
+    with pytest.raises(expected_error) as caught:
+        asyncio.run(awaitable)
+
+    assert caught.value.code == (
+        "contract_changed" if failure_kind == "contract" else "login_required"
+    )
+    assert backend.calls == 1
+
+
 def test_heavy_dr_poll_propagates_nonretryable_http_failure() -> None:
     class _Backend:
         calls = 0
