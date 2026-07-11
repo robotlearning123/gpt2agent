@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -12,6 +13,7 @@ import ssl
 import stat
 import sys
 import time
+import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,10 +33,19 @@ MAX_JSON_BYTES = 4 * 1024 * 1024
 MAX_NOTES_BYTES = 1024 * 1024
 MAX_ASSET_BYTES = 128 * 1024 * 1024
 MAX_TOTAL_ASSET_BYTES = 256 * 1024 * 1024
+MAX_TOKEN_BYTES = 4096
+MAX_TOKEN_PAIR_BYTES = MAX_TOKEN_BYTES * 2 + 1
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-(?:alpha|beta|rc)[0-9]+)?\Z")
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:(?:a|b|rc)[0-9]+)?\Z")
 POSITIVE_INTEGER = re.compile(r"[1-9][0-9]*\Z")
+RELEASE_API_PATH = re.compile(
+    r"/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/[1-9][0-9]*"
+    r"(?:/assets\?per_page=100)?\Z"
+)
+SETTINGS_API_PATH = re.compile(
+    r"/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/immutable-releases\Z"
+)
 
 
 @dataclass(frozen=True)
@@ -81,9 +92,44 @@ def _parse_bool(value: str) -> bool:
 
 
 def _validate_token(token: str) -> str:
-    if not token or len(token) > 4096 or any(character in token for character in "\r\n\x00"):
+    try:
+        encoded = token.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("GitHub token is invalid") from None
+    if (
+        not encoded
+        or len(encoded) > MAX_TOKEN_BYTES
+        or any(unicodedata.category(character).startswith("C") for character in token)
+    ):
         raise ValueError("GitHub token is invalid")
     return token
+
+
+def _read_single_token() -> str:
+    raw_token = sys.stdin.buffer.read(MAX_TOKEN_BYTES + 1)
+    if len(raw_token) > MAX_TOKEN_BYTES:
+        raise ValueError("GitHub token is invalid")
+    try:
+        return _validate_token(raw_token.decode("utf-8"))
+    except UnicodeDecodeError:
+        raise ValueError("GitHub token is invalid") from None
+
+
+def _read_distinct_token_pair() -> tuple[str, str]:
+    raw_pair = sys.stdin.buffer.read(MAX_TOKEN_PAIR_BYTES + 1)
+    if len(raw_pair) > MAX_TOKEN_PAIR_BYTES or raw_pair.count(b"\x00") != 1:
+        raise ValueError("GitHub token pair is invalid")
+    release_bytes, settings_bytes = raw_pair.split(b"\x00")
+    if len(release_bytes) > MAX_TOKEN_BYTES or len(settings_bytes) > MAX_TOKEN_BYTES:
+        raise ValueError("GitHub token pair is invalid")
+    try:
+        release_token = _validate_token(release_bytes.decode("utf-8"))
+        settings_token = _validate_token(settings_bytes.decode("utf-8"))
+    except UnicodeDecodeError:
+        raise ValueError("GitHub token pair is invalid") from None
+    if hmac.compare_digest(release_bytes, settings_bytes):
+        raise ValueError("GitHub tokens must be distinct")
+    return release_token, settings_token
 
 
 def _require_directory(path: Path, label: str) -> list[Path]:
@@ -222,7 +268,12 @@ def verify_release_state(
             raise ValueError("GitHub Release asset digest does not match")
 
 
-def _request_json(method: str, path: str, token: str, payload: object | None) -> object:
+def _perform_json_request(
+    method: str,
+    path: str,
+    token: str,
+    payload: object | None,
+) -> object:
     if method not in {"GET", "PATCH"} or not path.startswith("/repos/"):
         raise ValueError("disallowed GitHub API request")
     _validate_token(token)
@@ -268,6 +319,37 @@ def _request_json(method: str, path: str, token: str, payload: object | None) ->
         raise ValueError("GitHub API returned invalid JSON") from None
 
 
+def _request_release_json(
+    method: str,
+    path: str,
+    token: str,
+    payload: object | None,
+) -> object:
+    if not RELEASE_API_PATH.fullmatch(path):
+        raise ValueError("disallowed GitHub Release API request")
+    is_assets = path.endswith("/assets?per_page=100")
+    if is_assets and (method != "GET" or payload is not None):
+        raise ValueError("disallowed GitHub Release API request")
+    if not is_assets and method not in {"GET", "PATCH"}:
+        raise ValueError("disallowed GitHub Release API request")
+    return _perform_json_request(method, path, token, payload)
+
+
+def _request_settings_json(
+    method: str,
+    path: str,
+    token: str,
+    payload: object | None,
+) -> object:
+    if (
+        method != "GET"
+        or payload is not None
+        or not SETTINGS_API_PATH.fullmatch(path)
+    ):
+        raise ValueError("disallowed immutable-release settings API request")
+    return _perform_json_request(method, path, token, payload)
+
+
 def _fetch_state(
     repository: str,
     release_id: int,
@@ -280,12 +362,19 @@ def _fetch_state(
     return release, assets
 
 
-def _require_immutable_releases_enabled(
+def require_immutable_releases_enabled(
     repository: str,
     token: str,
-    request_json: JsonRequester,
+    *,
+    request_json: JsonRequester = _request_settings_json,
 ) -> None:
-    settings = request_json("GET", f"/repos/{repository}/immutable-releases", token, None)
+    normalized_repository = _require_match(REPOSITORY, repository, "repository")
+    settings = request_json(
+        "GET",
+        f"/repos/{normalized_repository}/immutable-releases",
+        token,
+        None,
+    )
     if (
         not isinstance(settings, dict)
         or set(settings) != {"enabled", "enforced_by_owner"}
@@ -302,18 +391,30 @@ def publish_exact_release(
     body: str,
     prerelease: bool,
     expected_assets: Mapping[str, ExpectedAsset],
-    token: str,
+    release_token: str,
+    settings_token: str,
     *,
-    request_json: JsonRequester = _request_json,
+    release_request_json: JsonRequester = _request_release_json,
+    settings_request_json: JsonRequester = _request_settings_json,
     sleep: Callable[[float], None] = time.sleep,
 ) -> str:
     """Validate twice, publish only by numeric ID, and read back immutability."""
     normalized_repository = _require_match(REPOSITORY, repository, "repository")
     normalized_release_id = _require_positive_int(release_id, "release ID")
     normalized_tag = _require_match(TAG, tag, "release tag")
+    validated_release_token = _validate_token(release_token)
+    validated_settings_token = _validate_token(settings_token)
+    if hmac.compare_digest(
+        validated_release_token.encode("utf-8"),
+        validated_settings_token.encode("utf-8"),
+    ):
+        raise ValueError("GitHub tokens must be distinct")
 
     release, assets = _fetch_state(
-        normalized_repository, normalized_release_id, token, request_json
+        normalized_repository,
+        normalized_release_id,
+        validated_release_token,
+        release_request_json,
     )
     if isinstance(release, dict) and release.get("draft") is False:
         verify_release_state(
@@ -337,11 +438,18 @@ def publish_exact_release(
         expected_assets=expected_assets,
         expected_draft=True,
     )
-    _require_immutable_releases_enabled(normalized_repository, token, request_json)
+    require_immutable_releases_enabled(
+        normalized_repository,
+        validated_settings_token,
+        request_json=settings_request_json,
+    )
 
     # Close the observable validation/mutation window as much as the REST API permits.
     release, assets = _fetch_state(
-        normalized_repository, normalized_release_id, token, request_json
+        normalized_repository,
+        normalized_release_id,
+        validated_release_token,
+        release_request_json,
     )
     verify_release_state(
         release,
@@ -353,15 +461,24 @@ def publish_exact_release(
         expected_assets=expected_assets,
         expected_draft=True,
     )
-    _require_immutable_releases_enabled(normalized_repository, token, request_json)
+    require_immutable_releases_enabled(
+        normalized_repository,
+        validated_settings_token,
+        request_json=settings_request_json,
+    )
 
     path = f"/repos/{normalized_repository}/releases/{normalized_release_id}"
     try:
-        request_json("PATCH", path, token, {"draft": False})
+        release_request_json(
+            "PATCH", path, validated_release_token, {"draft": False}
+        )
     except Exception:
         # The server may have accepted a PATCH before the transport failed.
         release, assets = _fetch_state(
-            normalized_repository, normalized_release_id, token, request_json
+            normalized_repository,
+            normalized_release_id,
+            validated_release_token,
+            release_request_json,
         )
         if isinstance(release, dict) and release.get("draft") is False:
             verify_release_state(
@@ -385,14 +502,23 @@ def publish_exact_release(
             expected_assets=expected_assets,
             expected_draft=True,
         )
-        _require_immutable_releases_enabled(normalized_repository, token, request_json)
-        request_json("PATCH", path, token, {"draft": False})
+        require_immutable_releases_enabled(
+            normalized_repository,
+            validated_settings_token,
+            request_json=settings_request_json,
+        )
+        release_request_json(
+            "PATCH", path, validated_release_token, {"draft": False}
+        )
 
     last_error = "published release was not observable"
     for attempt in range(1, 8):
         try:
             release, assets = _fetch_state(
-                normalized_repository, normalized_release_id, token, request_json
+                normalized_repository,
+                normalized_release_id,
+                validated_release_token,
+                release_request_json,
             )
             verify_release_state(
                 release,
@@ -415,29 +541,60 @@ def publish_exact_release(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--token-stdin", action="store_true")
+    parser.add_argument("--settings-token-stdin", action="store_true")
+    parser.add_argument("--settings-preflight", action="store_true")
     parser.add_argument("--repository", required=True)
-    parser.add_argument("--release-id", required=True)
-    parser.add_argument("--tag", required=True)
-    parser.add_argument("--version", required=True)
-    parser.add_argument("--expected-prerelease", required=True)
-    parser.add_argument("--notes", type=Path, required=True)
-    parser.add_argument("--dist", type=Path, required=True)
-    parser.add_argument("--evidence", type=Path, required=True)
+    parser.add_argument("--release-id")
+    parser.add_argument("--tag")
+    parser.add_argument("--version")
+    parser.add_argument("--expected-prerelease")
+    parser.add_argument("--notes", type=Path)
+    parser.add_argument("--dist", type=Path)
+    parser.add_argument("--evidence", type=Path)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.settings_preflight:
+            if args.token_stdin or not args.settings_token_stdin:
+                raise ValueError("settings preflight token must be read from standard input")
+            if any(
+                value is not None
+                for value in (
+                    args.release_id,
+                    args.tag,
+                    args.version,
+                    args.expected_prerelease,
+                    args.notes,
+                    args.dist,
+                    args.evidence,
+                )
+            ):
+                raise ValueError("settings preflight does not accept publication inputs")
+            token = _read_single_token()
+            require_immutable_releases_enabled(args.repository, token)
+            print("immutable GitHub Release settings preflight succeeded")
+            return 0
         if not args.token_stdin:
-            raise ValueError("GitHub token must be read from standard input")
-        raw_token = sys.stdin.buffer.read(4097)
-        if len(raw_token) > 4096:
-            raise ValueError("GitHub token is invalid")
-        try:
-            token = _validate_token(raw_token.decode("utf-8"))
-        except UnicodeDecodeError:
-            raise ValueError("GitHub token is invalid") from None
+            raise ValueError("GitHub tokens must be read from standard input")
+        if args.settings_token_stdin:
+            raise ValueError("publication requires the dual-token standard input mode")
+        if any(
+            value is None
+            for value in (
+                args.release_id,
+                args.tag,
+                args.version,
+                args.expected_prerelease,
+                args.notes,
+                args.dist,
+                args.evidence,
+            )
+        ):
+            raise ValueError("publication inputs are incomplete")
+        release_token, settings_token = _read_distinct_token_pair()
         release_id = _parse_release_id(args.release_id)
         prerelease = _parse_bool(args.expected_prerelease)
         expected_body = _read_notes(args.notes)
@@ -449,7 +606,8 @@ def main(argv: list[str] | None = None) -> int:
             expected_body,
             prerelease,
             expected_assets,
-            token,
+            release_token,
+            settings_token,
         )
     except ValueError as error:
         print(f"exact GitHub Release publication failed: {error}", file=sys.stderr)

@@ -27,6 +27,9 @@ CHECKOUT = "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
 DOWNLOAD = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
 UPLOAD = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
 SOFTPROPS_RELEASE = "softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65"
+CREATE_APP_TOKEN = (
+    "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1"
+)
 EXACT_RELEASE_ACTION = (
     "robotlearning123/gpt2agent/.github/actions/publish-exact-github-release@"
     "5f0f75f691ad20513cb8409b6f292bdea79de81e"
@@ -199,9 +202,16 @@ def test_github_release_publisher_is_action_only_and_binds_exact_draft_id() -> N
 
     assert _job_permissions(job) == {"actions": "read", "contents": "write"}
     assert "    needs: [github-release-draft, verify]" in job
+    assert "    environment: release-settings-read" in job
     assert not any(re.match(r"^\s+(?:- )?run:", line) for line in job)
     assert not any(action.startswith("actions/checkout@") for action in _job_actions(job))
-    assert _job_actions(job) == [DOWNLOAD, DOWNLOAD, DOWNLOAD, EXACT_RELEASE_ACTION]
+    assert _job_actions(job) == [
+        DOWNLOAD,
+        DOWNLOAD,
+        DOWNLOAD,
+        CREATE_APP_TOKEN,
+        EXACT_RELEASE_ACTION,
+    ]
     assert all(re.search(r"@[0-9a-f]{40}\Z", action) for action in _job_actions(job))
     assert "          name: release-notes-${{ github.run_id }}" in job
     assert "          release-id: ${{ needs.github-release-draft.outputs.release_id }}" in job
@@ -209,6 +219,15 @@ def test_github_release_publisher_is_action_only_and_binds_exact_draft_id() -> N
     assert "          version: ${{ needs.verify.outputs.distribution_version }}" in job
     assert "          expected-prerelease: ${{ contains(github.ref_name, '-rc') ||" in text
     assert "          github-token: ${{ github.token }}" in job
+    assert (
+        "          immutability-token: "
+        "${{ steps.release-settings-token.outputs.token }}" in job
+    )
+    assert "          permission-administration: read" in job
+    assert not any(
+        re.fullmatch(r"\s+permission-(?!administration:)[a-z0-9-]+:.*", line)
+        for line in job
+    )
     assert "          files:" not in text
     assert SOFTPROPS_RELEASE not in _job_actions(job)
 

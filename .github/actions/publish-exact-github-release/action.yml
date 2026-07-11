@@ -5,6 +5,9 @@ inputs:
   github-token:
     description: Fine-scoped GitHub token with contents write permission.
     required: true
+  immutability-token:
+    description: Fine-scoped GitHub App token with administration read permission.
+    required: true
   repository:
     description: Repository in owner/name form.
     required: true
@@ -37,6 +40,7 @@ runs:
       shell: bash
       env:
         INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
+        INPUT_IMMUTABILITY_TOKEN: ${{ inputs.immutability-token }}
         INPUT_REPOSITORY: ${{ inputs.repository }}
         INPUT_RELEASE_ID: ${{ inputs.release-id }}
         INPUT_TAG: ${{ inputs.tag }}
@@ -47,7 +51,7 @@ runs:
         INPUT_EVIDENCE: ${{ inputs.evidence }}
       run: |
         set -euo pipefail
-        printf '%s' "$INPUT_GITHUB_TOKEN" |
+        printf '%s\0%s' "$INPUT_GITHUB_TOKEN" "$INPUT_IMMUTABILITY_TOKEN" |
           /usr/bin/env -i /usr/bin/python3 -I -S -B \
           "$GITHUB_ACTION_PATH/publish.py" \
           --token-stdin \

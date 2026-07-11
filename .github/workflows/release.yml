@@ -29,6 +29,7 @@ jobs:
   verify:
     name: Verify release source and metadata
     runs-on: ubuntu-latest
+    environment: release-settings-read
     timeout-minutes: 35
     outputs:
       version: ${{ steps.metadata.outputs.version }}
@@ -122,6 +123,28 @@ jobs:
           --expected-artifact-size "${{ steps.provenance.outputs.candidate_artifact_size }}"
           --expected-artifact-expires-at "${{ steps.provenance.outputs.candidate_artifact_expires_at }}"
           --minimum-artifact-lifetime-hours 1 --attempts 180 --delay 10
+
+      - name: Mint immutable-release settings token for preflight
+        id: release-settings-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.GPT2AGENT_RELEASE_SETTINGS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GPT2AGENT_RELEASE_SETTINGS_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: read
+
+      - name: Require immutable GitHub Releases before artifact relay
+        env:
+          INPUT_IMMUTABILITY_TOKEN: ${{ steps.release-settings-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$INPUT_IMMUTABILITY_TOKEN" |
+            /usr/bin/env -i /usr/bin/python3 -I -S -B \
+            .github/actions/publish-exact-github-release/publish.py \
+            --settings-preflight \
+            --settings-token-stdin \
+            --repository "$GITHUB_REPOSITORY"
 
   test:
     name: Tests must pass before publish
@@ -494,6 +517,7 @@ jobs:
     name: Publish immutable GitHub Release
     needs: [github-release-draft, verify]
     runs-on: ubuntu-latest
+    environment: release-settings-read
     permissions:
       actions: read
       contents: write
@@ -510,10 +534,20 @@ jobs:
         with:
           name: release-notes-${{ github.run_id }}
           path: ${{ runner.temp }}/github-release-publish-${{ github.run_id }}-${{ github.run_attempt }}/notes/
+      - name: Mint fresh immutable-release settings token for publication
+        id: release-settings-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.GPT2AGENT_RELEASE_SETTINGS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GPT2AGENT_RELEASE_SETTINGS_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: read
       - name: Validate and publish the exact draft
         uses: robotlearning123/gpt2agent/.github/actions/publish-exact-github-release@5f0f75f691ad20513cb8409b6f292bdea79de81e
         with:
           github-token: ${{ github.token }}
+          immutability-token: ${{ steps.release-settings-token.outputs.token }}
           repository: ${{ github.repository }}
           release-id: ${{ needs.github-release-draft.outputs.release_id }}
           tag: ${{ github.ref_name }}

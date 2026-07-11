@@ -723,6 +723,60 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert not re.search(r"python scripts/verify_release\.py --tag v\d+\.\d+\.\d+", readme)
 
 
+def test_release_workflow_uses_distinct_admin_read_tokens_for_immutable_settings() -> None:
+    release = (PROJECT_ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+    verify = _workflow_job_text(release, "verify")
+    github_release = _workflow_job_text(release, "github-release")
+    app_action = (
+        "uses: actions/create-github-app-token@"
+        "bcd2ba49218906704ab6c1aa796996da409d3eb1"
+    )
+
+    assert release.count(app_action) == 2
+    for job in (verify, github_release):
+        assert "    environment: release-settings-read" in job
+        assert job.count(app_action) == 1
+        assert "client-id: ${{ vars.GPT2AGENT_RELEASE_SETTINGS_APP_CLIENT_ID }}" in job
+        assert (
+            "private-key: "
+            "${{ secrets.GPT2AGENT_RELEASE_SETTINGS_APP_PRIVATE_KEY }}" in job
+        )
+        assert "owner: ${{ github.repository_owner }}" in job
+        assert "repositories: ${{ github.event.repository.name }}" in job
+        assert "permission-administration: read" in job
+        assert re.findall(
+            r"^[ ]+(permission-[a-z0-9-]+):", job, flags=re.MULTILINE
+        ) == ["permission-administration"]
+
+    assert "--settings-preflight" in verify
+    assert "--settings-token-stdin" in verify
+    assert "printf '%s' \"$INPUT_IMMUTABILITY_TOKEN\" |" in verify
+    assert "/usr/bin/env -i /usr/bin/python3 -I -S -B" in verify
+    main_ci = verify.index("Require successful main CI for the exact tagged commit")
+    mint_preflight = verify.index("Mint immutable-release settings token for preflight")
+    preflight = verify.index("Require immutable GitHub Releases before artifact relay")
+    assert main_ci < mint_preflight < preflight
+    assert "\n      - " not in verify[preflight:]
+
+    assert "      actions: read\n      contents: write" in github_release
+    assert "name: pypi" not in github_release
+    mint_final = github_release.index(
+        "Mint fresh immutable-release settings token for publication"
+    )
+    publish = github_release.index("Validate and publish the exact draft")
+    assert mint_final < publish
+    assert github_release[github_release.index(app_action) : publish].count(
+        "\n      - "
+    ) == 1
+    assert "github-token: ${{ github.token }}" in github_release
+    assert (
+        "immutability-token: ${{ steps.release-settings-token.outputs.token }}"
+        in github_release
+    )
+
+
 def test_release_operator_revalidates_pinned_candidate_immediately_before_tag() -> None:
     operator = (PROJECT_ROOT / "scripts" / "create_release_tag.sh").read_text(
         encoding="utf-8"
