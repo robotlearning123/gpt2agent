@@ -10,6 +10,30 @@ from pathlib import Path
 import pytest
 
 
+_INJECTED_CHILD_SECRETS = {
+    "GPT2AGENT_RELEASE_APP_TOKEN": "SYNTHETIC_RELEASE_APP_TOKEN",
+    "GH_TOKEN": "SYNTHETIC_GH_TOKEN",
+    "GITHUB_TOKEN": "SYNTHETIC_GITHUB_TOKEN",
+    "TWINE_PASSWORD": "SYNTHETIC_TWINE_PASSWORD",
+    "UV_PUBLISH_TOKEN": "SYNTHETIC_UV_PUBLISH_TOKEN",
+    "AWS_SECRET_ACCESS_KEY": "SYNTHETIC_AWS_SECRET",
+    "AZURE_CLIENT_SECRET": "SYNTHETIC_AZURE_SECRET",
+    "GOOGLE_APPLICATION_CREDENTIALS": "/synthetic/google-credentials.json",
+    "SSH_AUTH_SOCK": "/synthetic/ssh-agent.sock",
+    "KUBECONFIG": "/synthetic/kubeconfig",
+    "HTTP_PROXY": "http://operator:secret@proxy.example.invalid:8080",
+    "HTTPS_PROXY": "https://operator:secret@proxy.example.invalid:8443",
+    "ALL_PROXY": "socks5://operator:secret@proxy.example.invalid:1080",
+    "NO_PROXY": "SYNTHETIC_NETWORK_SECRET",
+    "GENERIC_INJECTED_SECRET": "SYNTHETIC_GENERIC_SECRET",
+}
+_INJECTED_CHILD_TEMP_DIRS = {
+    "TEMP": "/operator/tmp/temp",
+    "TMP": "/operator/tmp/tmp",
+    "TMPDIR": "/operator/tmp/tmpdir",
+}
+
+
 def test_request_policy_accepts_only_the_normative_get_allowlist() -> None:
     from scripts.verify_account_receipt import (
         ReceiptError,
@@ -1105,6 +1129,63 @@ def test_account_artifact_binding_requires_pretag_retention_headroom(
         )
 
 
+def test_candidate_subprocess_env_is_a_positive_allowlist(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from scripts.verify_account_receipt import _subprocess_env
+
+    for name, value in _INJECTED_CHILD_SECRETS.items():
+        monkeypatch.setenv(name, value)
+    for name, value in _INJECTED_CHILD_TEMP_DIRS.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("PATH", "/synthetic/bin")
+    monkeypatch.setenv("LANG", "en_US.UTF-8")
+    monkeypatch.setenv("SSL_CERT_FILE", "/synthetic/ca.pem")
+    monkeypatch.setenv("HOME", "/operator/home")
+    monkeypatch.setenv("CODEX_HOME", "/operator/codex")
+    isolated_home = tmp_path / "isolated-home"
+    isolated_home.mkdir(mode=0o700)
+
+    env = _subprocess_env(isolated_home=isolated_home)
+
+    assert env["HOME"] == str(isolated_home)
+    assert env["PATH"] == "/synthetic/bin"
+    assert env["LANG"] == "en_US.UTF-8"
+    assert env["SSL_CERT_FILE"] == "/synthetic/ca.pem"
+    child_temp = isolated_home / "tmp"
+    assert {env[name] for name in _INJECTED_CHILD_TEMP_DIRS} == {str(child_temp)}
+    assert child_temp.stat().st_mode & 0o777 == 0o700
+    assert "CODEX_HOME" not in env
+    assert _INJECTED_CHILD_SECRETS.keys().isdisjoint(env)
+    allowed = {
+        "COMSPEC",
+        "CURL_CA_BUNDLE",
+        "HOME",
+        "LANG",
+        "LANGUAGE",
+        "PATH",
+        "PATHEXT",
+        "PIP_CONFIG_FILE",
+        "PYTHONIOENCODING",
+        "PYTHONNOUSERSITE",
+        "PYTHONUTF8",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "TZ",
+        "USERPROFILE",
+        "WINDIR",
+    }
+    assert all(
+        name.upper() in allowed or name.upper().startswith("LC_") for name in env
+    )
+
+
 def test_install_context_runs_isolated_wheel_and_sdist_checks_before_yield(
     tmp_path: Path,
     monkeypatch,
@@ -1138,10 +1219,17 @@ def test_install_context_runs_isolated_wheel_and_sdist_checks_before_yield(
         "sdist": {"filename": sdist.name, "sha256": "d" * 64, "size_bytes": 5},
     }
     commands: list[tuple[str, ...]] = []
+    child_envs: list[dict[str, str]] = []
+
+    for name, value in _INJECTED_CHILD_SECRETS.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("HOME", str(tmp_path / "operator-home"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "operator-codex"))
 
     def fake_command(argv, *, cwd, env):
-        del cwd, env
+        del cwd
         commands.append(tuple(str(value) for value in argv))
+        child_envs.append(dict(env))
 
     monkeypatch.setattr(receipt_module, "_run_command", fake_command)
     with receipt_module.installed_candidate_context(
@@ -1158,6 +1246,103 @@ def test_install_context_runs_isolated_wheel_and_sdist_checks_before_yield(
     assert any(str(sdist) in command and "pip install" in command for command in flattened)
     assert flattened.index(next(item for item in flattened if str(wheel) in item)) < len(flattened)
     assert flattened.index(next(item for item in flattened if str(sdist) in item)) < len(flattened)
+    assert child_envs
+    assert all(
+        _INJECTED_CHILD_SECRETS.keys().isdisjoint(env) for env in child_envs
+    )
+    assert all("CODEX_HOME" not in env for env in child_envs)
+    assert all(env["HOME"] != str(tmp_path / "operator-home") for env in child_envs)
+    assert all(
+        {env[name] for name in _INJECTED_CHILD_TEMP_DIRS}
+        == {str(Path(env["HOME"]) / "tmp")}
+        for env in child_envs
+    )
+    assert all(not Path(env["HOME"]).exists() for env in child_envs)
+
+
+def test_installed_probe_gets_only_isolated_minimal_account_auth(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import scripts.verify_account_receipt as receipt_module
+
+    operator_home = tmp_path / "operator-home"
+    operator_codex = tmp_path / "operator-codex"
+    operator_codex.mkdir(parents=True)
+    operator_home.mkdir()
+    access_token = "eyJsynthetic.header.signature"
+    (operator_codex / "auth.json").write_text(
+        json.dumps(
+            {
+                "tokens": {
+                    "access_token": access_token,
+                    "refresh_token": "SYNTHETIC_REFRESH_TOKEN",
+                },
+                "OPENAI_API_KEY": "SYNTHETIC_OPENAI_API_KEY",
+            }
+        ),
+        encoding="utf-8",
+    )
+    for relative in (".ssh/id_ed25519", ".aws/credentials", ".config/gh/hosts.yml"):
+        path = operator_home / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("SYNTHETIC_OPERATOR_CREDENTIAL", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(operator_home))
+    monkeypatch.setenv("CODEX_HOME", str(operator_codex))
+    for name, value in _INJECTED_CHILD_SECRETS.items():
+        monkeypatch.setenv(name, value)
+
+    captured: dict[str, object] = {}
+
+    def fake_command(argv, *, cwd, env):
+        del argv, cwd
+        child_env = dict(env)
+        isolated_home = Path(child_env["HOME"])
+        isolated_codex = Path(child_env["CODEX_HOME"])
+        auth_file = isolated_codex / "auth.json"
+        captured.update(
+            {
+                "env": child_env,
+                "home": isolated_home,
+                "codex": isolated_codex,
+                "home_mode": isolated_home.stat().st_mode & 0o777,
+                "codex_mode": isolated_codex.stat().st_mode & 0o777,
+                "temp_mode": Path(child_env["TMPDIR"]).stat().st_mode & 0o777,
+                "auth_mode": auth_file.stat().st_mode & 0o777,
+                "auth": json.loads(auth_file.read_text(encoding="utf-8")),
+                "files": sorted(
+                    str(path.relative_to(isolated_home))
+                    for path in isolated_home.rglob("*")
+                    if path.is_file()
+                ),
+            }
+        )
+
+    monkeypatch.setattr(receipt_module, "_run_command", fake_command)
+    monkeypatch.setattr(
+        receipt_module,
+        "_read_probe_payload",
+        lambda _path: {"synthetic": "validated"},
+    )
+
+    assert receipt_module.probe_installed_candidate(
+        Path("/synthetic/wheel/python"), "pro"
+    ) == {"synthetic": "validated"}
+    child_env = captured["env"]
+    assert isinstance(child_env, dict)
+    assert captured["home"] != operator_home
+    assert captured["codex"] != operator_codex
+    assert captured["home_mode"] == 0o700
+    assert captured["codex_mode"] == 0o700
+    assert captured["temp_mode"] == 0o700
+    assert captured["auth_mode"] == 0o600
+    assert captured["auth"] == {"tokens": {"access_token": access_token}}
+    assert captured["files"] == ["codex/auth.json"]
+    assert _INJECTED_CHILD_SECRETS.keys().isdisjoint(child_env)
+    assert {child_env[name] for name in _INJECTED_CHILD_TEMP_DIRS} == {
+        str(Path(child_env["HOME"]) / "tmp")
+    }
+    assert not Path(captured["home"]).exists()
 
 
 def test_build_distributions_removes_only_its_owned_source_residue(
@@ -1167,10 +1352,16 @@ def test_build_distributions_removes_only_its_owned_source_residue(
 
     checkout, _commit, _tree = _create_checkout(tmp_path)
     dist = tmp_path / "candidate-dist"
+    captured_env: dict[str, str] = {}
+    for name, value in _INJECTED_CHILD_SECRETS.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("HOME", str(tmp_path / "operator-home"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "operator-codex"))
 
     def fake_command(argv, *, cwd, env):
-        del argv, env
+        del argv
         assert cwd == checkout.resolve()
+        captured_env.update(env)
         (checkout / "build").mkdir()
         (checkout / "build" / "intermediate").write_text("owned", encoding="utf-8")
         (checkout / "gpt2agent.egg-info").mkdir()
@@ -1185,6 +1376,13 @@ def test_build_distributions_removes_only_its_owned_source_residue(
     assert dist.is_dir()
     assert not (checkout / "build").exists()
     assert not (checkout / "gpt2agent.egg-info").exists()
+    assert _INJECTED_CHILD_SECRETS.keys().isdisjoint(captured_env)
+    assert "CODEX_HOME" not in captured_env
+    assert captured_env["HOME"] != str(tmp_path / "operator-home")
+    assert {captured_env[name] for name in _INJECTED_CHILD_TEMP_DIRS} == {
+        str(Path(captured_env["HOME"]) / "tmp")
+    }
+    assert not Path(captured_env["HOME"]).exists()
 
 
 def test_streaming_requester_stops_at_declared_oversize_and_closes_response() -> None:

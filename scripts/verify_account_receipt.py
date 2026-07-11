@@ -26,6 +26,7 @@ REQUEST_TIMEOUT_SECONDS = 20
 _ACCOUNT_ORIGIN = "https://chatgpt.com"
 _MAX_ITEMS = 10_000
 _MAX_RECEIPT_BYTES = 1024 * 1024
+_MAX_AUTH_BYTES = 1024 * 1024
 _PRETAG_ARTIFACT_HEADROOM = timedelta(hours=72)
 _PACKAGE_VERSION = "0.0.12"
 _SCHEMA_VERSION = "4"
@@ -36,6 +37,27 @@ _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 _REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 _RUN_ID = re.compile(r"[1-9][0-9]*\Z")
 _ARTIFACT_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_ACCESS_TOKEN = re.compile(
+    r"eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\Z"
+)
+_CHILD_ENV_ALLOWLIST = frozenset(
+    {
+        "COMSPEC",
+        "CURL_CA_BUNDLE",
+        "LANG",
+        "LANGUAGE",
+        "PATH",
+        "PATHEXT",
+        "PYTHONIOENCODING",
+        "PYTHONUTF8",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "SYSTEMROOT",
+        "TZ",
+        "WINDIR",
+    }
+)
 
 
 class ReceiptError(ValueError):
@@ -1350,14 +1372,124 @@ def _run_command(
         raise ReceiptError("local release subprocess failed")
 
 
-def _subprocess_env(*, isolated_home: Path | None = None) -> dict[str, str]:
-    env = dict(os.environ)
-    env.pop("PYTHONPATH", None)
-    env.pop("PYTHONHOME", None)
+def _subprocess_env(
+    *,
+    isolated_home: Path | None = None,
+    isolated_codex_home: Path | None = None,
+) -> dict[str, str]:
+    """Build a minimal child environment without operator credentials."""
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if name.upper() in _CHILD_ENV_ALLOWLIST or name.upper().startswith("LC_")
+    }
+    env["PIP_CONFIG_FILE"] = os.devnull
+    env["PYTHONNOUSERSITE"] = "1"
     if isolated_home is not None:
-        env["HOME"] = str(isolated_home)
-        env.pop("CODEX_HOME", None)
+        home = Path(isolated_home)
+        try:
+            if home.is_symlink() or not home.is_dir():
+                raise OSError
+            child_temp = home / "tmp"
+            child_temp.mkdir(mode=0o700)
+        except OSError:
+            raise ReceiptError("isolated child temp could not be created") from None
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)
+        for name in ("TEMP", "TMP", "TMPDIR"):
+            env[name] = str(child_temp)
+    if isolated_codex_home is not None:
+        if isolated_home is None:
+            raise ReceiptError("isolated account auth requires an isolated home")
+        codex_home = Path(isolated_codex_home)
+        try:
+            codex_home.resolve(strict=False).relative_to(
+                Path(isolated_home).resolve(strict=False)
+            )
+        except (OSError, ValueError):
+            raise ReceiptError("isolated account auth path is invalid") from None
+        env["CODEX_HOME"] = str(codex_home)
     return env
+
+
+def _account_token_from_file(path: Path, *, codex: bool) -> str | None:
+    if path.is_symlink() or not path.is_file():
+        return None
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(_MAX_AUTH_BYTES + 1)
+        if len(raw) > _MAX_AUTH_BYTES:
+            return None
+        value = json.loads(raw)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    tokens = value.get("tokens")
+    nested = tokens.get("access_token") if isinstance(tokens, dict) else None
+    token = (
+        nested
+        if codex
+        else value.get("token") or value.get("access_token") or nested
+    )
+    if not isinstance(token, str) or _ACCESS_TOKEN.fullmatch(token) is None:
+        return None
+    return token
+
+
+def _reviewed_account_access_token() -> str:
+    try:
+        operator_home = Path.home()
+    except RuntimeError:
+        raise ReceiptError("reviewed ChatGPT account auth material is unavailable") from None
+    configured_codex_home = os.environ.get("CODEX_HOME")
+    codex_home = (
+        Path(configured_codex_home)
+        if configured_codex_home
+        else operator_home / ".codex"
+    )
+    token = _account_token_from_file(codex_home / "auth.json", codex=True)
+    if token is None:
+        token = _account_token_from_file(
+            operator_home / ".gpt2agent" / "token.json",
+            codex=False,
+        )
+    if token is None:
+        raise ReceiptError("reviewed ChatGPT account auth material is unavailable")
+    return token
+
+
+def _provision_isolated_account_auth(isolated_home: Path) -> Path:
+    """Copy only the selected ChatGPT access token into a private child home."""
+    home = Path(isolated_home)
+    codex_home = home / "codex"
+    try:
+        home.chmod(0o700)
+        codex_home.mkdir(mode=0o700)
+        codex_home.chmod(0o700)
+        auth_path = codex_home / "auth.json"
+        descriptor = os.open(auth_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            try:
+                os.fchmod(descriptor, 0o600)
+            except (OSError, AttributeError):
+                pass
+            payload = json.dumps(
+                {"tokens": {"access_token": _reviewed_account_access_token()}},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = -1
+                stream.write(payload)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+    except ReceiptError:
+        raise
+    except OSError:
+        raise ReceiptError("isolated account auth could not be provisioned") from None
+    return codex_home
 
 
 def _remove_owned_build_residue(checkout: Path) -> None:
@@ -1385,11 +1517,14 @@ def build_distributions(checkout: Path, dist: Path) -> None:
         raise ReceiptError("candidate artifact output could not be created") from None
     try:
         try:
-            _run_command(
-                [sys.executable, "-m", "build", "--outdir", str(dist.resolve())],
-                cwd=checkout,
-                env=_subprocess_env(),
-            )
+            with tempfile.TemporaryDirectory(prefix="gpt2agent-account-build-") as temp_name:
+                home = Path(temp_name) / "home"
+                home.mkdir(mode=0o700)
+                _run_command(
+                    [sys.executable, "-m", "build", "--outdir", str(dist.resolve())],
+                    cwd=checkout,
+                    env=_subprocess_env(isolated_home=home),
+                )
         finally:
             _remove_owned_build_residue(checkout)
     except ReceiptError:
@@ -1701,6 +1836,9 @@ def probe_installed_candidate(wheel_python: Path, expected_plan: str) -> dict[st
     script = Path(__file__).resolve(strict=True)
     with tempfile.TemporaryDirectory(prefix="gpt2agent-account-probe-") as temp_name:
         temp_root = Path(temp_name)
+        home = temp_root / "home"
+        home.mkdir(mode=0o700)
+        codex_home = _provision_isolated_account_auth(home)
         output = temp_root / "probe.json"
         _run_command(
             [
@@ -1713,7 +1851,10 @@ def probe_installed_candidate(wheel_python: Path, expected_plan: str) -> dict[st
                 expected_plan,
             ],
             cwd=temp_root,
-            env=_subprocess_env(),
+            env=_subprocess_env(
+                isolated_home=home,
+                isolated_codex_home=codex_home,
+            ),
         )
         return _read_probe_payload(output)
 

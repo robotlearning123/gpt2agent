@@ -197,16 +197,13 @@ def select_exact_candidate_artifact(
     }
 
 
-def select_latest_candidate_artifact(
+def _candidate_producing_attempts(
     payload: Any,
     *,
     commit: str,
     run_id: int,
     latest_run_attempt: int,
-    now: datetime | None = None,
-    minimum_lifetime_hours: int = 72,
-) -> dict[str, Any]:
-    """Select the newest candidate-producing attempt in one successful run."""
+) -> list[int]:
     if not isinstance(payload, dict) or not isinstance(payload.get("artifacts"), list):
         raise ValueError("GitHub response must contain an artifacts list")
     if (
@@ -233,6 +230,25 @@ def select_latest_candidate_artifact(
         )
     if len(attempts) != len(set(attempts)):
         raise ValueError("main CI candidate artifact is duplicated")
+    return attempts
+
+
+def select_latest_candidate_artifact(
+    payload: Any,
+    *,
+    commit: str,
+    run_id: int,
+    latest_run_attempt: int,
+    now: datetime | None = None,
+    minimum_lifetime_hours: int = 72,
+) -> dict[str, Any]:
+    """Select the newest candidate-producing attempt in one successful run."""
+    attempts = _candidate_producing_attempts(
+        payload,
+        commit=commit,
+        run_id=run_id,
+        latest_run_attempt=latest_run_attempt,
+    )
     return select_exact_candidate_artifact(
         payload,
         commit=commit,
@@ -440,6 +456,17 @@ def main(argv: list[str] | None = None) -> int:
                         run_attempt=producing_attempt,
                         minimum_lifetime_hours=args.minimum_artifact_lifetime_hours,
                     )
+                    candidate_attempts = _candidate_producing_attempts(
+                        artifact_payload,
+                        commit=args.commit,
+                        run_id=run_id,
+                        latest_run_attempt=run_attempt,
+                    )
+                    if max(candidate_attempts) > producing_attempt:
+                        raise ValueError(
+                            "a newer candidate-producing main CI attempt invalidates "
+                            "the pinned account evidence; run a new account gate"
+                        )
                 else:
                     candidate = select_latest_candidate_artifact(
                         artifact_payload,

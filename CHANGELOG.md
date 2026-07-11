@@ -124,9 +124,10 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
   not pretend to verify a private account adapter.
 - The private account gate runs only on a trusted local machine against the
   exact candidate commit. It measures the active Pro entitlement instead of
-  trusting a caller label, and its public receipt reports empty/nonempty shape
-  classes without exact account collection counts. Cookies and bearer tokens
-  are never uploaded; the sanitized receipt remains separate from hosted CI.
+  trusting a caller label, and its local sanitized receipt reports
+  empty/nonempty shape classes without exact account collection counts. Cookies
+  and bearer tokens are never uploaded; the sanitized receipt remains separate
+  from hosted CI.
 - The read-only governance audit binds the release-tag App, Required-checks App,
   and independent PyPI gate to an explicit reviewed policy. Tag creation and
   no-bypass tag immutability are audited as separate rules, and main-branch

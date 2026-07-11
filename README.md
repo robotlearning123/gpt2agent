@@ -387,22 +387,35 @@ installed wheel environment, writes one closed-schema sanitized receipt, and
 binds it to the source commit/tree, full CI workflow identity, and exact artifact
 bytes. It measures the authenticated account's active Pro
 entitlement; `--expected-plan pro` is a fail-closed expectation, not a caller
-assertion. The public receipt keeps only empty/nonempty shape classes, never
-exact account collection counts. Never upload cookies, bearer tokens, raw
+assertion. The local sanitized receipt keeps only empty/nonempty shape classes,
+never exact account collection counts. Never upload cookies, bearer tokens, raw
 responses, or unsanitized account payloads to hosted CI. Use new sibling paths
 outside the checkout so the exact source stays clean, then have the policy-bound
 release App create only the intended annotated tag. The trusted release
 environment must provide an authenticated `gh` CLI for read-only operator
-checks, a short-lived installation token for the
-policy-bound release App scoped to this repository with Contents write access,
-the reviewed local governance policy, and the reviewed Pro account login. Never
-substitute the operator's user token for the App token:
+checks, the reviewed local governance policy, and the reviewed Pro account
+login. Acquire the short-lived installation token for the policy-bound release
+App, scoped to this repository with Contents write access, only after the
+account gate and final pinned-candidate revalidation. Never substitute the
+operator's user token for the App token:
+
+The verifier gives build/install children only an allowlisted
+runtime/locale/certificate environment; proxy variables are deliberately not
+forwarded because proxy URLs can carry credentials. The live probe gets an
+isolated credential-discovery home containing only the selected ChatGPT access
+token, and every child uses a private temporary directory instead of ambient
+`TEMP`/`TMP`/`TMPDIR` paths. This prevents normal environment and home-directory
+discovery of unrelated GitHub, release, publish, SSH, and cloud credentials, but
+it is not an OS filesystem sandbox. The current live probe still exposes that
+ChatGPT bearer to the exact reviewed installed candidate; this is not an
+account-auth isolation boundary, and trusted-transport/offline-candidate
+hardening remains separate work.
 
 ```bash
 set -euo pipefail
 git fetch --no-tags origin main:refs/remotes/origin/main
 : "${GPT2AGENT_RELEASE_GOVERNANCE_POLICY:?set this to the reviewed policy JSON}"
-: "${GPT2AGENT_RELEASE_APP_TOKEN:?set this to a short-lived release App installation token}"
+unset GPT2AGENT_RELEASE_APP_TOKEN
 python scripts/audit_release_governance.py \
   --live robotlearning123/gpt2agent \
   --policy "$GPT2AGENT_RELEASE_GOVERNANCE_POLICY"
@@ -481,7 +494,20 @@ if [ -n "$REMOTE_TAG_SHA" ]; then
   echo "Release tag already exists on origin: $TAG" >&2
   exit 1
 fi
+GH_TOKEN="$(gh auth token)" python scripts/verify_main_ci.py \
+  --repository "$REPOSITORY" --commit "$COMMIT" \
+  --expected-run-id "$CI_RUN_ID" \
+  --expected-run-attempt "$CI_RUN_ATTEMPT" \
+  --expected-artifact-id "$CI_ARTIFACT_ID" \
+  --expected-artifact-digest "$CI_ARTIFACT_DIGEST" \
+  --expected-artifact-size "$CI_ARTIFACT_SIZE" \
+  --expected-artifact-expires-at "$CI_ARTIFACT_EXPIRES_AT" \
+  --minimum-artifact-lifetime-hours 1 --attempts 1 --delay 0
 TAG_MESSAGE=$(printf 'gpt2agent %s\n\n%s' "$VERSION" "$CREATE_OUTPUT")
+read -r -s -p "Short-lived release App installation token: " \
+  GPT2AGENT_RELEASE_APP_TOKEN
+printf '\n'
+: "${GPT2AGENT_RELEASE_APP_TOKEN:?set this now to a short-lived release App installation token}"
 TAG_OBJECT_SHA=$(
   GH_TOKEN="$GPT2AGENT_RELEASE_APP_TOKEN" gh api --method POST \
     "repos/$REPOSITORY/git/tags" \
@@ -538,6 +564,12 @@ tree, version, and receipt digest before allowing publication.
 `scripts/audit_release_governance.py --live OWNER/REPO --policy POLICY.json`
 performs these reviewed, read-only GitHub checks and exits nonzero when the
 closed identity policy or any required live control is absent.
+
+Immediately before the release App creates the immutable tag, the operator
+command re-fetches the complete pinned run artifact list, requires at least one
+hour of remaining retention, and revalidates every recorded artifact identity
+field. A newer candidate-producing attempt invalidates the account gate; a
+newer failed-only run attempt without a newer candidate artifact does not.
 
 After the tagged workflow is green, verify the retained local receipt bytes
 against the annotated-tag commitment. Keep that mode-0600 account evidence in

@@ -738,6 +738,41 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert not re.search(r"python scripts/verify_release\.py --tag v\d+\.\d+\.\d+", readme)
 
 
+def test_release_operator_revalidates_pinned_candidate_immediately_before_tag() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    receipt_verify = readme.index("VERIFY_OUTPUT=$(python scripts/verify_account_receipt.py verify")
+    remote_tag_check = readme.index('REMOTE_TAG_SHA="$(')
+    tag_create = readme.index("TAG_OBJECT_SHA=$(\n")
+    revalidation = readme.rfind("python scripts/verify_main_ci.py", 0, tag_create)
+    app_token_unset = readme.index("unset GPT2AGENT_RELEASE_APP_TOKEN")
+    app_token_acquisition = readme.index(
+        'read -r -s -p "Short-lived release App installation token: "'
+    )
+    app_token_requirement = readme.index(': "${GPT2AGENT_RELEASE_APP_TOKEN:?')
+
+    assert (
+        app_token_unset
+        < receipt_verify
+        < remote_tag_check
+        < revalidation
+        < app_token_acquisition
+        < app_token_requirement
+        < tag_create
+    )
+    revalidation_command = readme[revalidation:tag_create]
+    for expected in (
+        '--commit "$COMMIT"',
+        '--expected-run-id "$CI_RUN_ID"',
+        '--expected-run-attempt "$CI_RUN_ATTEMPT"',
+        '--expected-artifact-id "$CI_ARTIFACT_ID"',
+        '--expected-artifact-digest "$CI_ARTIFACT_DIGEST"',
+        '--expected-artifact-size "$CI_ARTIFACT_SIZE"',
+        '--expected-artifact-expires-at "$CI_ARTIFACT_EXPIRES_AT"',
+        "--minimum-artifact-lifetime-hours 1",
+    ):
+        assert expected in revalidation_command
+
+
 def test_exact_main_ci_selector_ignores_other_commits_branches_and_events() -> None:
     commit = "a" * 40
     payload = {
@@ -1201,6 +1236,92 @@ def test_pinned_main_ci_accepts_artifact_from_earlier_successful_attempt(
         ]
     ) == 0
     assert fetched_runs == [expected_run_id]
+
+
+@pytest.mark.parametrize(
+    ("candidate_attempts", "expected_result"),
+    [
+        ([1], 0),
+        ([1, 2], 1),
+    ],
+)
+def test_pinned_main_ci_invalidates_only_when_rerun_produces_a_new_candidate(
+    candidate_attempts: list[int],
+    expected_result: int,
+    monkeypatch,
+    capsys,
+) -> None:
+    commit = "a" * 40
+    expected_run_id = 12345
+
+    monkeypatch.setattr(
+        verify_main_ci,
+        "_fetch_run",
+        lambda _repository, _token, _run_id: {
+            "id": expected_run_id,
+            "run_attempt": 2,
+            "head_sha": commit,
+            "head_branch": "main",
+            "event": "push",
+            "path": ".github/workflows/ci.yml@refs/heads/main",
+            "status": "completed",
+            "conclusion": "success",
+        },
+    )
+    monkeypatch.setattr(
+        verify_main_ci,
+        "_fetch_artifacts",
+        lambda _repository, _token, _run_id: {
+            "artifacts": [
+                {
+                    "id": 67889 + attempt,
+                    "name": (
+                        f"release-candidate-{commit}-{expected_run_id}-{attempt}"
+                    ),
+                    "size_in_bytes": 31414 + attempt,
+                    "digest": "sha256:" + str(attempt) * 64,
+                    "expired": False,
+                    "expires_at": "2099-07-10T13:17:42Z",
+                    "workflow_run": {
+                        "id": expected_run_id,
+                        "head_branch": "main",
+                        "head_sha": commit,
+                    },
+                }
+                for attempt in candidate_attempts
+            ]
+        },
+    )
+    monkeypatch.setenv("GH_TOKEN", "SYNTHETIC_GITHUB_TOKEN")
+
+    result = verify_main_ci.main(
+        [
+            "--repository",
+            "owner/repo",
+            "--commit",
+            commit,
+            "--attempts",
+            "1",
+            "--expected-run-id",
+            str(expected_run_id),
+            "--expected-run-attempt",
+            "1",
+            "--expected-artifact-id",
+            "67890",
+            "--expected-artifact-digest",
+            "sha256:" + "1" * 64,
+            "--expected-artifact-size",
+            "31415",
+            "--expected-artifact-expires-at",
+            "2099-07-10T13:17:42Z",
+            "--minimum-artifact-lifetime-hours",
+            "1",
+        ]
+    )
+
+    assert result == expected_result
+    if expected_result:
+        assert "new account gate" in capsys.readouterr().err
 
 
 def test_pinned_main_ci_rejects_matching_run_from_a_different_workflow(

@@ -153,11 +153,22 @@ and receipt new sibling paths outside the checkout.
 
 The command separately checks both exact main-CI distributions, probes from the
 installed wheel environment, measures the active account entitlement against
-the expected Pro plan, and writes a mode-0600 canonical receipt. Its public
+the expected Pro plan, and writes a mode-0600 canonical receipt. Its redacted
 shape evidence records empty/nonempty classes without exact account collection
 counts. Never upload a browser cookie, bearer token, raw response, or
 unsanitized account payload to GitHub Actions. Put the exact eight lines emitted
 by the create command in the annotated tag message:
+
+Build/install children receive a positive-allowlist
+runtime/locale/certificate environment; credential-bearing proxy variables are
+not forwarded. The live probe gets a separate mode-restricted
+credential-discovery home containing only the selected ChatGPT access token, so
+normal environment and home-directory lookup cannot discover unrelated operator
+GitHub, release, publish, SSH, and cloud credentials. Child `TEMP`/`TMP`/`TMPDIR`
+paths are also private per-step directories rather than inherited operator
+paths. This is not an OS filesystem sandbox. The reviewed installed candidate
+still receives that ChatGPT bearer for its current live adapter; this is not an
+account-auth isolation boundary.
 
 ```text
 account-receipt-sha256: <64 lowercase hex>
@@ -179,10 +190,13 @@ after the canary passes. The release evidence asset carries the full pinned
 candidate identity and artifact-set digest.
 
 Before tagging, an expired, deleted, replaced, or near-expiry candidate requires
-a full main-CI rerun and a new account gate. After tagging, such a loss is a hard
-release blocker; do not rebuild or move the version tag. Historical receipt
-verification remains valid after normal Actions retention expiry when the exact
-distribution bytes and recorded metadata have been retained.
+a full main-CI rerun and a new account gate. Immediately before tag creation,
+the README operator command re-fetches the complete pinned run artifact list,
+requires at least one hour of retention headroom, and rejects any newer
+candidate-producing attempt. After tagging, artifact loss is a hard release
+blocker; do not rebuild or move the version tag. Historical receipt verification
+remains valid after normal Actions retention expiry when the exact distribution
+bytes and recorded metadata have been retained.
 
 The digest is only a commitment to the local receipt bytes and a post-publish
 audit link. Hosted automation cannot validate a receipt it does not receive
