@@ -80,6 +80,12 @@ def _parse_bool(value: str) -> bool:
     return value == "true"
 
 
+def _validate_token(token: str) -> str:
+    if not token or len(token) > 4096 or any(character in token for character in "\r\n\x00"):
+        raise ValueError("GitHub token is invalid")
+    return token
+
+
 def _require_directory(path: Path, label: str) -> list[Path]:
     try:
         metadata = path.lstat()
@@ -219,8 +225,7 @@ def verify_release_state(
 def _request_json(method: str, path: str, token: str, payload: object | None) -> object:
     if method not in {"GET", "PATCH"} or not path.startswith("/repos/"):
         raise ValueError("disallowed GitHub API request")
-    if not token or len(token) > 4096 or any(character in token for character in "\r\n\x00"):
-        raise ValueError("GitHub token is invalid")
+    _validate_token(token)
     body = None
     if method == "PATCH":
         if payload != {"draft": False}:
@@ -412,7 +417,7 @@ def main(argv: list[str] | None = None) -> int:
         if len(raw_token) > 4096:
             raise ValueError("GitHub token is invalid")
         try:
-            token = raw_token.decode("utf-8")
+            token = _validate_token(raw_token.decode("utf-8"))
         except UnicodeDecodeError:
             raise ValueError("GitHub token is invalid") from None
         release_id = _parse_release_id(args.release_id)

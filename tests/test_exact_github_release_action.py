@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -315,3 +316,87 @@ def test_request_layer_rejects_collection_creation_without_network() -> None:
             "token",
             {"draft": False},
         )
+
+
+def _main_args(tmp_path: Path) -> list[str]:
+    return [
+        "--token-stdin",
+        "--repository",
+        "robotlearning123/gpt2agent",
+        "--release-id",
+        "42",
+        "--tag",
+        "v1.2.3",
+        "--version",
+        "1.2.3",
+        "--expected-prerelease",
+        "false",
+        "--notes",
+        str(tmp_path / "notes"),
+        "--dist",
+        str(tmp_path / "dist"),
+        "--evidence",
+        str(tmp_path / "evidence"),
+    ]
+
+
+def test_main_reads_token_byte_exactly_from_stdin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    token = b"github-token-byte-canary"
+    observed: list[str] = []
+
+    class Stdin:
+        buffer = io.BytesIO(token)
+
+    monkeypatch.setattr(publisher.sys, "stdin", Stdin())
+    monkeypatch.setattr(publisher, "_read_notes", lambda path: "notes\n")
+    monkeypatch.setattr(
+        publisher,
+        "expected_release_assets",
+        lambda dist, evidence, version: _expected_assets(),
+    )
+
+    def publish(*args, **kwargs):
+        observed.append(args[6])
+        return "published"
+
+    monkeypatch.setattr(publisher, "publish_exact_release", publish)
+
+    assert publisher.main(_main_args(tmp_path)) == 0
+    assert observed == [token.decode("utf-8")]
+    assert "github-token-byte-canary" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "token",
+    [b"", b"x" * 4097, b"\xff", b"token\n", b"token\r", b"token\x00suffix"],
+)
+def test_main_rejects_invalid_stdin_token_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    token: bytes,
+) -> None:
+    calls = 0
+
+    class Stdin:
+        buffer = io.BytesIO(token)
+
+    def publish(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return "published"
+
+    monkeypatch.setattr(publisher.sys, "stdin", Stdin())
+    monkeypatch.setattr(publisher, "_read_notes", lambda path: "notes\n")
+    monkeypatch.setattr(
+        publisher,
+        "expected_release_assets",
+        lambda dist, evidence, version: _expected_assets(),
+    )
+    monkeypatch.setattr(publisher, "publish_exact_release", publish)
+
+    assert publisher.main(_main_args(tmp_path)) == 1
+    assert calls == 0
