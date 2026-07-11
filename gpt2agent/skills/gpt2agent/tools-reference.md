@@ -558,7 +558,7 @@ they are not an authorization boundary.
 
 ### list_installed_plugins
 
-- **Purpose**: Return installed Plugins using bounded, non-identifying fields.
+- **Purpose**: Return installed Plugins using bounded allowlisted fields without Plugin content or secrets.
 - **Parameters**: None.
 - **Returns**: `dict` with `items`, normalized to the same allowlist used by `list_plugins`.
 - **When to use**: Determine which Plugins and bounded skill/app identifiers are installed.

@@ -7,7 +7,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from gpt2agent.backend import BackendClient
-from gpt2agent.errors import BackendContractError, InputValidationError
+from gpt2agent.errors import BackendContractError, BackendHTTPError, InputValidationError
 from gpt2agent.tool_contracts import tool_annotations
 from gpt2agent.tools._backend import async_get
 from gpt2agent.tools._ids import validate_path_id
@@ -28,6 +28,15 @@ _INTERNAL_DOWNLOAD_SUFFIXES = frozenset(
     {"corp", "home", "home.arpa", "internal", "lan", "local", "localdomain", "localhost"}
 )
 _UNSAFE_ENCODED_URL_CHARACTER_RE = re.compile(r"%(?:0[0-9a-f]|1[0-9a-f]|5c|7f)", re.I)
+
+
+def _enrichment_error_code(error: Exception) -> str:
+    """Project optional file-enrichment failures without exposing their text."""
+    if isinstance(error, BackendContractError):
+        return error.code
+    if isinstance(error, BackendHTTPError):
+        return error.code
+    return "temporarily_failed"
 
 
 def _invalid_download_url() -> None:
@@ -314,10 +323,10 @@ def register(mcp, client: BackendClient, conv=None) -> None:
                         auth_headers=auth_headers,
                     )
                     asset.update(normalize_download_info(dl))
-                except Exception:
+                except Exception as exc:
                     # Enrichment is optional, but exception text can contain an
                     # upstream URL, header, or token. Return a stable status only.
-                    asset["download_error"] = "temporarily_failed"
+                    asset["download_error"] = _enrichment_error_code(exc)
 
             if file_id and not asset.get("file_name"):
                 try:
@@ -330,8 +339,8 @@ def register(mcp, client: BackendClient, conv=None) -> None:
                     asset["file_name"] = normalized["name"] or ""
                     for field in ("use_case", "state", "creation_time"):
                         asset[field] = normalized[field]
-                except Exception:
-                    asset["info_error"] = "temporarily_failed"
+                except Exception as exc:
+                    asset["info_error"] = _enrichment_error_code(exc)
 
         return result
 

@@ -226,6 +226,33 @@ def test_failed_upgrade_restores_existing_pipx_environment(
     assert not list(Path(env["FAKE_PIPX_HOME"]).glob(".gpt2agent-upgrade.*"))
 
 
+def test_successful_upgrade_is_not_rolled_back_when_app_bin_is_not_on_path(
+    tmp_path: Path,
+) -> None:
+    env, _ = _recording_installer_env(tmp_path)
+    fake_bin = Path(env["PATH"].split(os.pathsep, 1)[0])
+    env["PATH"] = f"{fake_bin}{os.pathsep}/usr/bin{os.pathsep}/bin"
+    (fake_bin / "gpt2agent").unlink()
+    venv = Path(env["FAKE_PIPX_HOME"]) / "venvs" / "gpt2agent"
+    venv.mkdir(parents=True)
+    marker = venv / "installed-version"
+    marker.write_text("old\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [str(INSTALLER), "--no-register"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert marker.read_text(encoding="utf-8") == "new\n"
+    assert "pipx ensurepath" in result.stdout
+    assert not list(Path(env["FAKE_PIPX_HOME"]).glob(".gpt2agent-upgrade.*"))
+
+
 def test_stale_path_app_cannot_commit_incomplete_pipx_upgrade(
     tmp_path: Path,
 ) -> None:

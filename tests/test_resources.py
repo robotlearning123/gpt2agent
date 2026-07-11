@@ -68,6 +68,10 @@ def test_feature_coverage_matches_manifest_and_defers_voice() -> None:
     assert capabilities["voice_catalog"]["item_contract_status"] == "not_applicable"
     assert capabilities["gpt_live"]["status"] == "deferred"
     assert capabilities["projects"]["status"] == "unsupported"
+    assert capabilities["image_generation"]["status"] == "available"
+    assert capabilities["image_generation"]["reason"] == (
+        "MCP tool exposed; live execution unverified in this release"
+    )
     for capability_id in ("conversations", "memory", "custom_instructions"):
         assert capabilities[capability_id]["reachability_scope"] == "none"
         assert "automatic probe omitted" in capabilities[capability_id]["reason"]

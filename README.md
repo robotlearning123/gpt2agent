@@ -166,7 +166,7 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 | `list_scheduled_tasks` | One page of scheduled ChatGPT automations from the dedicated automation surface |
 | `list_apps` | Connected Apps and connectors (a separate concept from Plugins) |
 | `list_plugins` | Bounded page of the account Plugin catalog |
-| `list_installed_plugins` | Installed Plugins with bounded non-identifying fields |
+| `list_installed_plugins` | Installed Plugins with bounded allowlisted fields and no Plugin content or secrets |
 | `sites_access` | Sites access booleans without workspace identity or content |
 | `list_sites` | Bounded Sites metadata without page content or private URLs |
 | `list_custom_gpts` | Your private `g-p-*` GPTs |

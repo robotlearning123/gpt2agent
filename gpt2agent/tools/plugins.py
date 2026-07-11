@@ -232,7 +232,7 @@ def register(mcp, client: BackendClient) -> None:
 
     @mcp.tool(annotations=tool_annotations("list_installed_plugins"))
     async def list_installed_plugins() -> dict:
-        """Return installed Plugins using only bounded, non-identifying fields."""
+        """Return installed Plugins using bounded allowlisted fields without content."""
         data = await async_get(
             client,
             "/backend-api/plugins/installed",

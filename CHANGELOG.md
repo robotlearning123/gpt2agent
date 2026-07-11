@@ -44,7 +44,8 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
   into `list_models` or suggesting them for `chat`.
 - The bundled Deep Research runner persists only the requested `report.md` and a
   shape-only `status.txt`. It no longer writes raw event or server-metadata
-  artifacts.
+  artifacts, and its citation list now uses the same bounded, secret-filtering
+  Markdown projection as the MCP Deep Research tools.
 - The Python MCP dependency is bounded to the stable v1 line
   (`mcp>=1.26,<2`). CI verifies both 1.26.0 and the latest resolvable v1 release.
 - Collection adapters now reject a blank 2xx body as a changed contract instead
@@ -55,6 +56,11 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
   classified as changed contracts before any URL is built.
 - Plain `gpt2agent run` now defaults to stdio. Version 0.0.12 disables HTTP;
   the legacy launch flag fails before constructing the account server.
+- The shell installer drives registration through the exact pipx-installed app
+  path, so a successful upgrade is not rolled back merely because the pipx app
+  directory is not yet visible in the current shell's `PATH`.
+- Optional image-asset enrichment preserves typed changed-contract and
+  indeterminate-access results while continuing to suppress exception details.
 
 ### Security
 
