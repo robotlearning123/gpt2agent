@@ -131,6 +131,10 @@ def _assert_reviewed_cpython(job: str) -> None:
     )
     assert '"$RUNTIME_BASE/bin/python3.12" -I -S -B -c' in job
     assert '("cpython", (3, 12, 13), "linux", "x86_64")' in job
+    assert job.count("scripts/hash_runtime_tree.sh") == 1
+    assert job.count(
+        "7df598dcc28ad5583fd65f49da6a2ff6460030441070d5c7a105df7dd5294f79"
+    ) == 1
     assert "GPT2AGENT_REVIEWED_PYTHON_BASE" in job
     assert "Clean reviewed CPython runtime" in job
     assert job.count("set +o posix") >= 2

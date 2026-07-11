@@ -224,10 +224,18 @@ jobs:
           test "$RUNTIME_BASE" = "$RUNTIME_PARENT/cpython-3.12.13"
           "$RUNTIME_BASE/bin/python3.12" -I -S -B -c \
             'import os, sys; assert (sys.implementation.name, sys.version_info[:3], sys.platform, os.uname().machine) == ("cpython", (3, 12, 13), "linux", "x86_64")'
-          printf 'GPT2AGENT_REVIEWED_PYTHON_BASE=%s\n' "$RUNTIME_BASE" >> "$GITHUB_ENV"
-          printf 'GPT2AGENT_REVIEWED_PYTHON_PARENT=%s\n' "$RUNTIME_PARENT" >> "$GITHUB_ENV"
-          printf 'GPT2AGENT_REVIEWED_PYTHON_PARENT_IDENTITY=%s\n' \
-            "$RUNTIME_PARENT_IDENTITY" >> "$GITHUB_ENV"
+          RUNTIME_TREE_SHA256="$(
+            /usr/bin/env -i LANG=C LC_ALL=C PATH=/usr/bin:/bin \
+              /usr/bin/bash -p scripts/hash_runtime_tree.sh "$RUNTIME_BASE"
+          )"
+          test "$RUNTIME_TREE_SHA256" = \
+            "7df598dcc28ad5583fd65f49da6a2ff6460030441070d5c7a105df7dd5294f79"
+          {
+            printf 'GPT2AGENT_REVIEWED_PYTHON_BASE=%s\n' "$RUNTIME_BASE"
+            printf 'GPT2AGENT_REVIEWED_PYTHON_PARENT=%s\n' "$RUNTIME_PARENT"
+            printf 'GPT2AGENT_REVIEWED_PYTHON_PARENT_IDENTITY=%s\n' \
+              "$RUNTIME_PARENT_IDENTITY"
+          } >> "$GITHUB_ENV"
           printf '%s\n' "$RUNTIME_BASE/bin" >> "$GITHUB_PATH"
           INSTALL_SUCCEEDED=1
 
@@ -375,7 +383,7 @@ jobs:
 
   pypi-publish:
     name: Publish to PyPI
-    needs: build
+    needs: [build, github-release-preflight]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -520,7 +528,7 @@ jobs:
 
   prepare-release-notes:
     name: Prepare exact GitHub Release notes
-    needs: [pypi-canary, verify]
+    needs: [build, verify]
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -548,7 +556,7 @@ jobs:
 
   github-release-draft:
     name: Create complete GitHub Release draft
-    needs: [prepare-release-notes, verify]
+    needs: [build, prepare-release-notes, verify]
     runs-on: ubuntu-latest
     outputs:
       release_id: ${{ steps.release.outputs.id }}
@@ -583,9 +591,46 @@ jobs:
           draft: true
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}
 
+  github-release-preflight:
+    name: Validate exact GitHub Release draft
+    needs: [build, github-release-draft, prepare-release-notes, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: ${{ runner.temp }}/github-release-preflight-${{ github.run_id }}-${{ github.run_attempt }}/dist/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-evidence
+          path: ${{ runner.temp }}/github-release-preflight-${{ github.run_id }}-${{ github.run_attempt }}/release-evidence/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-notes-${{ github.run_id }}
+          path: ${{ runner.temp }}/github-release-preflight-${{ github.run_id }}-${{ github.run_attempt }}/notes/
+      - name: Validate the exact draft before PyPI publication
+        uses: robotlearning123/gpt2agent/.github/actions/publish-exact-github-release@530db492615ad42a1dde733de89d8893e05ede49
+        with:
+          mode: preflight
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          release-id: ${{ needs.github-release-draft.outputs.release_id }}
+          tag: ${{ github.ref_name }}
+          tag-object: ${{ needs.verify.outputs.tag_object }}
+          commit: ${{ needs.verify.outputs.commit }}
+          tree: ${{ needs.verify.outputs.tree }}
+          version: ${{ needs.verify.outputs.distribution_version }}
+          expected-prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}
+          notes: ${{ runner.temp }}/github-release-preflight-${{ github.run_id }}-${{ github.run_attempt }}/notes/release_notes.md
+          dist: ${{ runner.temp }}/github-release-preflight-${{ github.run_id }}-${{ github.run_attempt }}/dist/
+          evidence: ${{ runner.temp }}/github-release-preflight-${{ github.run_id }}-${{ github.run_attempt }}/release-evidence/release-workflow-artifacts.json
+
   github-release:
     name: Publish immutable GitHub Release
-    needs: [github-release-draft, verify]
+    needs: [github-release-draft, pypi-canary, verify]
     runs-on: ubuntu-latest
     environment: release-settings-read
     permissions:
@@ -614,8 +659,9 @@ jobs:
           repositories: ${{ github.event.repository.name }}
           permission-administration: read
       - name: Validate and publish the exact draft
-        uses: robotlearning123/gpt2agent/.github/actions/publish-exact-github-release@15f56b2c16c5923e81df9428c69256237a004c20
+        uses: robotlearning123/gpt2agent/.github/actions/publish-exact-github-release@530db492615ad42a1dde733de89d8893e05ede49
         with:
+          mode: publish
           github-token: ${{ github.token }}
           immutability-token: ${{ steps.release-settings-token.outputs.token }}
           repository: ${{ github.repository }}

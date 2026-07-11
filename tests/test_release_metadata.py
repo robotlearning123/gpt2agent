@@ -528,13 +528,10 @@ def test_workflow_actions_are_pinned_to_full_commit_shas() -> None:
     assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for _, _, revision in references)
 
 
-def test_ci_and_release_checkouts_do_not_persist_git_credentials() -> None:
-    for name in ("ci.yml", "release.yml"):
-        workflow = (PROJECT_ROOT / ".github" / "workflows" / name).read_text(
-            encoding="utf-8"
-        )
+def test_workflow_checkouts_do_not_persist_git_credentials() -> None:
+    for path in (PROJECT_ROOT / ".github" / "workflows").glob("*.yml"):
+        workflow = path.read_text(encoding="utf-8")
         checkout_count = workflow.count("uses: actions/checkout@")
-        assert checkout_count > 0
         assert checkout_count == workflow.count("persist-credentials: false")
 
 
@@ -670,7 +667,10 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert "--require-complete --attempts 7 --delay 10" in release
     assert "name: Verify PyPI install in a clean environment" in release
     assert '"gpt2agent==$DIST_VERSION"' in release
-    assert "needs: [pypi-canary, verify]" in release
+    assert "needs: [build, verify]" in release
+    assert "needs: [build, prepare-release-notes, verify]" in release
+    assert "needs: [build, github-release-preflight]" in release
+    assert "needs: [github-release-draft, pypi-canary, verify]" in release
     assert "scripts/release_evidence.py create" in release
     assert "scripts/release_evidence.py verify" in release
     assert "release-workflow-artifacts.json" in release
@@ -787,6 +787,63 @@ def test_linux_only_release_operator_suites_are_platform_gated() -> None:
         source = (PROJECT_ROOT / "tests" / filename).read_text(encoding="utf-8")
         assert 'sys.platform != "linux"' in source
         assert "pytestmark = pytest.mark.skipif(" in source
+
+
+def test_release_operator_docs_close_token_policy_and_retained_receipt_boundaries() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    migration = (PROJECT_ROOT / "docs" / "migration-0.0.12.md").read_text(
+        encoding="utf-8"
+    )
+    contributing = (PROJECT_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    account_operator = (PROJECT_ROOT / "scripts" / "run_account_release.sh").read_text(
+        encoding="utf-8"
+    )
+    tag_operator = (PROJECT_ROOT / "scripts" / "create_release_tag.sh").read_text(
+        encoding="utf-8"
+    )
+    receipt_operator = (
+        PROJECT_ROOT / "scripts" / "audit_retained_receipt.sh"
+    ).read_text(encoding="utf-8")
+
+    governance_command = re.compile(
+        r'GH_TOKEN="\$\("\$GH_BIN" auth token --hostname github\.com\)" \\\n'
+        r'\s+"\$VERIFIER_PYTHON" -I -S -B '
+        r'scripts/audit_release_governance\.py',
+    )
+    assert governance_command.search(readme)
+    for document in (contributing, migration):
+        assert 'GH_TOKEN="$(/usr/bin/gh auth token --hostname github.com)" \\' in document
+        assert '"$VERIFIER_PYTHON" -I -S -B \\' in document
+        assert "python scripts/audit_release_governance.py" not in document
+
+    assert "canonical_private_file" in account_operator
+    assert '"$GOVERNANCE_POLICY" "reviewed governance policy"' in account_operator
+    assert "--policy /trusted/local/release-governance-policy.json" in contributing
+    assert "--policy /trusted/local/release-governance-policy.json" in migration
+
+    for operator in (tag_operator, receipt_operator):
+        assert "$TAG =~ ^v(0|[1-9][0-9]*)" in operator
+    assert "TAGGED_TAG_VERIFIER" in receipt_operator
+    assert "release_tag_metadata.py" in receipt_operator
+    assert "verify-tag-object" in receipt_operator
+    assert "os.O_NOFOLLOW" in receipt_operator
+    assert "before.st_uid==uid" in receipt_operator
+    assert "before.st_nlink==1" in receipt_operator
+    assert "stat.S_IMODE(before.st_mode)==0o600" in receipt_operator
+    assert "/usr/bin/python3.12" not in readme
+
+    for document in (readme, contributing, migration):
+        normalized = " ".join(document.split())
+        assert "cannot prove that the App has no other installation" in normalized
+        assert "no cross-registry atomic transaction" in normalized
+
+    normalized_readme = " ".join(readme.split())
+    assert "dedicated owner-private clone" in normalized_readme
+    assert "no concurrent writer" in normalized_readme
+    assert (
+        "an exact Git executable path does not disable repository-local Git configuration"
+        in normalized_readme
+    )
 
 
 def test_release_workflow_uses_distinct_admin_read_tokens_for_immutable_settings() -> None:

@@ -160,17 +160,42 @@ def _publish(api: _FakeGitHub, expected: dict[str, Any]) -> str:
     )
 
 
+def _preflight(api: _FakeGitHub, expected: dict[str, Any]) -> None:
+    publisher.preflight_exact_release_draft(
+        "robotlearning123/gpt2agent",
+        42,
+        "v1.2.3",
+        "release notes\n",
+        False,
+        expected,
+        "release-token",
+        expected_tag_object=TAG_OBJECT,
+        expected_commit=COMMIT,
+        expected_tree=TREE,
+        release_request_json=api,
+    )
+
+
 def test_action_is_isolated_and_does_not_put_token_on_command_line() -> None:
     action = ACTION_YAML.read_text(encoding="utf-8")
     source = PUBLISHER.read_text(encoding="utf-8")
 
     assert "using: composite" in action
+    assert "  mode:" in action
+    mode_inputs = action.split("  mode:", 1)[1].split("  github-token:", 1)[0]
+    assert "    required: true" in mode_inputs
     assert "/usr/bin/env -i" in action
     assert "/usr/bin/python3 -I -S -B" in action
     assert "immutability-token:" in action
-    assert "required: true" in action.split("immutability-token:", 1)[1].split("repository:", 1)[0]
+    immutability_input = action.split("immutability-token:", 1)[1].split(
+        "repository:", 1
+    )[0]
+    assert "required: false" in immutability_input
+    assert 'case "$INPUT_MODE" in' in action
+    assert 'printf \'%s\' "$INPUT_GITHUB_TOKEN" |' in action
     assert 'printf \'%s\\0%s\' "$INPUT_GITHUB_TOKEN" "$INPUT_IMMUTABILITY_TOKEN" |' in action
     assert "GH_TOKEN=" not in action
+    assert "--draft-preflight" in action
     assert "--token-stdin" in action
     assert "--github-token" not in action
     assert "--immutability-token" not in action
@@ -195,7 +220,7 @@ def test_exact_draft_is_validated_twice_and_patched_by_numeric_id() -> None:
     assert patch_calls == [
         ("PATCH", release_path, "release-token", {"draft": False})
     ]
-    assert api.calls[:11] == [
+    assert api.calls == [
         ("GET", release_path, "release-token", None),
         ("GET", assets_path, "release-token", None),
         ("GET", settings_path, "settings-token", None),
@@ -227,8 +252,108 @@ def test_exact_draft_is_validated_twice_and_patched_by_numeric_id() -> None:
             None,
         ),
         ("PATCH", release_path, "release-token", {"draft": False}),
+        ("GET", release_path, "release-token", None),
+        ("GET", assets_path, "release-token", None),
+        (
+            "GET",
+            "/repos/robotlearning123/gpt2agent/git/ref/tags/v1.2.3",
+            "release-token",
+            None,
+        ),
+        (
+            "GET",
+            f"/repos/robotlearning123/gpt2agent/git/tags/{TAG_OBJECT}",
+            "release-token",
+            None,
+        ),
+        (
+            "GET",
+            f"/repos/robotlearning123/gpt2agent/git/commits/{COMMIT}",
+            "release-token",
+            None,
+        ),
+        (
+            "GET",
+            "/repos/robotlearning123/gpt2agent/git/ref/tags/v1.2.3",
+            "release-token",
+            None,
+        ),
     ]
+    assert len(api.calls) == 17
     assert {method for method, _, _, _ in api.calls} <= {"GET", "PATCH"}
+
+
+def test_exact_numeric_draft_preflight_is_read_only_and_binds_live_tag() -> None:
+    expected = _expected_assets()
+    api = _FakeGitHub(_release(), _assets(expected))
+    base = "/repos/robotlearning123/gpt2agent"
+
+    _preflight(api, expected)
+
+    assert api.calls == [
+        ("GET", f"{base}/releases/42", "release-token", None),
+        ("GET", f"{base}/releases/42/assets?per_page=100", "release-token", None),
+        ("GET", f"{base}/git/ref/tags/v1.2.3", "release-token", None),
+        ("GET", f"{base}/git/tags/{TAG_OBJECT}", "release-token", None),
+        ("GET", f"{base}/git/commits/{COMMIT}", "release-token", None),
+        ("GET", f"{base}/git/ref/tags/v1.2.3", "release-token", None),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("wrong-same-name-digest", "digest"),
+        ("missing", "exact asset set"),
+        ("extra", "exact asset set"),
+        ("malformed", "asset ID"),
+    ],
+)
+def test_draft_preflight_rejects_adversarial_assets_without_publication(
+    mutation: str,
+    message: str,
+) -> None:
+    expected = _expected_assets()
+    assets = _assets(expected)
+    if mutation == "wrong-same-name-digest":
+        assets[0]["digest"] = "sha256:" + "0" * 64
+    elif mutation == "missing":
+        assets.pop()
+    elif mutation == "extra":
+        assets.append(
+            {
+                "id": 999,
+                "name": "unreviewed.txt",
+                "state": "uploaded",
+                "size": 1,
+                "digest": "sha256:" + "0" * 64,
+            }
+        )
+    else:
+        assets[0].pop("id")
+    api = _FakeGitHub(_release(), assets)
+
+    with pytest.raises(ValueError, match=message):
+        _preflight(api, expected)
+
+    assert api.calls
+    assert all(method == "GET" for method, _, _, _ in api.calls)
+
+
+@pytest.mark.parametrize("body", ["release notes", "different release notes\n"])
+def test_draft_preflight_rejects_truncated_or_wrong_body_without_publication(
+    body: str,
+) -> None:
+    expected = _expected_assets()
+    release = _release()
+    release["body"] = body
+    api = _FakeGitHub(release, _assets(expected))
+
+    with pytest.raises(ValueError, match="body does not exactly match"):
+        _preflight(api, expected)
+
+    assert api.calls
+    assert all(method == "GET" for method, _, _, _ in api.calls)
 
 
 def test_exact_published_immutable_rerun_is_a_noop_success() -> None:
@@ -560,6 +685,37 @@ def test_main_reads_two_tokens_byte_exactly_from_stdin(
     output = capsys.readouterr().out
     assert "github-release-token-byte-canary" not in output
     assert "github-settings-token-byte-canary" not in output
+
+
+def test_draft_preflight_main_reads_one_bounded_token_without_publication_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    token = b"github-draft-preflight-token-byte-canary"
+    observed: list[tuple[str, str]] = []
+
+    class Stdin:
+        buffer = io.BytesIO(token)
+
+    monkeypatch.setattr(publisher.sys, "stdin", Stdin())
+    monkeypatch.setattr(publisher, "_read_notes", lambda path: "notes\n")
+    monkeypatch.setattr(
+        publisher,
+        "expected_release_assets",
+        lambda dist, evidence, version: _expected_assets(),
+    )
+
+    def preflight(*args, **kwargs):
+        observed.append((args[0], args[6]))
+
+    monkeypatch.setattr(publisher, "preflight_exact_release_draft", preflight)
+
+    assert publisher.main(["--draft-preflight", *_main_args(tmp_path)]) == 0
+    assert observed == [
+        ("robotlearning123/gpt2agent", token.decode("utf-8"))
+    ]
+    assert "github-draft-preflight-token-byte-canary" not in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

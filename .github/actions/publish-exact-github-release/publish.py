@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish one fully validated GitHub Release draft by exact numeric ID."""
+"""Validate or publish one GitHub Release draft by exact numeric ID."""
 
 from __future__ import annotations
 
@@ -477,6 +477,56 @@ def verify_remote_tag_binding(
     _verify_live_tag_reference(final_reference, normalized_tag, normalized_tag_object)
 
 
+def preflight_exact_release_draft(
+    repository: str,
+    release_id: int,
+    tag: str,
+    body: str,
+    prerelease: bool,
+    expected_assets: Mapping[str, ExpectedAsset],
+    release_token: str,
+    *,
+    expected_tag_object: str,
+    expected_commit: str,
+    expected_tree: str,
+    release_request_json: JsonRequester = _request_release_json,
+) -> None:
+    """Read back one exact draft and its live annotated-tag binding."""
+    normalized_repository = _require_match(REPOSITORY, repository, "repository")
+    normalized_release_id = _require_positive_int(release_id, "release ID")
+    normalized_tag = _require_match(TAG, tag, "release tag")
+    normalized_tag_object = _require_sha1(expected_tag_object, "tag object")
+    normalized_commit = _require_sha1(expected_commit, "commit")
+    normalized_tree = _require_sha1(expected_tree, "tree")
+    validated_release_token = _validate_token(release_token)
+
+    release, assets = _fetch_state(
+        normalized_repository,
+        normalized_release_id,
+        validated_release_token,
+        release_request_json,
+    )
+    verify_release_state(
+        release,
+        assets,
+        release_id=normalized_release_id,
+        tag=normalized_tag,
+        body=body,
+        prerelease=prerelease,
+        expected_assets=expected_assets,
+        expected_draft=True,
+    )
+    verify_remote_tag_binding(
+        normalized_repository,
+        normalized_tag,
+        normalized_tag_object,
+        normalized_commit,
+        normalized_tree,
+        validated_release_token,
+        request_json=release_request_json,
+    )
+
+
 def publish_exact_release(
     repository: str,
     release_id: int,
@@ -687,6 +737,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--token-stdin", action="store_true")
     parser.add_argument("--settings-token-stdin", action="store_true")
     parser.add_argument("--settings-preflight", action="store_true")
+    parser.add_argument("--draft-preflight", action="store_true")
     parser.add_argument("--repository", required=True)
     parser.add_argument("--release-id")
     parser.add_argument("--tag")
@@ -704,6 +755,8 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.settings_preflight and args.draft_preflight:
+            raise ValueError("preflight modes are mutually exclusive")
         if args.settings_preflight:
             if args.token_stdin or not args.settings_token_stdin:
                 raise ValueError("settings preflight token must be read from standard input")
@@ -726,6 +779,46 @@ def main(argv: list[str] | None = None) -> int:
             token = _read_single_token()
             require_immutable_releases_enabled(args.repository, token)
             print("immutable GitHub Release settings preflight succeeded")
+            return 0
+        if args.draft_preflight:
+            if not args.token_stdin or args.settings_token_stdin:
+                raise ValueError("draft preflight token must be read from standard input")
+            if any(
+                value is None
+                for value in (
+                    args.release_id,
+                    args.tag,
+                    args.tag_object,
+                    args.commit,
+                    args.tree,
+                    args.version,
+                    args.expected_prerelease,
+                    args.notes,
+                    args.dist,
+                    args.evidence,
+                )
+            ):
+                raise ValueError("draft preflight inputs are incomplete")
+            release_token = _read_single_token()
+            release_id = _parse_release_id(args.release_id)
+            prerelease = _parse_bool(args.expected_prerelease)
+            expected_body = _read_notes(args.notes)
+            expected_assets = expected_release_assets(
+                args.dist, args.evidence, args.version
+            )
+            preflight_exact_release_draft(
+                args.repository,
+                release_id,
+                args.tag,
+                expected_body,
+                prerelease,
+                expected_assets,
+                release_token,
+                expected_tag_object=args.tag_object,
+                expected_commit=args.commit,
+                expected_tree=args.tree,
+            )
+            print(f"exact GitHub Release draft preflight succeeded: id={release_id}")
             return 0
         if not args.token_stdin:
             raise ValueError("GitHub tokens must be read from standard input")

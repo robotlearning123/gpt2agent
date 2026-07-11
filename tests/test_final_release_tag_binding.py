@@ -175,6 +175,22 @@ def _publish(api: _FakePublicationAPI) -> str:
     )
 
 
+def _preflight(api: _FakePublicationAPI) -> None:
+    publisher.preflight_exact_release_draft(
+        "robotlearning123/gpt2agent",
+        42,
+        "v1.2.3",
+        "release notes\n",
+        False,
+        _publisher_assets(),
+        "release-token",
+        expected_tag_object=TAG_OBJECT,
+        expected_commit=COMMIT,
+        expected_tree=TREE,
+        release_request_json=api,
+    )
+
+
 def _binding_paths() -> list[str]:
     base = "/repos/robotlearning123/gpt2agent"
     return [
@@ -229,6 +245,16 @@ def test_prepatch_tag_graph_drift_fails_without_mutation(mode: str) -> None:
         _publish(api)
 
     assert all(call[0] != "PATCH" for call in api.calls)
+
+
+def test_draft_preflight_rejects_wrong_live_tree_without_mutation() -> None:
+    api = _FakePublicationAPI(graphs=["wrong-tree"])
+
+    with pytest.raises(ValueError, match="source tree"):
+        _preflight(api)
+
+    assert api.calls
+    assert all(call[0] == "GET" for call in api.calls)
 
 
 def test_ambiguous_retry_rebinds_and_refuses_drift_without_second_patch() -> None:

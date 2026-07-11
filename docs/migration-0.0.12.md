@@ -249,7 +249,10 @@ publish.
 Verify the controls through reviewed GET-only endpoints before tagging:
 
 ```bash
-python scripts/audit_release_governance.py \
+: "${VERIFIER_PYTHON:?set this to the reviewed isolated CPython 3.12.13 verifier}"
+GH_TOKEN="$(/usr/bin/gh auth token --hostname github.com)" \
+  "$VERIFIER_PYTHON" -I -S -B \
+  scripts/audit_release_governance.py \
   --live robotlearning123/gpt2agent \
   --policy /trusted/local/release-governance-policy.json \
   --gh /usr/bin/gh
@@ -262,6 +265,15 @@ IDs, the settings App client ID, or the reviewer identity from the snapshot
 being audited. The command emits deterministic JSON and exits nonzero if the
 policy or exact trusted `gh` path is missing or invalid, any required control is
 absent, or the live snapshot cannot be validated.
+
+Available GitHub GET endpoints cannot prove that the App has no other
+installation under another owner or that its private key is exclusive to the
+protected environment. Keep separately reviewed App-owner evidence for those
+claims. GitHub and PyPI also provide no cross-registry atomic transaction: the
+workflow creates and validates the complete numeric-ID GitHub draft before
+PyPI, then revalidates that same draft after the public-package canary. An
+intervening privileged mutation blocks GitHub publication but cannot roll back
+bytes already published to PyPI.
 
 After the workflow is green, run `scripts/audit_retained_receipt.sh` with the
 repository, tag, protected evidence directory, pinned runtime archive, and

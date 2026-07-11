@@ -462,9 +462,18 @@ Create a private evidence directory, then delegate the complete account gate and
 tag handoff to the reviewed operator. It re-executes under `env -i` and Bash
 privileged mode before parsing arguments, fetches the merged commit into a
 disposable detached worktree, rejects hidden Git index state, and executes only
-root-owned `/usr/bin/gh`, `/usr/bin/git`, and `/usr/bin/python3.12`. The release
-App token is requested only after every read-only gate passes and is never passed
-to Python or placed in process arguments.
+root-owned system tools plus the exact owner-private CPython runtime installed
+from the pinned archive. The release App token is requested only after every
+read-only gate passes and is never passed to Python or placed in process
+arguments.
+
+Run the operator and retained-receipt procedures only in a dedicated
+owner-private clone whose `.git/config`, remote URL, and filesystem ancestors
+have been reviewed, with no concurrent writer. Pinning an exact Git executable
+path does not disable repository-local Git configuration. The coordinator
+therefore repeats its mutation-critical checks with scrubbed Git configuration;
+the surrounding documentation checks remain an operator trust boundary, not a
+sandbox for an untrusted checkout.
 
 ```bash
 install -d -m 700 "$HOME/gpt2agent-release-evidence"
@@ -505,14 +514,22 @@ and exact wheel/sdist hashes.
 
 The workflow never rebuilds after the account gate. It downloads the exact
 account-bound main-CI artifact by numeric ID, reconstructs its artifact-set
-digest, and publishes those same bytes to PyPI via OIDC trusted publishing. No
-pre-publication release job installs or imports the candidate or reruns
-`package_smoke.sh`; the required credential-free main-CI package job is the sole
-pre-publication packaged-artifact execution gate. After PyPI publication, a
-credential-free canary installs the public version and checks its CLIs,
-resources, and import surface. The workflow also verifies published filenames
-and hashes before creating the GitHub Release, whose initial assets include the
-distributions and `release-workflow-artifacts.json`.
+digest, and creates and validates the complete numeric-ID-bound GitHub Release
+draft before any irreversible package publication. It then publishes those same
+bytes to PyPI via OIDC trusted publishing. No pre-publication release job
+installs or imports the candidate or reruns `package_smoke.sh`; the required
+credential-free main-CI package job is the sole pre-publication packaged-artifact
+execution gate. After PyPI publication, a credential-free canary installs the
+public version and checks its CLIs, resources, and import surface. Only then does
+the workflow revalidate and publish the same GitHub draft, whose initial assets
+include the distributions and `release-workflow-artifacts.json`.
+
+GitHub and PyPI provide no cross-registry atomic transaction. A privileged
+out-of-band mutation or deletion after the complete draft check therefore makes
+the later exact-ID revalidation fail closed; it cannot roll back bytes already
+published to PyPI. This residual administrator and service-availability boundary
+requires the reviewed live controls and operator recovery policy rather than a
+claim of transactional publication.
 
 GitHub publication is pinned to the reviewed local action by its full 40-byte
 commit SHA. That action resolves or creates only the exact-tag draft, captures
@@ -547,6 +564,30 @@ publication. Run `scripts/audit_release_governance.py` with
 `--live OWNER/REPO`, `--policy POLICY.json`, and `--gh /usr/bin/gh` to perform
 these reviewed, read-only GitHub checks. It exits nonzero when the closed
 identity policy or any required live control is absent.
+
+For a standalone read-only governance preflight, use the same reviewed verifier
+runtime and canonical policy path as the operator:
+
+```bash
+: "${VERIFIER_PYTHON:?set this to the reviewed isolated CPython 3.12.13 verifier}"
+: "${GPT2AGENT_RELEASE_GOVERNANCE_POLICY:?set this to the reviewed policy JSON}"
+GH_BIN=/usr/bin/gh
+GPT2AGENT_RELEASE_GOVERNANCE_POLICY="$(realpath -e -- \
+  "$GPT2AGENT_RELEASE_GOVERNANCE_POLICY")"
+GH_TOKEN="$("$GH_BIN" auth token --hostname github.com)" \
+  "$VERIFIER_PYTHON" -I -S -B scripts/audit_release_governance.py \
+  --live robotlearning123/gpt2agent \
+  --policy "$GPT2AGENT_RELEASE_GOVERNANCE_POLICY" \
+  --gh "$GH_BIN"
+```
+
+The live audit verifies the current settings-reader installation's repository
+selection, permissions, events, and environment binding through available GitHub
+GET endpoints. Those endpoints cannot prove that the App has no other installation
+under another owner, or that its private key is not reused outside the protected
+environment. The App owner must retain separately reviewed manual evidence for
+those two organization-level exclusivity claims; the machine audit must not be
+treated as proof of them.
 
 Immediately before the release App creates the immutable tag, the operator
 command re-fetches the complete pinned run artifact list, requires at least one
