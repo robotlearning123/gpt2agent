@@ -33,11 +33,12 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --client)       CLIENT="$2"; shift 2 ;;
     --transport)    TRANSPORT="$2"; shift 2 ;;
+    --port)         err "--port is unavailable because HTTP transport is disabled; use stdio."; exit 2 ;;
     --no-skill)     SKILL_FLAG="--no-skill"; shift ;;
     --no-register)  REGISTER=0; shift ;;
     --source)       SOURCE="$2"; SOURCE_EXPLICIT=1; shift 2 ;;
     -h|--help)
-      sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) err "Unknown option: $1"; exit 2 ;;
@@ -96,16 +97,39 @@ ok "pipx: $(pipx --version 2>/dev/null || echo present)"
 
 # --- 3. install gpt2agent -------------------------------------------------
 
-# A forced install keeps an existing pipx virtual environment and ignores
-# --python. Replace the named environment first so both the requested source
-# and the compatible interpreter are honored. A failed removal is fatal.
+# A forced install keeps an existing pipx virtual environment, ignores
+# --python, and removes that environment if installation fails. Move an
+# existing environment aside first so the requested interpreter is honored
+# and any failed or interrupted replacement can restore the previous install.
 if ! PIPX_HOME_DIR=$(pipx environment --value PIPX_HOME); then
   err "Could not determine pipx's environment location. Upgrade pipx and retry."
   exit 1
 fi
-if [[ -d "$PIPX_HOME_DIR/venvs/gpt2agent" ]]; then
-  info "Replacing existing gpt2agent pipx environment (injected packages are removed)"
-  pipx uninstall gpt2agent
+PIPX_VENV_DIR="$PIPX_HOME_DIR/venvs/gpt2agent"
+PIPX_BACKUP_DIR=""
+restore_pipx_environment() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [[ -n "$PIPX_BACKUP_DIR" && -d "$PIPX_BACKUP_DIR" && ! -L "$PIPX_BACKUP_DIR" ]]; then
+    rm -rf -- "$PIPX_VENV_DIR"
+    if ! mv -- "$PIPX_BACKUP_DIR" "$PIPX_VENV_DIR"; then
+      err "Upgrade failed and the previous pipx environment could not be restored from $PIPX_BACKUP_DIR"
+      status=1
+    fi
+  fi
+  exit "$status"
+}
+if [[ -L "$PIPX_VENV_DIR" || ( -e "$PIPX_VENV_DIR" && ! -d "$PIPX_VENV_DIR" ) ]]; then
+  err "Existing pipx environment path must be a real directory: $PIPX_VENV_DIR"
+  exit 1
+fi
+if [[ -d "$PIPX_VENV_DIR" && ! -L "$PIPX_VENV_DIR" ]]; then
+  info "Replacing existing gpt2agent pipx environment (restored automatically on failure)"
+  PIPX_BACKUP_DIR=$(mktemp -d "$PIPX_HOME_DIR/.gpt2agent-upgrade.XXXXXXXX")
+  rmdir -- "$PIPX_BACKUP_DIR"
+  mv -- "$PIPX_VENV_DIR" "$PIPX_BACKUP_DIR"
+  trap restore_pipx_environment EXIT
+  trap 'exit 130' HUP INT TERM
 fi
 
 if [[ $SOURCE_EXPLICIT -eq 1 && -d "$SOURCE" ]]; then
@@ -126,9 +150,23 @@ else
   fi
 fi
 
+PIPX_APP="$PIPX_VENV_DIR/bin/gpt2agent"
+if [[ ! -f "$PIPX_APP" || ! -x "$PIPX_APP" || -L "$PIPX_APP" ]]; then
+  err "The new pipx environment does not contain an executable gpt2agent app."
+  exit 1
+fi
+if ! "$PIPX_APP" --version >/dev/null 2>&1; then
+  err "The new pipx environment's gpt2agent app failed its version smoke test."
+  exit 1
+fi
 if ! command -v gpt2agent >/dev/null 2>&1; then
   err "gpt2agent not on PATH after install. Open a new shell and re-run."
   exit 1
+fi
+if [[ -n "$PIPX_BACKUP_DIR" ]]; then
+  rm -rf -- "$PIPX_BACKUP_DIR"
+  PIPX_BACKUP_DIR=""
+  trap - EXIT HUP INT TERM
 fi
 ok "gpt2agent installed"
 

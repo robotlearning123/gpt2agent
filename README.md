@@ -318,6 +318,12 @@ has real consequences; please understand them before pointing it at your account
   to `chatgpt.com`.
   gpt2agent never transmits it anywhere else. Token/secret values are redacted
   from error messages and logs (best-effort).
+- **Keep the account transport in its dedicated MCP child process.** It ignores
+  ambient proxy and CA-bundle variables, uses the directly declared `certifi`
+  trust bundle, and refuses account I/O while `SSLKEYLOGFILE` is set. Libcurl
+  can retain a TLS key-log file opened earlier by trusted embedded code even
+  after that variable is removed, which cannot be detected in-process. Do not
+  embed gpt2agent after unrelated curl traffic or load untrusted code beside it.
 - **PII redaction is limited.** Tools that return conversation/memory data mask
   **emails, phone numbers, and common secret shapes** (including structured API
   tokens, label-aware credential assignments, credential-bearing database URLs,
@@ -524,17 +530,24 @@ public version and checks its CLIs, resources, and import surface. Only then doe
 the workflow revalidate and publish the same GitHub draft, whose initial assets
 include the distributions and `release-workflow-artifacts.json`.
 
-GitHub and PyPI provide no cross-registry atomic transaction. A privileged
-out-of-band mutation or deletion after the complete draft check therefore makes
-the later exact-ID revalidation fail closed; it cannot roll back bytes already
-published to PyPI. This residual administrator and service-availability boundary
-requires the reviewed live controls and operator recovery policy rather than a
-claim of transactional publication.
+GitHub and PyPI provide no cross-registry atomic transaction. The documented
+GitHub REST release update exposes no conditional precondition/CAS contract, so
+a privileged writer can race the last exact-ID validation and publication
+PATCH. The mandatory public readback detects asset/tag mismatches observable
+during its bounded checks, but cannot roll back the now-frozen asset/tag state
+or bytes already published to PyPI safely or automatically. Title and release
+notes remain editable after publication; their exactness is point-in-time at
+readback and therefore also depends on privileged-writer governance. This
+residual administrator and service-availability boundary requires the reviewed
+live controls and operator recovery policy rather than a claim of transactional
+publication.
 
-GitHub publication is pinned to the reviewed local action by its full 40-byte
-commit SHA. That action resolves or creates only the exact-tag draft, captures
-its numeric release ID, and targets every asset read, upload, deletion, and
-publication update by that immutable ID. It validates exact tag, target commit,
+The commit-pinned `softprops/action-gh-release` step resolves or creates the
+exact-tag draft, uploads the three reviewed assets by tag, and exposes its
+numeric release ID. The separately reviewed repository-owned publication action is pinned
+by its full 40-byte commit SHA. It neither creates the draft nor uploads or
+deletes assets: it uses only that numeric ID for a read-only draft preflight and
+the final publication PATCH/readback. It validates exact tag, target commit,
 draft/prerelease flags, name, notes, and asset names/hashes both before and after
 the public transition, then requires GitHub's immutable-release setting on the
 readback. A rerun against an already-public release succeeds only when that

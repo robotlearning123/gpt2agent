@@ -187,10 +187,14 @@ candidate; re-verifies the receipt; and creates a new tag through the GitHub API
 without any update, deletion, `git tag`, or `git push` fallback.
 
 The trusted transport disables environment proxy discovery and automatic
-redirects, uses fixed timeouts and TLS verification, and caps response bodies at
-4 MiB. It never imports or invokes the candidate package. Run package smoke only
-in credential-free CI or an OS-isolated no-auth container/VM; private `HOME` and
-an empty environment are useful hygiene but are not an OS sandbox. Create and
+redirects, selects the directly declared `certifi` trust bundle instead of
+ambient CA variables, refuses `SSLKEYLOGFILE`, uses fixed timeouts and TLS
+verification, and caps response bodies at 4 MiB. Libcurl can retain a key-log
+file opened earlier in the same process even after its environment variable is
+removed, so embedded callers must use a fresh dedicated process. The gate never
+imports or invokes the candidate package. Run package smoke only in
+credential-free CI or an OS-isolated no-auth container/VM; private `HOME` and an
+empty environment are useful hygiene but are not an OS sandbox. Create and
 verify the receipt immediately: either command rejects evidence older than
 30 minutes, a live probe lasting over 10 minutes, or a completion timestamp more
 than one minute in the future.
@@ -212,11 +216,13 @@ package smoke; required main CI is the sole pre-publication packaged-artifact
 execution gate. After PyPI publication, a credential-free canary installs the
 public version and checks its CLIs, resources, and import surface. The release
 evidence asset carries the full pinned candidate identity and artifact-set
-digest. GitHub publication resolves or creates the exact-tag draft, captures its
-numeric release ID, and targets every asset operation and publication update by
-that ID. Exact metadata and assets are checked before and after publication, the
-public readback must be immutable, and an already-public rerun succeeds only for
-an exact immutable match.
+digest. The commit-pinned `softprops/action-gh-release` step resolves or creates
+the exact-tag draft, uploads the reviewed assets by tag, and exposes its numeric
+release ID. The separately reviewed repository-owned action neither creates the draft nor
+uploads or deletes assets; it uses that numeric ID for the read-only preflight
+and final publication PATCH/readback. Exact metadata and assets are checked
+before and after publication, the public readback must be immutable, and an
+already-public rerun succeeds only for an exact immutable match.
 
 Before tagging, an expired, deleted, replaced, or near-expiry candidate requires
 a full main-CI rerun and a new account gate. Immediately before tag creation,
@@ -269,12 +275,16 @@ absent, or the live snapshot cannot be validated.
 Available GitHub GET endpoints cannot prove that the App has no other
 installation under another owner or that its private key is exclusive to the
 protected environment. Keep separately reviewed App-owner evidence for those
-claims. GitHub and PyPI also provide no cross-registry atomic transaction: the
-workflow creates and validates the complete numeric-ID GitHub draft before
-PyPI, then revalidates that same draft after the public-package canary. An
-intervening privileged mutation blocks GitHub publication but cannot roll back
-bytes already published to PyPI.
-
+claims. GitHub and PyPI also provide no cross-registry atomic transaction. The
+workflow creates and validates a complete GitHub draft before PyPI and
+revalidates it after the public-package canary, but the documented GitHub REST
+release update exposes no conditional precondition/CAS contract. A privileged
+writer can therefore race the last validation and publication update. Public
+readback detects asset/tag mismatches observable during its bounded checks, but
+cannot roll back the frozen asset/tag state or PyPI bytes safely or
+automatically. Title and release notes remain editable after publication; their
+exactness is point-in-time at readback and therefore also depends on
+privileged-writer governance.
 After the workflow is green, run `scripts/audit_retained_receipt.sh` with the
 repository, tag, protected evidence directory, pinned runtime archive, and
 `/usr/bin/git`. It fetches the public annotated tag into a disposable bare

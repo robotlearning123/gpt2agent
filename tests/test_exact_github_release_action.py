@@ -83,6 +83,8 @@ class _FakeGitHub:
         ambiguous_patch: bool = False,
         ambiguous_patch_applies: bool = True,
         change_second_snapshot: bool = False,
+        mutate_asset_during_patch: bool = False,
+        mutate_metadata_after_public_get: bool = False,
         immutable_settings: list[object] | None = None,
     ) -> None:
         self.release = deepcopy(release)
@@ -90,6 +92,8 @@ class _FakeGitHub:
         self.ambiguous_patch = ambiguous_patch
         self.ambiguous_patch_applies = ambiguous_patch_applies
         self.change_second_snapshot = change_second_snapshot
+        self.mutate_asset_during_patch = mutate_asset_during_patch
+        self.mutate_metadata_after_public_get = mutate_metadata_after_public_get
         self.immutable_settings = deepcopy(
             immutable_settings
             if immutable_settings is not None
@@ -114,6 +118,10 @@ class _FakeGitHub:
             response = deepcopy(self.release)
             if self.change_second_snapshot and self.release_gets == 2:
                 response["body"] = "changed before publish\n"
+            if self.mutate_metadata_after_public_get and response.get("draft") is False:
+                # GitHub permits title/notes edits after immutable publication.
+                # The returned snapshot was exact, but it is never a CAS lease.
+                self.release["body"] = "changed after public snapshot\n"
             return response
         if method == "GET" and path == f"{base}/assets?per_page=100":
             return deepcopy(self.assets)
@@ -132,6 +140,10 @@ class _FakeGitHub:
             return {"sha": COMMIT, "tree": {"sha": TREE}}
         if method == "PATCH" and path == base and payload == {"draft": False}:
             if not self.ambiguous_patch or self.ambiguous_patch_applies:
+                if self.mutate_asset_during_patch:
+                    # Model an out-of-band write after the final GET and just
+                    # before GitHub freezes the published assets and tag.
+                    self.assets[0]["digest"] = "sha256:" + "0" * 64
                 self.release["draft"] = False
                 self.release["immutable"] = True
             if self.ambiguous_patch:
@@ -467,6 +479,41 @@ def test_changed_second_snapshot_fails_before_patch() -> None:
         _publish(api, expected)
 
     assert all(method == "GET" for method, _, _, _ in api.calls)
+
+
+def test_privileged_asset_mutation_during_patch_is_detected_after_publish() -> None:
+    """The documented update has no precondition/CAS; frozen drift cannot be undone."""
+    expected = _expected_assets()
+    api = _FakeGitHub(
+        _release(),
+        _assets(expected),
+        mutate_asset_during_patch=True,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="published release did not become exact and immutable",
+    ):
+        _publish(api, expected)
+
+    assert sum(method == "PATCH" for method, _, _, _ in api.calls) == 1
+    assert api.release["draft"] is False
+    assert api.release["immutable"] is True
+    assert api.assets[0]["digest"] == "sha256:" + "0" * 64
+
+
+def test_public_metadata_exactness_is_only_a_point_in_time_snapshot() -> None:
+    expected = _expected_assets()
+    api = _FakeGitHub(
+        _release(),
+        _assets(expected),
+        mutate_metadata_after_public_get=True,
+    )
+
+    assert _publish(api, expected) == "published"
+    assert api.release["draft"] is False
+    assert api.release["immutable"] is True
+    assert api.release["body"] == "changed after public snapshot\n"
 
 
 @pytest.mark.parametrize(

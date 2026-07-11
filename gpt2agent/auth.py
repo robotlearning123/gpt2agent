@@ -12,6 +12,8 @@ import time
 import webbrowser
 from pathlib import Path
 
+from gpt2agent._secure_file import write_private_json
+
 
 _ACCESS_TOKEN_RE = re.compile(r"eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\Z")
 
@@ -179,20 +181,12 @@ def get_token(interactive: bool = True) -> str:
     if not result:
         raise RuntimeError("Token acquisition cancelled.")
 
-    # Save for future use. Create the file 0o600 up front (os.open) so the
-    # bearer token is never briefly world-readable between write and chmod.
-    save_dir = Path.home() / ".gpt2agent"
-    save_dir.mkdir(exist_ok=True)
-    tp = save_dir / "token.json"
-    fd = os.open(tp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        # O_CREAT's mode is ignored when the file already exists, so tighten it
-        # explicitly (fchmod on the fd, after O_TRUNC) before writing the token —
-        # this fixes a pre-existing 0644 token.json staying world-readable.
-        os.fchmod(fd, 0o600)
-    except (OSError, AttributeError):
-        pass  # non-POSIX (e.g. Windows lacks fchmod)
-    with os.fdopen(fd, "w") as f:
-        json.dump(result, f, indent=2)
+    # Save via a private directory and an exclusive same-directory temp file;
+    # never open an existing token symlink or hard link in place.
+    write_private_json(
+        Path.home() / ".gpt2agent" / "token.json",
+        result,
+        indent=2,
+    )
     print("  Token saved to ~/.gpt2agent/token.json")
     return result["access_token"]

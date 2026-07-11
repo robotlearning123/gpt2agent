@@ -13,10 +13,13 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+
+from gpt2agent._secure_file import atomic_replace_bytes
 
 try:
     import tomllib
@@ -68,26 +71,27 @@ def _backup(path: Path) -> Path | None:
     plain ``write_bytes`` would create the backup with the process umask
     (often world-readable), exposing a ``0600`` config in its ``.bak`` copy.
     """
-    if not path.exists():
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
         return None
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RuntimeError(f"{path} must resolve to a regular file before backup")
+        mode = stat.S_IMODE(metadata.st_mode)
+        with os.fdopen(descriptor, "rb") as source:
+            descriptor = -1
+            data = source.read()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     bak = path.with_name(path.name + ".bak-gpt2agent")
-    data = path.read_bytes()
-    try:
-        mode = path.stat().st_mode & 0o777
-    except OSError:
-        mode = 0o600
-    # Create at 0o600 (never wider than needed) then match the source mode.
-    fd = os.open(str(bak), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        try:
-            os.chmod(bak, mode)
-        except OSError:
-            pass  # non-POSIX filesystem
-    except BaseException:
-        bak.unlink(missing_ok=True)
-        raise
+    # Write a random sibling and replace the backup path.  In particular, do
+    # not open a pre-planted ``.bak-gpt2agent`` symlink and truncate its target.
+    atomic_replace_bytes(bak, data, mode=mode)
     return bak
 
 
@@ -105,24 +109,12 @@ def _atomic_write(path: Path, content: str) -> None:
         # target. Write through to the target instead.
         path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + f".tmp-{os.getpid()}")
-    # Open the temp file at 0o600 up front so a secret-bearing config is never
-    # briefly world-readable under a permissive umask between write and chmod.
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-        try:
-            # Preserve an existing file's mode; new files stay 0o600.
-            if path.exists():
-                os.chmod(tmp, path.stat().st_mode)
-        except OSError:
-            # Best-effort — Windows / non-POSIX filesystems may reject chmod.
-            pass
-        tmp.replace(path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+        # Preserve an existing file's mode; new files stay 0o600.
+        mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
+    except OSError:
+        mode = 0o600
+    atomic_replace_bytes(path, content.encode(), mode=mode)
 
 
 def _stdio_entry() -> dict[str, Any]:
@@ -649,6 +641,9 @@ def install_claude_skill(
     (bypasses MCP) so it works even before restarting Claude Code.
     The gpt2agent skill provides full account access instructions and
     pre-approves all 32 MCP tools.
+
+    The historical top-level result describes the final skill; ``skills``
+    reports every attempted bundle without breaking existing callers.
     """
     skills_src = Path(__file__).parent / "skills"
     target_dir = dst_dir or Path.home() / ".claude" / "skills"
@@ -664,7 +659,7 @@ def install_claude_skill(
     if not results:
         return {"path": None, "skipped": True}
 
-    return results[-1]
+    return {**results[-1], "skills": results}
 
 
 # ── auto-detect ────────────────────────────────────────────────────────────

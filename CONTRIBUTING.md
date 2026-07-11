@@ -147,6 +147,12 @@ Available GitHub GET endpoints validate the current settings-reader
 installation, but cannot prove that the App has no other installation under a
 different owner or that the private key is unused elsewhere. Preserve separately
 reviewed App-owner evidence for those exclusivity claims. Likewise, GitHub and
-PyPI offer no cross-registry atomic transaction: the workflow prepares a complete
-GitHub draft before PyPI, then revalidates it after the PyPI canary, and fails
-closed on intervening mutation without pretending it can roll back PyPI.
+PyPI offer no cross-registry atomic transaction. The documented GitHub REST
+release update exposes no conditional precondition/CAS contract. The workflow
+prepares a complete GitHub draft before PyPI and revalidates it after the PyPI
+canary, but a privileged writer can still race the last validation and
+publication PATCH. Public readback detects asset/tag mismatches observable
+during its bounded checks, but cannot roll back the now-frozen asset/tag state
+or PyPI bytes safely or automatically. Title and release notes remain editable
+after publication; their exactness is point-in-time at readback and therefore
+also depends on privileged-writer governance.

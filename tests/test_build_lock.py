@@ -200,6 +200,14 @@ def test_package_ci_uses_the_locked_builder_and_reproducible_build_settings() ->
     assert "PYTHONHASHSEED=0" in package
     assert "TZ=UTC" in package
     assert '"$BUILD_VENV/bin/python" -m build --no-isolation' in package
+    assert (
+        '"$BUILD_VENV/bin/python" -I -S -B scripts/normalize_sdist.py \\\n'
+        '            '
+        '--epoch "$SOURCE_DATE_EPOCH" dist/*.tar.gz'
+    ) in package
+    assert package.index("scripts/normalize_sdist.py") < package.index(
+        '"$BUILD_VENV/bin/python" -m twine check --strict dist/*'
+    )
     assert '"$BUILD_VENV/bin/python" -m twine check --strict dist/*' in package
     assert package.count("scripts/package_smoke.sh") == 1
     assert "overwrite: false" in package
@@ -227,6 +235,7 @@ def test_release_relay_validates_with_the_lock_without_rebuilding() -> None:
         in build
     )
     assert " -m build" not in build
+    assert "scripts/normalize_sdist.py" not in workflow
     assert "Test built artifacts in clean environments" not in build
     assert workflow.count("scripts/package_smoke.sh") == 0
 

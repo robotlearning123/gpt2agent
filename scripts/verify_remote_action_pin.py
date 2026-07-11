@@ -25,7 +25,7 @@ _ACTION_FILES = ("action.yml", "publish.py")
 _PUBLISH_JOB = "github-release"
 _PUBLISH_STEP_NAME = "Validate and publish the exact draft"
 _REVIEWED_WORKFLOW_SHA256 = (
-    "ed85eb8c90cf579c90fb14b4c53cb9b47036c206baf25c7d266ffd76af76ead2"
+    "e0c8e4d2b5f94aa6ae2c4c1e71cd8f2df875fa9f3bee76181240ddbeec662776"
 )
 _REVIEWED_ACTION_PIN = "530db492615ad42a1dde733de89d8893e05ede49"
 

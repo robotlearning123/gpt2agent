@@ -338,6 +338,8 @@ jobs:
           printf 'SOURCE_DATE_EPOCH=%s\nPYTHONHASHSEED=%s\nTZ=%s\n' \
             "$SOURCE_DATE_EPOCH" "$PYTHONHASHSEED" "$TZ"
           "$BUILD_VENV/bin/python" -m build --no-isolation
+          "$BUILD_VENV/bin/python" -I -S -B scripts/normalize_sdist.py \
+            --epoch "$SOURCE_DATE_EPOCH" dist/*.tar.gz
           "$BUILD_VENV/bin/python" -m twine check --strict dist/*
 
       - name: Test wheel and sdist in clean environments

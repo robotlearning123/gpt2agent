@@ -599,6 +599,11 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert 'mcp_spec: "mcp>=1.26,<2"' in ci
     assert "name: Package dry-run" in ci
     assert '"$BUILD_VENV/bin/python" -m build --no-isolation' in ci
+    assert (
+        '"$BUILD_VENV/bin/python" -I -S -B scripts/normalize_sdist.py \\\n'
+        '            '
+        '--epoch "$SOURCE_DATE_EPOCH" dist/*.tar.gz'
+    ) in ci
     assert '"$BUILD_VENV/bin/python" -m twine check --strict dist/*' in ci
     assert 'scripts/package_smoke.sh dist "$PROJECT_VERSION" "$DIST_VERSION"' in ci
     assert (
@@ -837,7 +842,25 @@ def test_release_operator_docs_close_token_policy_and_retained_receipt_boundarie
         assert "cannot prove that the App has no other installation" in normalized
         assert "no cross-registry atomic transaction" in normalized
 
+    changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    for document in (readme, contributing, changelog, migration):
+        normalized = " ".join(document.split())
+        assert "documented GitHub REST release update exposes no conditional" in normalized
+        assert "precondition/CAS contract" in normalized
+        assert "mismatches observable during its bounded" in normalized
+        assert "cannot roll back" in normalized
+        assert "exactness is point-in-time at readback" in normalized
+
     normalized_readme = " ".join(readme.split())
+    normalized_migration = " ".join(migration.split())
+    normalized_changelog = " ".join(changelog.split())
+    for document in (normalized_readme, normalized_migration, normalized_changelog):
+        assert "softprops/action-gh-release" in document
+        assert "neither creates the draft nor uploads or deletes assets" in document
+    assert "targets every asset read, upload, deletion" not in normalized_readme
+    assert "targets every asset operation" not in normalized_migration
+    assert "every asset and metadata operation" not in normalized_changelog
+
     assert "dedicated owner-private clone" in normalized_readme
     assert "no concurrent writer" in normalized_readme
     assert (
@@ -1592,6 +1615,14 @@ def test_curl_cffi_floor_excludes_cve_2026_33752() -> None:
     assert "pip-audit==2.10.0" in ci
     assert "curl_cffi==0.15.0" in ci
     assert "DEPENDENCY_AUDIT_RESULT" in ci
+
+
+def test_certifi_ca_bundle_is_owned_as_a_direct_runtime_dependency() -> None:
+    pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    requirements = (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8")
+
+    assert '"certifi>=2024.2.2"' in pyproject
+    assert requirements.splitlines().count("certifi>=2024.2.2") == 1
 
 
 def test_package_smoke_runs_only_in_main_ci_candidate_job() -> None:

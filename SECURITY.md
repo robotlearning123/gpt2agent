@@ -27,6 +27,13 @@ not bugs:
   HTTP flag and URL installer fail closed; use stdio. Any future network
   transport must authenticate every request with a per-launch secret or an
   equivalent per-user boundary.
+- **Run the account transport in its dedicated MCP process.** Account sessions
+  ignore ambient proxy and CA-bundle variables, use the directly declared
+  `certifi` trust bundle, and fail before account I/O when `SSLKEYLOGFILE` is
+  present. Libcurl can retain a TLS key-log file that trusted embedded code
+  opened and then removed from the environment; that prior in-process state is
+  not detectable. Do not embed gpt2agent after unrelated curl traffic or load
+  untrusted code in its process.
 - **Limited output redaction.** Returned text masks emails, phone numbers,
   common provider tokens, label-aware credential assignments,
   credential-bearing database URLs, and PEM private keys, but names, addresses,

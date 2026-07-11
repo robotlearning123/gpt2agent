@@ -64,6 +64,11 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
 - Account requests never follow redirects, preventing account headers or prompt
   bodies from being forwarded through an upstream redirect. The `curl_cffi`
   floor is now 0.15.0, excluding CVE-2026-33752.
+- Account sessions use the directly declared `certifi` bundle, explicitly clear
+  libcurl proxy selection, and ignore ambient CA/proxy variables. A present
+  `SSLKEYLOGFILE` fails before account transport import or I/O; removing it is
+  not presented as a control because libcurl can retain an already-open keylog.
+  Embedded callers must use a fresh dedicated process.
 - Private-backend JSON is capped at 4 MiB before retention, and account SSE
   streams are capped at 64 MiB with a 4 MiB pending-line limit. A process-wide
   request policy permits
@@ -117,6 +122,11 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
 - The stable `Required checks` gate now includes the full OS/Python suite,
   Ruff, ShellCheck, both MCP v1 compatibility lanes, and a wheel/sdist dry-run
   installed into clean environments.
+- Main CI rewrites setuptools' volatile gzip/tar timestamps, ownership, names,
+  and modes in the sdist under a fixed source epoch, then revalidates the exact
+  member types and payload hashes before Twine, package smoke, and artifact
+  retention. The release workflow relays those bytes and never normalizes or
+  rebuilds them.
 - CI audits resolved application dependencies, the minimum supported
   `curl_cffi` release, and the hash-locked account-gate runtime for known
   vulnerabilities. A credential-free CI lane also bootstraps that runtime from
@@ -148,16 +158,23 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
   artifact-set digests, and complete candidate identity. Release evidence binds
   that metadata to the tag object, workflow identity, and exact wheel/sdist
   hashes. The receipt is never attached; its digest is the public commitment.
-- GitHub publication uses the exact numeric draft-release ID for every asset and
-  metadata operation, validates the complete release before and after making it
-  public, requires the immutable public readback, and permits an already-public
-  rerun only for an exact match. The publication action is pinned by its full
-  commit SHA. The complete draft now precedes irreversible PyPI publication and
-  is revalidated after the public-package canary. GitHub and PyPI still have no
-  cross-registry atomic transaction, so intervening privileged mutation fails
-  closed without claiming that already-published PyPI bytes can be rolled back.
-  Independent restricted tag creation and protected-environment approval remain
-  required release controls.
+- The commit-pinned `softprops/action-gh-release` step creates or resolves the
+  exact-tag draft and uploads the reviewed assets by tag. The separately pinned
+  repository-owned action neither creates the draft nor uploads or deletes
+  assets; it uses the resulting numeric release ID for read-only preflight and
+  the final publication PATCH/readback. It validates the complete release before and
+  after making it public, requires the immutable public readback, and permits an
+  already-public rerun only for an exact match. The complete draft precedes
+  irreversible PyPI publication and is revalidated after the public-package
+  canary. GitHub and PyPI still have no cross-registry atomic transaction. The
+  documented GitHub REST release update exposes no conditional precondition/CAS
+  contract. A privileged writer can race the final validation and PATCH;
+  readback detects asset/tag mismatches observable during its bounded checks but
+  cannot roll back the frozen asset/tag state or PyPI bytes safely or
+  automatically. Title and release notes remain editable after publication;
+  their exactness is point-in-time at readback and therefore also depends on
+  privileged-writer governance. Independent restricted tag creation and
+  protected-environment approval remain required controls.
 - GitHub Release notes are extracted by the same exact-version CHANGELOG parser
   used by release metadata verification, so regex-like version near-matches
   cannot select another section.
