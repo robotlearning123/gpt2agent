@@ -130,6 +130,17 @@ def _extract_pin(workflow: bytes, repository: str) -> str:
     if "\r" in source or "\t" in source or "\x00" in source:
         raise ActionVerificationError("release workflow is not canonical block YAML")
     lines = source.split("\n")
+    action_use_lines = [
+        line
+        for line in lines
+        if _ACTION_PATH in line
+        and (
+            re.fullmatch(r"      - uses:.*", line) is not None
+            or re.fullmatch(r"        uses:.*", line) is not None
+        )
+    ]
+    if len(action_use_lines) != 1:
+        raise ActionVerificationError("release workflow must invoke the publication action once")
 
     def significant(index: int) -> bool:
         stripped = lines[index].lstrip(" ")
@@ -162,11 +173,18 @@ def _extract_pin(workflow: bytes, repository: str) -> str:
         if indentation <= 2:
             job_end = index
             break
-    if any(
-        re.fullmatch(r"    if\s*:.*", lines[index])
-        for index in range(job_start + 1, job_end)
-    ):
-        raise ActionVerificationError("publication job must be unconditional")
+    for index in range(job_start + 1, job_end):
+        if not significant(index):
+            continue
+        line = lines[index]
+        indentation = len(line) - len(line.lstrip(" "))
+        if indentation != 4:
+            continue
+        property_match = re.fullmatch(r"    ([a-z][a-z0-9-]*):(.*)", line)
+        if property_match is None:
+            raise ActionVerificationError("publication job is not canonical block YAML")
+        if property_match.group(1) == "if":
+            raise ActionVerificationError("publication job must be unconditional")
 
     step_mappings = [
         index
