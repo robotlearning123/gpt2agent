@@ -15,13 +15,13 @@ OPERATOR = PROJECT_ROOT / "scripts" / "run_account_release.sh"
 def test_operator_starts_privileged_and_reexecutes_with_a_closed_environment() -> None:
     source = OPERATOR.read_text(encoding="utf-8")
 
-    assert source.startswith("#!/bin/bash -p\n")
+    assert source.startswith("#!/usr/bin/bash -p\n")
     reexec = source.index("exec /usr/bin/env -i")
     argument_parsing = source.index("while (($#)); do")
     assert reexec < argument_parsing
-    assert "/bin/bash -p \"$0\" \"$@\"" in source
-    assert "/bin/bash -p \"$CHECKOUT/scripts/bootstrap_account_gate.sh\"" in source
-    assert "/bin/bash -p \"$CHECKOUT/scripts/create_release_tag.sh\"" in source
+    assert "/usr/bin/bash -p \"$0\" \"$@\"" in source
+    assert "/usr/bin/bash -p \"$CHECKOUT/scripts/bootstrap_account_gate.sh\"" in source
+    assert "/usr/bin/bash -p \"$CHECKOUT/scripts/create_release_tag.sh\"" in source
     assert "run_git" in source
     assert "run_gh" in source
     assert "run_python_account" in source
@@ -29,9 +29,13 @@ def test_operator_starts_privileged_and_reexecutes_with_a_closed_environment() -
     assert "--trusted-python-base" not in source
     assert "--trusted-python-sha256" not in source
     assert "--trusted-python-tree-sha256" not in source
-    assert "extract_trusted_python.py" in source
-    assert "/usr/bin/python3.12" in source
+    assert "install_account_gate_runtime.sh" in source
+    assert "extract_trusted_python.py" not in source
+    assert "/usr/bin/python3.12" not in source
     assert '"$CHECKOUT/scripts/hash_runtime_tree.sh"' in source
+    assert "9544d2a29138833e6177d45dbc57468d37710b5080c901fbb579d53f251cdd6f" in source
+    assert "7df598dcc28ad5583fd65f49da6a2ff6460030441070d5c7a105df7dd5294f79" in source
+    assert "20260510" not in source
     assert '"$GH_BIN" --repo "$REPOSITORY" "$@"' not in source
     assert "local status=0" in source
 

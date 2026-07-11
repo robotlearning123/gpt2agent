@@ -241,11 +241,11 @@ def test_main_ci_validates_the_fresh_runtime_without_account_auth() -> None:
     step = workflow[step_start:step_end]
 
     assert "scripts/bootstrap_account_gate.sh" in step
-    assert "pythonLocation" in step
+    assert "GPT2AGENT_REVIEWED_PYTHON_BASE" in step
+    assert "9544d2a29138833e6177d45dbc57468d37710b5080c901fbb579d53f251cdd6f" in step
     assert 'mktemp -d "$ACCOUNT_GATE_HOME/.gpt2agent-account-gate.' in step
-    assert 'cp -R -- "$ACCOUNT_GATE_SOURCE_BASE/." "$ACCOUNT_GATE_PYTHON_BASE/"' in step
-    assert "SOURCE_PYTHON_SHA256" in step
-    assert "COPIED_PYTHON_SHA256" in step
+    assert "pythonLocation" not in step
+    assert "cp -R" not in step
     assert '--python "$ACCOUNT_GATE_PYTHON"' in step
     assert '--python-sha256 "$ACCOUNT_GATE_PYTHON_SHA256"' in step
     assert "/usr/bin/python" not in step
@@ -259,12 +259,20 @@ def test_main_ci_validates_the_fresh_runtime_without_account_auth() -> None:
     assert "/bin/bash -p scripts/bootstrap_account_gate.sh" in step
 
 
-def test_main_ci_pins_the_reviewed_setup_python_patch() -> None:
+def test_main_ci_installs_the_reviewed_astral_cpython() -> None:
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     package_start = workflow.index("  package:")
     package = workflow[package_start:]
 
-    assert 'python-version: "3.12.13"' in package
+    assert 'python-version: "3.12.13"' not in package
+    assert "scripts/install_account_gate_runtime.sh" in package
+    assert "astral-sh/python-build-standalone/releases/download/20260623/" in package
+    assert (
+        "cpython-3.12.13%2B20260623-x86_64-unknown-linux-gnu-"
+        "install_only_stripped.tar.gz" in package
+    )
+    assert "GPT2AGENT_REVIEWED_PYTHON_BASE" in package
+    assert '"$RUNTIME_BASE/bin/python3.12" -I -S -B -c' in package
 
 
 @pytest.mark.parametrize(
@@ -391,6 +399,46 @@ def test_bootstrap_ignores_ambient_path_before_trusting_runtime(tmp_path: Path) 
 
     assert result.returncode == 0, result.stderr
     assert not marker.exists()
+    assert venv.is_dir()
+
+
+def test_bootstrap_uses_privileged_bash_and_ignores_hostile_shell_environment(
+    tmp_path: Path,
+) -> None:
+    bootstrap_text = BOOTSTRAP.read_text(encoding="utf-8")
+    assert bootstrap_text.startswith("#!/usr/bin/bash -p\n")
+    assert "set +o posix" in bootstrap_text
+    assert "POSIXLY_CORRECT" in bootstrap_text
+    python, _log = _pretrusted_interpreter_double(tmp_path)
+    parent = _private_parent(tmp_path)
+    venv = parent / "venv"
+    canary = tmp_path / "hostile-shell-ran"
+    hostile = tmp_path / "hostile-path"
+    hostile.mkdir(mode=0o700)
+    fake_bash = hostile / "bash"
+    _write_executable(
+        fake_bash,
+        f"#!/usr/bin/bash -p\nprintf '%s\\n' PATH >> {shlex.quote(str(canary))}\nexit 91\n",
+    )
+    bash_env = tmp_path / "bash-env"
+    bash_env.write_text(
+        f"printf '%s\\n' BASH_ENV >> {shlex.quote(str(canary))}\nexit 92\n",
+        encoding="utf-8",
+    )
+
+    result = _run_bootstrap(
+        python,
+        venv,
+        extra_env={
+            "PATH": str(hostile),
+            "BASH_ENV": str(bash_env),
+            "ENV": str(bash_env),
+            "POSIXLY_CORRECT": "1",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not canary.exists()
     assert venv.is_dir()
 
 

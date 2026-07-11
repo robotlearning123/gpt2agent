@@ -180,9 +180,56 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        with:
-          python-version: "3.12.13"
+      - name: Install reviewed Astral CPython 3.12.13
+        run: |
+          set -euo pipefail
+          set +o posix
+          unset POSIXLY_CORRECT
+          ASSET_NAME=cpython-3.12.13+20260623-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+          ASSET_URL=https://github.com/astral-sh/python-build-standalone/releases/download/20260623/cpython-3.12.13%2B20260623-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+          RUNTIME_PARENT=
+          RUNTIME_PARENT_IDENTITY=
+          ARCHIVE=
+          INSTALL_SUCCEEDED=0
+          cleanup_reviewed_python_install() {
+            status=$?
+            trap - EXIT HUP INT TERM
+            if [ -n "$ARCHIVE" ] && [ -f "$ARCHIVE" ] && [ ! -L "$ARCHIVE" ]; then
+              /usr/bin/rm -f -- "$ARCHIVE" || status=1
+            fi
+            if [ "$INSTALL_SUCCEEDED" != 1 ] && [ -n "$RUNTIME_PARENT" ]; then
+              case "$RUNTIME_PARENT" in
+                "$HOME"/.gpt2agent-reviewed-python.*) ;;
+                *) exit 97 ;;
+              esac
+              if [ -d "$RUNTIME_PARENT" ] && [ ! -L "$RUNTIME_PARENT" ] \
+                && [ "$(/usr/bin/stat -c '%d:%i' -- "$RUNTIME_PARENT")" = "$RUNTIME_PARENT_IDENTITY" ]; then
+                /usr/bin/chmod -R u+w -- "$RUNTIME_PARENT" || status=1
+                /usr/bin/rm -rf -- "$RUNTIME_PARENT" || status=1
+              fi
+            fi
+            exit "$status"
+          }
+          trap cleanup_reviewed_python_install EXIT
+          trap 'exit 130' HUP INT TERM
+          RUNTIME_PARENT="$(/usr/bin/mktemp -d -- "$HOME/.gpt2agent-reviewed-python.XXXXXXXX")"
+          /usr/bin/chmod 700 -- "$RUNTIME_PARENT"
+          RUNTIME_PARENT_IDENTITY="$(/usr/bin/stat -c '%d:%i' -- "$RUNTIME_PARENT")"
+          ARCHIVE="$RUNTIME_PARENT/$ASSET_NAME"
+          /usr/bin/curl --fail --location --proto '=https' --proto-redir '=https' \
+            --tlsv1.2 --output "$ARCHIVE" "$ASSET_URL"
+          RUNTIME_BASE="$(scripts/install_account_gate_runtime.sh \
+            --archive "$ARCHIVE" \
+            --destination "$RUNTIME_PARENT/cpython-3.12.13")"
+          test "$RUNTIME_BASE" = "$RUNTIME_PARENT/cpython-3.12.13"
+          "$RUNTIME_BASE/bin/python3.12" -I -S -B -c \
+            'import os, sys; assert (sys.implementation.name, sys.version_info[:3], sys.platform, os.uname().machine) == ("cpython", (3, 12, 13), "linux", "x86_64")'
+          printf 'GPT2AGENT_REVIEWED_PYTHON_BASE=%s\n' "$RUNTIME_BASE" >> "$GITHUB_ENV"
+          printf 'GPT2AGENT_REVIEWED_PYTHON_PARENT=%s\n' "$RUNTIME_PARENT" >> "$GITHUB_ENV"
+          printf 'GPT2AGENT_REVIEWED_PYTHON_PARENT_IDENTITY=%s\n' \
+            "$RUNTIME_PARENT_IDENTITY" >> "$GITHUB_ENV"
+          printf '%s\n' "$RUNTIME_BASE/bin" >> "$GITHUB_PATH"
+          INSTALL_SUCCEEDED=1
 
       - name: Install locked validation toolchain
         env:
@@ -197,7 +244,7 @@ jobs:
           set -euo pipefail
           BUILD_VENV="$RUNNER_TEMP/gpt2agent-build"
           rm -rf "$BUILD_VENV"
-          python -m venv "$BUILD_VENV"
+          "$GPT2AGENT_REVIEWED_PYTHON_BASE/bin/python3.12" -m venv "$BUILD_VENV"
           "$BUILD_VENV/bin/python" -m pip install --require-hashes --only-binary=:all: -r requirements-build.txt --no-cache-dir
           "$BUILD_VENV/bin/python" -m pip check
           "$BUILD_VENV/bin/python" -m pip --version
@@ -302,6 +349,29 @@ jobs:
           path: release-evidence/release-workflow-artifacts.json
           overwrite: true
           if-no-files-found: error
+
+      - name: Clean reviewed CPython runtime
+        if: always()
+        run: |
+          set -euo pipefail
+          set +o posix
+          unset POSIXLY_CORRECT
+          if [ -z "${GPT2AGENT_REVIEWED_PYTHON_PARENT-}" ] \
+            && [ -z "${GPT2AGENT_REVIEWED_PYTHON_PARENT_IDENTITY-}" ]; then
+            exit 0
+          fi
+          : "${GPT2AGENT_REVIEWED_PYTHON_PARENT:?reviewed CPython parent is unavailable}"
+          : "${GPT2AGENT_REVIEWED_PYTHON_PARENT_IDENTITY:?reviewed CPython parent identity is unavailable}"
+          case "$GPT2AGENT_REVIEWED_PYTHON_PARENT" in
+            "$HOME"/.gpt2agent-reviewed-python.*) ;;
+            *) exit 97 ;;
+          esac
+          test -d "$GPT2AGENT_REVIEWED_PYTHON_PARENT"
+          test ! -L "$GPT2AGENT_REVIEWED_PYTHON_PARENT"
+          test "$(/usr/bin/stat -c '%d:%i' -- "$GPT2AGENT_REVIEWED_PYTHON_PARENT")" = \
+            "$GPT2AGENT_REVIEWED_PYTHON_PARENT_IDENTITY"
+          /usr/bin/chmod -R u+w -- "$GPT2AGENT_REVIEWED_PYTHON_PARENT"
+          /usr/bin/rm -rf -- "$GPT2AGENT_REVIEWED_PYTHON_PARENT"
 
   pypi-publish:
     name: Publish to PyPI

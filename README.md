@@ -386,24 +386,42 @@ not be group/world-writable or a symlink. The operator accepts only the pinned
 archive; its reviewed executable and full-tree digests are constants rather than
 caller-provided trust assertions.
 
-There are two explicit external provenance boundaries. Hosted CI trusts the
-pinned `actions/setup-python` action on its isolated runner, immediately copies
-the complete 3.12.13 runtime out of the writable tool cache into an owner-private
-directory below the canonical runner home, and binds the copy to the source
-executable digest. For the local operator, v0.0.12 pins Astral's attested
-[`python-build-standalone` 20260510 release](https://github.com/astral-sh/python-build-standalone/releases/tag/20260510),
-asset `cpython-3.12.13+20260510-x86_64-unknown-linux-gnu-install_only.tar.gz`.
-The archive SHA-256 is
-`e7332b4b4bb85006deb48d251c786a04c14de104c9b3a006b33457a4a604b8bc`;
-the normalized executable SHA-256 is
-`f7014f68e3c8f180811740735cf1dd5c28be6cff84db11d0ced2a8cd039670a0`;
-and the normalized full-tree SHA-256 is
-`d3a6bd32b73612fce20dbfe1eebd33f2b6ebd1b42b13aa8b1fd1549065be2cc0`.
-This boundary trusts Astral's published build workflow and attested runner in
-addition to the upstream CPython source; it does not claim a PSF binary build.
-Set only `GPT2AGENT_TRUSTED_PYTHON_ARCHIVE` to a protected local copy of that
-exact asset. The reviewed extractor authenticates the bytes, topology, symlink
-map, executable, and complete normalized tree before use.
+Hosted CI and the local operator share one explicit external provenance
+boundary: Astral's immutable
+[`python-build-standalone` `20260623` release](https://github.com/astral-sh/python-build-standalone/releases/tag/20260623).
+The reviewed CPython 3.12.13 for Linux x86_64 source is
+`cpython-3.12.13+20260623-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz`.
+It is exactly 34,159,178 bytes and its archive SHA-256 is
+`10a452caac7041357805f0c19a60576df53f1ab06d1abfc9200f1f0157cb3bd1`.
+After extracting with the archive's single `python/` prefix stripped, the
+canonical `bin/python3.12` SHA-256 is
+`9544d2a29138833e6177d45dbc57468d37710b5080c901fbb579d53f251cdd6f`.
+The installed normalized `hash_runtime_tree.sh` v1 full-tree SHA-256 is
+`7df598dcc28ad5583fd65f49da6a2ff6460030441070d5c7a105df7dd5294f79`.
+GitHub marks the release immutable, and its artifact attestation binds the
+publisher workflow to the archive digest. That attestation is an upstream
+publisher boundary, not an independent reproducible-build proof.
+
+Download that exact asset over HTTPS, fetch its SLSA bundle from GitHub's
+artifact-attestation API, and verify it with a Sigstore-compatible verifier.
+The verification must enforce certificate identity
+`https://github.com/astral-sh/python-build-standalone/.github/workflows/release.yml@refs/heads/main`,
+OIDC issuer `https://token.actions.githubusercontent.com`, SLSA provenance v1,
+and the archive's subject digest. For example, use `cosign
+verify-blob-attestation --bundle "$SLSA_BUNDLE" --certificate-identity
+"$EXPECTED_IDENTITY" --certificate-oidc-issuer
+https://token.actions.githubusercontent.com --type slsaprovenance1 "$ARCHIVE"`.
+Then use `scripts/install_account_gate_runtime.sh --archive "$ARCHIVE"
+--destination "$PRIVATE_PARENT/cpython-3.12.13"`. The installer fails closed on
+the byte size, archive digest, executable digest, runtime identity, unsafe path
+ancestry, and reviewed publication races; it owns the archive's prefix
+stripping. The boundary assumes a trusted operator machine with no malicious
+concurrent same-UID writer. Set
+`GPT2AGENT_TRUSTED_PYTHON_BASE` to its sole stdout line and set
+`GPT2AGENT_TRUSTED_PYTHON_SHA256` to the executable digest above. Hosted CI uses
+the same installer and exact URL instead of trusting a nominal setup-python
+patch label. These values authorize only this artifact, not an arbitrary
+CPython 3.12.13 installation.
 The bootstrap then accepts only the reviewed nine-distribution closure, exact
 hashes, binary wheels, and the official PyPI index, and verifies every installed
 file and import origin. It emits only the trusted `site-packages` path on stdout.
@@ -433,11 +451,12 @@ Actions must be able to fetch that immutable action revision.
 
 The trusted release machine must provide the separately reviewed governance
 policy, an authenticated `/usr/bin/gh`, the reviewed Pro account login, and a
-local copy of the exact pinned Astral 20260510 CPython 3.12.13 Linux x86_64
-install-only archive. The reviewed extractor pins its size, SHA-256, member
-topology, symlink map, executable SHA-256, and normalized
-`hash_runtime_tree.sh` v1 full-tree SHA-256. It extracts only into an
-owner-private disposable directory; callers cannot substitute trust hashes.
+protected local copy of the exact pinned Astral 20260623 CPython 3.12.13 Linux
+x86_64 stripped install-only archive. The reviewed installer pins its size,
+SHA-256, member boundary, executable SHA-256, runtime identity, and atomic
+publication. The operator additionally requires the normalized
+`hash_runtime_tree.sh` v1 digest above before account access; callers cannot
+substitute trust hashes.
 
 Create a private evidence directory, then delegate the complete account gate and
 tag handoff to the reviewed operator. It re-executes under `env -i` and Bash

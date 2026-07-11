@@ -134,17 +134,27 @@ they are not presented as a supported MCP audio capability.
 
 The account gate must run on a trusted local machine from the clean repository
 root at the exact candidate commit. Follow the complete build-once operator
-procedure in the README. First copy CPython 3.12.13 for Linux x86_64 from a
-the exact Astral 20260510 install-only archive pinned in the README. Set
-`GPT2AGENT_TRUSTED_PYTHON_ARCHIVE` to a protected local copy; do not provide
-runtime hashes from the operator environment. The reviewed extractor pins the
-archive size and SHA-256, topology, symlink map, executable SHA-256, and complete
-normalized tree SHA-256, then extracts into an owner-private disposable
-directory. Every runtime ancestor to `/` must be owned by root or the operator
-and must not be group/world-writable or a symlink. Hosted CI retains its distinct
-pinned `actions/setup-python` and isolated-runner provenance boundary. The
-reviewed hash lock allows only the exact nine-distribution account-gate closure,
-binary wheels, and the official PyPI index; the verifier then checks every installed
+procedure in the README. Obtain the separately reviewed
+CPython 3.12.13 for Linux x86_64 runtime artifact as a protected local file.
+For this release the sole reviewed source is
+Astral's immutable `python-build-standalone` `20260623` release and its
+`cpython-3.12.13+20260623-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz`
+asset. Verify its published size, SHA-256, and GitHub artifact attestation, then
+install it with `scripts/install_account_gate_runtime.sh`; do not extract it with
+an ad hoc command or substitute a nominal setup-python patch label. The helper
+checks the archive and executable digests, exact CPython identity, secure path
+ancestry, and race-safe publication before returning the trusted base. Pass its
+reviewed executable checksum binding to `scripts/bootstrap_account_gate.sh`;
+calculating a checksum from an unverified ambient Python is not provenance.
+The operator also checks the installed normalized `hash_runtime_tree.sh` v1
+digest `7df598dcc28ad5583fd65f49da6a2ff6460030441070d5c7a105df7dd5294f79`
+before account access. This boundary assumes a trusted machine with no malicious
+concurrent same-UID writer.
+Every runtime ancestor to `/` must be owned by root or the operator and must not
+be group/world-writable or a symlink. Hosted CI uses the same Astral artifact and
+installer. The reviewed hash lock allows only the exact nine-distribution
+account-gate closure, binary wheels, and the official PyPI index; the verifier
+then checks every installed
 distribution, file, owner/mode, import origin, and runtime path under
 `python -I -S -B`.
 

@@ -689,7 +689,7 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert 'GH_BIN=' in account_operator
     assert 'GIT_BIN=' in account_operator
     assert 'run_gh pr view "$PR_NUMBER" --repo "$REPOSITORY"' in account_operator
-    assert account_operator.startswith("#!/bin/bash -p\n")
+    assert account_operator.startswith("#!/usr/bin/bash -p\n")
     assert "exec /usr/bin/env -i" in account_operator
     assert 'fetch --no-tags --no-write-fetch-head' in account_operator
     assert "\ngit switch main\n" not in readme
@@ -697,16 +697,26 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert 'merge-base --is-ancestor' in account_operator
     assert '"$RELEASE_SHA" refs/release-verification/main' in account_operator
     assert "scripts/bootstrap_account_gate.sh" in account_operator
-    assert "/usr/bin/python3.12" in account_operator
+    assert "/usr/bin/python3.12" not in account_operator
+    assert "scripts/install_account_gate_runtime.sh" in account_operator
     assert "CPython 3.12.13 for Linux x86_64" in readme
     assert "GPT2AGENT_TRUSTED_PYTHON_ARCHIVE" in readme
     assert "python-build-standalone" in readme
-    assert "20260510" in readme
-    assert "e7332b4b4bb85006deb48d251c786a04c14de104c9b3a006b33457a4a604b8bc" in readme
-    assert "f7014f68e3c8f180811740735cf1dd5c28be6cff84db11d0ced2a8cd039670a0" in readme
-    assert "d3a6bd32b73612fce20dbfe1eebd33f2b6ebd1b42b13aa8b1fd1549065be2cc0" in readme
+    assert "20260623" in readme
+    assert "install_only_stripped.tar.gz" in readme
+    assert "34,159,178" in readme
+    assert "10a452caac7041357805f0c19a60576df53f1ab06d1abfc9200f1f0157cb3bd1" in readme
+    assert "9544d2a29138833e6177d45dbc57468d37710b5080c901fbb579d53f251cdd6f" in readme
+    assert "7df598dcc28ad5583fd65f49da6a2ff6460030441070d5c7a105df7dd5294f79" in readme
+    assert "immutable" in readme
+    assert "attestation" in readme
+    assert "scripts/install_account_gate_runtime.sh" in readme
     assert "CPython 3.12.13 for Linux x86_64" in migration
-    assert "GPT2AGENT_TRUSTED_PYTHON_ARCHIVE" in migration
+    assert "scripts/install_account_gate_runtime.sh" in migration
+    assert "Astral" in migration
+    assert "20260510" not in readme
+    assert "20260510" not in migration
+    assert "20260510" not in account_operator
     assert '"$VERIFIER_PYTHON" -I -S -B' in account_operator
     assert "scripts/verify_main_ci.py" in account_operator
     assert '--commit "$RELEASE_SHA"' in account_operator

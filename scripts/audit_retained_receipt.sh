@@ -1,18 +1,26 @@
-#!/bin/bash -p
+#!/usr/bin/bash -p
 # Verify retained private account evidence against the exact public tag object.
 
+set +o posix
+unset POSIXLY_CORRECT
 set -euo pipefail
 set +x
 PATH=/usr/bin:/bin
 export PATH
+readonly PATH
 hash -r
+LANG=C.UTF-8
+LC_ALL=C.UTF-8
+export LANG LC_ALL
+readonly LANG LC_ALL
+unset BASH_ENV ENV CDPATH GLOBIGNORE POSIXLY_CORRECT
 umask 077
 
 if [[ ${GPT2AGENT_RECEIPT_AUDIT_CLEAN_ENV-} != 1 ]]; then
   exec /usr/bin/env -i \
     GPT2AGENT_RECEIPT_AUDIT_CLEAN_ENV=1 \
     LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/bin:/bin \
-    /bin/bash -p "$0" "$@"
+    /usr/bin/bash -p "$0" "$@"
 fi
 unset GPT2AGENT_RECEIPT_AUDIT_CLEAN_ENV
 
@@ -35,11 +43,10 @@ OPERATOR_HOME=
 EVIDENCE_DIRECTORY=
 TRUSTED_PYTHON_ARCHIVE=
 GIT_BIN=
-SYSTEM_PYTHON=/usr/bin/python3.12
-TRUSTED_PYTHON_SHA256=f7014f68e3c8f180811740735cf1dd5c28be6cff84db11d0ced2a8cd039670a0
-TRUSTED_PYTHON_TREE_SHA256=d3a6bd32b73612fce20dbfe1eebd33f2b6ebd1b42b13aa8b1fd1549065be2cc0
-TAGGED_EXTRACTOR_SHA256=eeab65a476d1b61b537962819599c839dd05967e6742a591a94acbb1f7000b84
-TAGGED_HASHER_SHA256=a53e38f11121dd8b29ce4bf89f502d16c1d717ad835a78563155138dc6e77c36
+TRUSTED_PYTHON_SHA256=9544d2a29138833e6177d45dbc57468d37710b5080c901fbb579d53f251cdd6f
+TRUSTED_PYTHON_TREE_SHA256=7df598dcc28ad5583fd65f49da6a2ff6460030441070d5c7a105df7dd5294f79
+TAGGED_INSTALLER_SHA256=4674e9af4386a7fd19a06fd971ab78b2239cb4dfa0df1ad644f798728a726a81
+TAGGED_HASHER_SHA256=e8116f131dddf68e310058dd80fd1c37c9b1e0b7cc5f1c962ac6c966752ba219
 TAGGED_TAG_VERIFIER_SHA256=b187dd4e7646b9798561410f20607f4802d4ba0b6d2dd1662f223d80964fad02
 
 while (($#)); do
@@ -152,7 +159,6 @@ canonical_private_file() {
 }
 
 GIT_BIN=$(trusted_system_executable "$GIT_BIN" /usr/bin/git)
-SYSTEM_PYTHON=$(trusted_system_executable "$SYSTEM_PYTHON" /usr/bin/python3.12)
 OPERATOR_HOME=$(canonical_directory "$OPERATOR_HOME")
 EVIDENCE_DIRECTORY=$(canonical_directory "$EVIDENCE_DIRECTORY")
 TRUSTED_PYTHON_ARCHIVE=$(canonical_private_file \
@@ -234,25 +240,27 @@ extract_tagged_file() {
   /usr/bin/chmod "$output_mode" -- "$output"
 }
 
-TAGGED_EXTRACTOR="$AUDIT_ROOT/extract_trusted_python.py"
+TAGGED_INSTALLER="$AUDIT_ROOT/install_account_gate_runtime.sh"
 TAGGED_HASHER="$AUDIT_ROOT/hash_runtime_tree.sh"
 TAGGED_TAG_VERIFIER="$AUDIT_ROOT/release_tag_metadata.py"
-extract_tagged_file scripts/extract_trusted_python.py \
-  "$TAGGED_EXTRACTOR" 600 19030 "$TAGGED_EXTRACTOR_SHA256"
+extract_tagged_file scripts/install_account_gate_runtime.sh \
+  "$TAGGED_INSTALLER" 700 10123 "$TAGGED_INSTALLER_SHA256"
 extract_tagged_file scripts/hash_runtime_tree.sh \
-  "$TAGGED_HASHER" 700 3976 "$TAGGED_HASHER_SHA256"
+  "$TAGGED_HASHER" 700 4103 "$TAGGED_HASHER_SHA256"
 extract_tagged_file scripts/release_tag_metadata.py \
   "$TAGGED_TAG_VERIFIER" 600 17404 "$TAGGED_TAG_VERIFIER_SHA256"
 
 TRUSTED_PYTHON_BASE="$AUDIT_ROOT/cpython-3.12.13-linux-x86_64"
-/usr/bin/env -i \
+INSTALLED_BASE=$(/usr/bin/env -i \
   HOME=/nonexistent LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/bin:/bin \
-  "$SYSTEM_PYTHON" -I -S -B "$TAGGED_EXTRACTOR" \
-  --archive "$TRUSTED_PYTHON_ARCHIVE" --destination "$TRUSTED_PYTHON_BASE" \
+  /usr/bin/bash -p "$TAGGED_INSTALLER" \
+  --archive "$TRUSTED_PYTHON_ARCHIVE" --destination "$TRUSTED_PYTHON_BASE") \
   || die "reviewed CPython archive could not be installed"
+[[ $INSTALLED_BASE == "$TRUSTED_PYTHON_BASE" ]] \
+  || die "reviewed CPython installer returned an unexpected path"
 RUNTIME_TREE_SHA256=$(/usr/bin/env -i \
   LANG=C LC_ALL=C PATH=/usr/bin:/bin \
-  /bin/bash -p "$TAGGED_HASHER" "$TRUSTED_PYTHON_BASE") \
+  /usr/bin/bash -p "$TAGGED_HASHER" "$TRUSTED_PYTHON_BASE") \
   || die "installed CPython runtime tree could not be verified"
 [[ $RUNTIME_TREE_SHA256 == "$TRUSTED_PYTHON_TREE_SHA256" ]] \
   || die "installed CPython runtime tree digest does not match"

@@ -1,10 +1,17 @@
-#!/bin/bash -p
+#!/usr/bin/bash -p
+set +o posix
+unset POSIXLY_CORRECT
 set -euo pipefail
 
 PATH=/usr/bin:/bin
 export PATH
+readonly PATH
 hash -r
-
+LANG=C
+LC_ALL=C
+export LANG LC_ALL
+readonly LANG LC_ALL
+unset BASH_ENV ENV CDPATH GLOBIGNORE POSIXLY_CORRECT
 umask 077
 
 usage() {
@@ -16,6 +23,9 @@ die() {
   echo "account-gate bootstrap: $*" >&2
   exit 1
 }
+
+[[ "$(/usr/bin/uname -s)" == Linux ]] \
+  || die "the trusted account gate is supported only on Linux"
 
 PYTHON=
 PYTHON_SHA256=

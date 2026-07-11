@@ -17,25 +17,29 @@ OPERATOR = PROJECT_ROOT / "scripts" / "audit_retained_receipt.sh"
 def test_audit_operator_uses_closed_environment_and_complete_runtime_tree() -> None:
     source = OPERATOR.read_text(encoding="utf-8")
 
-    assert source.startswith("#!/bin/bash -p\n")
+    assert source.startswith("#!/usr/bin/bash -p\n")
     assert source.index("exec /usr/bin/env -i") < source.index("while (($#)); do")
-    assert "/bin/bash -p \"$TAGGED_HASHER\"" in source
+    assert "/usr/bin/bash -p \"$TAGGED_HASHER\"" in source
     assert "--trusted-python-archive" in source
-    assert "extract_trusted_python.py" in source
+    assert "install_account_gate_runtime.sh" in source
+    assert "extract_trusted_python.py" not in source
     assert "RUNTIME_TREE_SHA256" in source
-    assert "/usr/bin/python3.12" in source
+    assert "/usr/bin/python3.12" not in source
     assert "/usr/bin/git" in source
     assert "run_git" in source
     assert "run_python_clean" in source
     assert "tagged verifier digest is not pinned" in source
     assert "tagged verifier size is not pinned" in source
     assert "-(alpha|beta|rc)[0-9]+" in source
+    assert "9544d2a29138833e6177d45dbc57468d37710b5080c901fbb579d53f251cdd6f" in source
+    assert "7df598dcc28ad5583fd65f49da6a2ff6460030441070d5c7a105df7dd5294f79" in source
+    assert "20260510" not in source
 
 
 def test_audit_operator_pins_every_executed_tagged_verifier() -> None:
     source = OPERATOR.read_text(encoding="utf-8")
     pins = {
-        "TAGGED_EXTRACTOR_SHA256": PROJECT_ROOT / "scripts" / "extract_trusted_python.py",
+        "TAGGED_INSTALLER_SHA256": PROJECT_ROOT / "scripts" / "install_account_gate_runtime.sh",
         "TAGGED_HASHER_SHA256": PROJECT_ROOT / "scripts" / "hash_runtime_tree.sh",
         "TAGGED_TAG_VERIFIER_SHA256": PROJECT_ROOT / "scripts" / "release_tag_metadata.py",
     }

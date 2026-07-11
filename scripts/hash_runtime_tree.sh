@@ -1,15 +1,20 @@
-#!/bin/bash -p
+#!/usr/bin/bash -p
 # Produce the v1 complete-tree digest for a reviewed CPython account runtime.
 
+set +o posix
+unset POSIXLY_CORRECT
 set -euo pipefail
 
 LANG=C
 LC_ALL=C
 export LANG LC_ALL
+readonly LANG LC_ALL
 set +x
 PATH=/usr/bin:/bin
 export PATH
+readonly PATH
 hash -r
+unset BASH_ENV ENV CDPATH GLOBIGNORE POSIXLY_CORRECT
 
 die() {
   printf 'runtime tree hash: %s\n' "$*" >&2

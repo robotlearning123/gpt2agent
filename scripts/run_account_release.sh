@@ -1,11 +1,19 @@
-#!/bin/bash -p
+#!/usr/bin/bash -p
 # Run the private account gate and hand its exact evidence to the tag coordinator.
 
+set +o posix
+unset POSIXLY_CORRECT
 set -euo pipefail
 set +x
 PATH=/usr/bin:/bin
 export PATH
+readonly PATH
 hash -r
+LANG=C.UTF-8
+LC_ALL=C.UTF-8
+export LANG LC_ALL
+readonly LANG LC_ALL
+unset BASH_ENV ENV CDPATH GLOBIGNORE POSIXLY_CORRECT
 umask 077
 
 # Privileged Bash ignores BASH_ENV and imported functions. Re-exec once more so
@@ -14,7 +22,7 @@ if [[ ${GPT2AGENT_ACCOUNT_RELEASE_CLEAN_ENV-} != 1 ]]; then
   exec /usr/bin/env -i \
     GPT2AGENT_ACCOUNT_RELEASE_CLEAN_ENV=1 \
     LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/bin:/bin \
-    /bin/bash -p "$0" "$@"
+    /usr/bin/bash -p "$0" "$@"
 fi
 unset GPT2AGENT_ACCOUNT_RELEASE_CLEAN_ENV
 
@@ -41,12 +49,11 @@ TRUSTED_PYTHON_ARCHIVE=
 GOVERNANCE_POLICY=
 GH_BIN=
 GIT_BIN=
-SYSTEM_PYTHON=/usr/bin/python3.12
 
-# Independently recorded from the pinned Astral 20260510 CPython 3.12.13
-# install-only asset. The tagged extractor also pins the complete archive.
-TRUSTED_PYTHON_SHA256=f7014f68e3c8f180811740735cf1dd5c28be6cff84db11d0ced2a8cd039670a0
-TRUSTED_PYTHON_TREE_SHA256=d3a6bd32b73612fce20dbfe1eebd33f2b6ebd1b42b13aa8b1fd1549065be2cc0
+# Independently recorded from the immutable Astral 20260623 stripped
+# CPython 3.12.13 asset. The installer pins the complete archive and identity.
+TRUSTED_PYTHON_SHA256=9544d2a29138833e6177d45dbc57468d37710b5080c901fbb579d53f251cdd6f
+TRUSTED_PYTHON_TREE_SHA256=7df598dcc28ad5583fd65f49da6a2ff6460030441070d5c7a105df7dd5294f79
 
 while (($#)); do
   case "$1" in
@@ -163,7 +170,6 @@ canonical_private_file() {
 CURRENT_UID=$(/usr/bin/id -u)
 GH_BIN=$(trusted_system_executable "$GH_BIN" /usr/bin/gh)
 GIT_BIN=$(trusted_system_executable "$GIT_BIN" /usr/bin/git)
-SYSTEM_PYTHON=$(trusted_system_executable "$SYSTEM_PYTHON" /usr/bin/python3.12)
 OPERATOR_HOME=$(canonical_directory "$OPERATOR_HOME")
 EVIDENCE_DIRECTORY=$(canonical_directory "$EVIDENCE_DIRECTORY")
 if [[ -z $CODEX_HOME ]]; then CODEX_HOME="$OPERATOR_HOME/.codex"; fi
@@ -319,19 +325,21 @@ done <"$INDEX_STATE"
 /usr/bin/rm -- "$INDEX_STATE"
 
 # Install only from the independently reviewed, byte-pinned archive. The
-# checkout's extractor authenticates and normalizes it; the separate tree
-# hasher below independently binds the complete installed runtime.
+# checkout's shell installer owns snapshotting, prefix stripping, validation,
+# staged no-clobber publication, and cleanup. The separate tree hasher binds
+# every installed path before the account credential is used.
 TRUSTED_PYTHON_BASE="$RUNTIME_ROOT/cpython-3.12.13-linux-x86_64"
-/usr/bin/env -i \
+INSTALLED_BASE=$(/usr/bin/env -i \
   HOME=/nonexistent LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/bin:/bin \
-  "$SYSTEM_PYTHON" -I -S -B \
-  "$CHECKOUT/scripts/extract_trusted_python.py" \
+  /usr/bin/bash -p "$CHECKOUT/scripts/install_account_gate_runtime.sh" \
   --archive "$TRUSTED_PYTHON_ARCHIVE" \
-  --destination "$TRUSTED_PYTHON_BASE" \
+  --destination "$TRUSTED_PYTHON_BASE") \
   || die "reviewed CPython archive could not be installed"
+[[ $INSTALLED_BASE == "$TRUSTED_PYTHON_BASE" ]] \
+  || die "reviewed CPython installer returned an unexpected path"
 RUNTIME_TREE_SHA256=$(/usr/bin/env -i \
   LANG=C LC_ALL=C PATH=/usr/bin:/bin \
-  /bin/bash -p "$CHECKOUT/scripts/hash_runtime_tree.sh" \
+  /usr/bin/bash -p "$CHECKOUT/scripts/hash_runtime_tree.sh" \
   "$TRUSTED_PYTHON_BASE") \
   || die "installed CPython runtime tree could not be verified"
 [[ $RUNTIME_TREE_SHA256 == "$TRUSTED_PYTHON_TREE_SHA256" ]] \
@@ -354,7 +362,7 @@ VENV_PARENT="$RUNTIME_ROOT/account-runtime"
 VENV="$VENV_PARENT/venv"
 SITE_PACKAGES=$(/usr/bin/env -i \
   LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/bin:/bin \
-  /bin/bash -p "$CHECKOUT/scripts/bootstrap_account_gate.sh" \
+  /usr/bin/bash -p "$CHECKOUT/scripts/bootstrap_account_gate.sh" \
   --python "$TRUSTED_PYTHON" \
   --python-sha256 "$TRUSTED_PYTHON_SHA256" \
   --venv "$VENV")
@@ -439,7 +447,7 @@ EVIDENCE_STAGE=
 
 /usr/bin/env -i \
   HOME="$OPERATOR_HOME" LANG=C.UTF-8 LC_ALL=C.UTF-8 PATH=/usr/bin:/bin \
-  /bin/bash -p "$CHECKOUT/scripts/create_release_tag.sh" \
+  /usr/bin/bash -p "$CHECKOUT/scripts/create_release_tag.sh" \
   --python "$VERIFIER_PYTHON" --gh "$GH_BIN" --git "$GIT_BIN" \
   --governance-policy "$GOVERNANCE_POLICY" \
   --checkout "$CHECKOUT" --dist "$DIST" \

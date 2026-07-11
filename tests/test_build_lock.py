@@ -112,7 +112,7 @@ def _assert_fresh_locked_environment(job: str) -> None:
     assert 'PIP_NO_INPUT: "1"' in job
     assert 'BUILD_VENV="$RUNNER_TEMP/' in job
     assert 'rm -rf "$BUILD_VENV"' in job
-    assert 'python -m venv "$BUILD_VENV"' in job
+    assert '"$GPT2AGENT_REVIEWED_PYTHON_BASE/bin/python3.12" -m venv "$BUILD_VENV"' in job
     assert (
         '"$BUILD_VENV/bin/python" -m pip install --require-hashes '
         '--only-binary=:all: -r requirements-build.txt'
@@ -120,6 +120,21 @@ def _assert_fresh_locked_environment(job: str) -> None:
     assert '"$BUILD_VENV/bin/python" -m pip check' in job
     assert '"$BUILD_VENV/bin/python" -m pip --version' in job
     assert "pip install --upgrade" not in job
+
+
+def _assert_reviewed_cpython(job: str) -> None:
+    assert "scripts/install_account_gate_runtime.sh" in job
+    assert "astral-sh/python-build-standalone/releases/download/20260623/" in job
+    assert (
+        "cpython-3.12.13%2B20260623-x86_64-unknown-linux-gnu-"
+        "install_only_stripped.tar.gz" in job
+    )
+    assert '"$RUNTIME_BASE/bin/python3.12" -I -S -B -c' in job
+    assert '("cpython", (3, 12, 13), "linux", "x86_64")' in job
+    assert "GPT2AGENT_REVIEWED_PYTHON_BASE" in job
+    assert "Clean reviewed CPython runtime" in job
+    assert job.count("set +o posix") >= 2
+    assert job.count("unset POSIXLY_CORRECT") >= 2
 
 
 def test_build_system_and_direct_builder_inputs_use_exact_approved_pins() -> None:
@@ -170,7 +185,8 @@ def test_package_ci_uses_the_locked_builder_and_reproducible_build_settings() ->
     package = _workflow_job(CI_WORKFLOW, "package")
 
     assert "runs-on: ubuntu-24.04" in package
-    assert 'python-version: "3.12.13"' in package
+    assert 'python-version: "3.12.13"' not in package
+    _assert_reviewed_cpython(package)
     _assert_fresh_locked_environment(package)
     assert 'SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA")"' in package
     assert "PYTHONHASHSEED=0" in package
@@ -195,7 +211,8 @@ def test_release_relay_validates_with_the_lock_without_rebuilding() -> None:
     workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
     assert "runs-on: ubuntu-24.04" in build
-    assert 'python-version: "3.12.13"' in build
+    assert 'python-version: "3.12.13"' not in build
+    _assert_reviewed_cpython(build)
     _assert_fresh_locked_environment(build)
     assert (
         'run: |\n          "$BUILD_VENV/bin/python" -m twine check --strict dist/*'
