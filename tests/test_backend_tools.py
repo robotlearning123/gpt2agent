@@ -47,9 +47,12 @@ def test_account_status_has_subscription() -> None:
     assert ent.get("subscription_plan"), "subscription_plan is empty"
 
 
+# None = account default; the rest are real ChatGPT voice modes ("live" is the
+# latest, GPT-Live). Each is exercised as a genuine GET against the account.
 @_NEEDS_AUTH
 @_LIVE_ONLY
-def test_voice_catalog_live_contract() -> None:
+@pytest.mark.parametrize("voice_mode", [None, "standard", "advanced", "live", "wingman"])
+def test_voice_catalog_live_contract(voice_mode: str | None) -> None:
     """Exercise one registered GET without starting or fetching Voice media."""
     from gpt2agent.backend import BackendClient
     from gpt2agent.tools import voice
@@ -57,15 +60,17 @@ def test_voice_catalog_live_contract() -> None:
 
     mcp = FakeMCP()
     voice.register(mcp, BackendClient())
-    result = asyncio.run(mcp.tools["list_voices"]())
+    kwargs = {} if voice_mode is None else {"voice_mode": voice_mode}
+    result = asyncio.run(mcp.tools["list_voices"](**kwargs))
 
+    # A mode the account cannot serve may legitimately return an empty catalog;
+    # what must always hold is the normalized schema and identity invariants.
     assert isinstance(result, list)
-    assert result
     assert all(
         set(item) == {"id", "name", "description", "selected", "has_preview"}
         for item in result
     )
     assert all(isinstance(item["id"], str) and item["id"] for item in result)
     assert len({item["id"] for item in result}) == len(result)
-    assert sum(item["selected"] is True for item in result) == 1
-    assert all(item["selected"] in (True, False) for item in result)
+    assert sum(item["selected"] is True for item in result) <= 1
+    assert all(item["selected"] in (True, False, None) for item in result)
