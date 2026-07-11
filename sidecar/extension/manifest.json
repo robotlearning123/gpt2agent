@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "gpt2agent GPT-Live bridge",
+  "version": "0.1.0",
+  "description": "Tap the real GPT-Live voice transcript and route each human utterance to our coding agent (localhost gateway). Voice stays in the browser; only text crosses to the agent.",
+  "permissions": [],
+  "host_permissions": ["http://127.0.0.1:8742/*"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*"],
+      "js": ["hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
+    {
+      "matches": ["https://chatgpt.com/*"],
+      "js": ["relay.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ]
+}
