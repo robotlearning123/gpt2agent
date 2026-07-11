@@ -155,11 +155,6 @@ if ! "$PIPX_APP" --version >/dev/null 2>&1; then
   err "The new pipx environment's gpt2agent app failed its version smoke test."
   exit 1
 fi
-if [[ -n "$PIPX_BACKUP_DIR" ]]; then
-  rm -rf -- "$PIPX_BACKUP_DIR"
-  PIPX_BACKUP_DIR=""
-  trap - EXIT HUP INT TERM
-fi
 ok "gpt2agent installed"
 if ! command -v gpt2agent >/dev/null 2>&1; then
   info "gpt2agent is installed at $PIPX_APP but its app directory is not on PATH."
@@ -186,6 +181,11 @@ if [[ $REGISTER -eq 1 ]]; then
 else
   info "Skipping client registration (--no-register). Run later:"
   info "  $PIPX_APP install --client $CLIENT"
+fi
+if [[ -n "$PIPX_BACKUP_DIR" ]]; then
+  rm -rf -- "$PIPX_BACKUP_DIR"
+  PIPX_BACKUP_DIR=""
+  trap - EXIT HUP INT TERM
 fi
 
 h1 "Done."

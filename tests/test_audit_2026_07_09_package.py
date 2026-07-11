@@ -90,7 +90,11 @@ def _recording_installer_env(tmp_path: Path) -> tuple[dict[str, str], Path]:
                 os.makedirs(app_dir, exist_ok=True)
                 app = os.path.join(app_dir, "gpt2agent")
                 with open(app, "w", encoding="utf-8") as fh:
-                    fh.write("#!/bin/sh\\nexit 0\\n")
+                    fh.write(
+                        "#!/bin/sh\\n"
+                        "if [ \\\"${{1:-}}\\\" = '--version' ]; then exit 0; fi\\n"
+                        "exit \\\"${{FAKE_GPT2AGENT_STATUS:-0}}\\\"\\n"
+                    )
                 os.chmod(app, 0o755)
             """
         ),
@@ -250,6 +254,30 @@ def test_successful_upgrade_is_not_rolled_back_when_app_bin_is_not_on_path(
     assert result.returncode == 0, result.stdout + result.stderr
     assert marker.read_text(encoding="utf-8") == "new\n"
     assert "pipx ensurepath" in result.stdout
+    assert not list(Path(env["FAKE_PIPX_HOME"]).glob(".gpt2agent-upgrade.*"))
+
+
+def test_failed_registration_restores_existing_pipx_environment(
+    tmp_path: Path,
+) -> None:
+    env, _ = _recording_installer_env(tmp_path)
+    venv = Path(env["FAKE_PIPX_HOME"]) / "venvs" / "gpt2agent"
+    venv.mkdir(parents=True)
+    marker = venv / "installed-version"
+    marker.write_text("old\n", encoding="utf-8")
+    env["FAKE_GPT2AGENT_STATUS"] = "47"
+
+    result = subprocess.run(
+        [str(INSTALLER)],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 47
+    assert marker.read_text(encoding="utf-8") == "old\n"
     assert not list(Path(env["FAKE_PIPX_HOME"]).glob(".gpt2agent-upgrade.*"))
 
 
