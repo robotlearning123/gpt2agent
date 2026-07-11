@@ -53,6 +53,34 @@ datachannel is negotiated, `id:0`.
 cd sidecar && npm test    # 21/21 green (reconnect, liveness, events, adapter)
 ```
 
+## Runnable browser sidecar (recommended path) — `browser/sidecar.mjs`
+
+The Node/werift path completes the handshake but its audio SRTP egress never
+reaches the OpenAI server (confirmed: even continuous silence closes ~1s after
+`listening`), while ChatGPT's own web client works. So the recommended sidecar
+drives a real Chrome — reusing the app's working media stack — and reads the
+transcription + response off the datachannel. It feeds a **WAV file as the mic**
+(`--use-file-for-fake-audio-capture`), so no real microphone is used.
+
+```bash
+cd sidecar && npm install
+# one-time: create a Chrome profile logged into ChatGPT
+open -na "Google Chrome" --args --user-data-dir="$PWD/.chrome-gptlive"   # sign in, then quit
+# make a question WAV
+echo "What is two plus two?" | mb voice -o q.mp3 && ffmpeg -y -i q.mp3 -ar 24000 -ac 1 q.wav
+# run
+node browser/sidecar.mjs --profile "$PWD/.chrome-gptlive" --audio q.wav
+```
+
+It injects the datachannel hook via `evaluateOnNewDocument` (before the app's
+scripts, which fixes the hook-too-late problem seen with post-load injection),
+opens voice, and prints the event stream — you should see the human utterance
+transcribed and GPT-Live's response. The `onAgentTurn(humanText)` hook is where
+you route the transcript to your agent; voicing the agent's reply back (full Mode
+B) still needs the one "speak provided text" outbound command captured (the
+normal client only sends `track_state` + `client_metrics`, since the model
+auto-responds to audio).
+
 ## What remains: wire the WebRTC media (control plane is done)
 
 The token/route/SDP-exchange control plane is verified end-to-end. To get a
