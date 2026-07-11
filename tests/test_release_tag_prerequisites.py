@@ -171,6 +171,7 @@ def _action_fixture(tmp_path: Path, *, mode: str = "ok") -> tuple[Path, Path, di
     remote_literal = shlex.quote(str(remote_dir))
     event_literal = shlex.quote(str(event_log))
     mode_literal = shlex.quote(str(mode_file))
+    python_literal = shlex.quote(sys.executable)
     _write_executable(
         fake_gh,
         f"""#!/bin/bash
@@ -203,7 +204,7 @@ fi
 name=${{endpoint%%[?]*}}
 name=${{name##*/}}
 printf '%s\n' 'HTTP/2.0 200 OK' 'Content-Type: application/json; charset=utf-8' ''
-python3 - "$REMOTE_DIR/$name" <<'PY'
+{python_literal} - "$REMOTE_DIR/$name" <<'PY'
 import base64, json, pathlib, sys
 payload = pathlib.Path(sys.argv[1]).read_bytes()
 print(json.dumps({{"content": base64.b64encode(payload).decode(), "encoding": "base64", "size": len(payload)}}))
