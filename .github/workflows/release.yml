@@ -12,10 +12,11 @@ name: Release
 on:
   push:
     tags:
-      # SemVer-shaped tags only: v0.0.2, v1.2.3, v0.0.2-rc1, …
-      # Avoids firing on 'v' alone, 'vfoo', 'vlatest', etc.
+      # Exact release grammar accepted by scripts/verify_release.py.
       - "v[0-9]+.[0-9]+.[0-9]+"
-      - "v[0-9]+.[0-9]+.[0-9]+-*"
+      - "v[0-9]+.[0-9]+.[0-9]+-alpha[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-beta[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-rc[0-9]+"
 
 permissions:
   contents: read

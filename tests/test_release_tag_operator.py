@@ -7,11 +7,18 @@ import signal
 import shlex
 import stat
 import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the release tag operator is a Linux x86_64 trust contract",
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

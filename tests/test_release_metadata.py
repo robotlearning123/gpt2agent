@@ -29,6 +29,20 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VERIFIER = PROJECT_ROOT / "scripts" / "verify_release.py"
 
 
+def test_release_workflow_triggers_only_supported_release_tags() -> None:
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+    tag_block = workflow.split("    tags:\n", 1)[1].split("\n\npermissions:", 1)[0]
+
+    assert re.findall(r'^\s+- "([^"]+)"$', tag_block, flags=re.MULTILINE) == [
+        "v[0-9]+.[0-9]+.[0-9]+",
+        "v[0-9]+.[0-9]+.[0-9]+-alpha[0-9]+",
+        "v[0-9]+.[0-9]+.[0-9]+-beta[0-9]+",
+        "v[0-9]+.[0-9]+.[0-9]+-rc[0-9]+",
+    ]
+
+
 def test_coderabbit_is_an_assertive_required_reviewer_gate() -> None:
     configuration = (PROJECT_ROOT / ".coderabbit.yaml").read_text(encoding="utf-8")
 

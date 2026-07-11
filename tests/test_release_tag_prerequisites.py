@@ -20,6 +20,10 @@ TOOL_CHECK = PROJECT_ROOT / "scripts" / "verify_release_tools.py"
 ACTION_CHECK = PROJECT_ROOT / "scripts" / "verify_remote_action_pin.py"
 ACTION_DIRECTORY = PROJECT_ROOT / ".github" / "actions" / "publish-exact-github-release"
 ACTION_PIN = "15f56b2c16c5923e81df9428c69256237a004c20"
+LINUX_RELEASE_GATE_ONLY = pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="the release gate verifies fixed GNU/Linux system-tool paths",
+)
 
 
 def _write_executable(path: Path, source: str) -> None:
@@ -27,6 +31,7 @@ def _write_executable(path: Path, source: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
+@LINUX_RELEASE_GATE_ONLY
 def test_tool_check_accepts_canonical_root_owned_usr_binaries() -> None:
     result = subprocess.run(
         [
@@ -64,6 +69,7 @@ def test_tool_check_rejects_user_owned_or_noncanonical_tools(tmp_path: Path) -> 
         assert result.stdout == ""
 
 
+@LINUX_RELEASE_GATE_ONLY
 def test_tool_check_requires_a_protected_nonlinked_reviewed_policy() -> None:
     with tempfile.TemporaryDirectory(
         prefix=".gpt2agent-policy-test-",
@@ -102,6 +108,7 @@ def test_tool_check_requires_a_protected_nonlinked_reviewed_policy() -> None:
         assert symbolic.returncode != 0
 
 
+@LINUX_RELEASE_GATE_ONLY
 def test_tool_check_rejects_policy_below_a_writable_ancestor() -> None:
     with tempfile.TemporaryDirectory(
         prefix=".gpt2agent-policy-test-",
@@ -211,6 +218,7 @@ PY
     return fake_gh, workflow, environment
 
 
+@LINUX_RELEASE_GATE_ONLY
 def test_remote_action_pin_verifies_full_sha_and_exact_bytes(tmp_path: Path) -> None:
     fake_gh, workflow, environment = _action_fixture(tmp_path)
     result = subprocess.run(
