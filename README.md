@@ -380,18 +380,20 @@ manifests. Python package metadata and PyPI use the corresponding canonical
 PEP 440 spelling (`X.Y.ZaN`, `X.Y.ZbN`, or `X.Y.ZrcN`).
 
 After the release PR is merged, run the private account gate on a trusted local
-machine against its exact merge SHA. The gate fresh-builds and separately checks
-the wheel and sdist, probes through the installed wheel environment, writes one
-closed-schema sanitized receipt, and binds it to the source commit/tree and
-local candidate hashes. It measures the authenticated account's active Pro
+machine against its exact merge SHA. Main CI builds the wheel and sdist once and
+retains them under an attempt-specific, immutable artifact ID. The gate downloads
+that exact candidate, separately checks both distributions, probes through the
+installed wheel environment, writes one closed-schema sanitized receipt, and
+binds it to the source commit/tree, full CI workflow identity, and exact artifact
+bytes. It measures the authenticated account's active Pro
 entitlement; `--expected-plan pro` is a fail-closed expectation, not a caller
 assertion. The public receipt keeps only empty/nonempty shape classes, never
 exact account collection counts. Never upload cookies, bearer tokens, raw
 responses, or unsanitized account payloads to hosted CI. Use new sibling paths
 outside the checkout so the exact source stays clean, then have the policy-bound
 release App create only the intended annotated tag. The trusted release
-environment must provide the Python `build` package, an authenticated `gh` CLI
-for read-only operator checks, a short-lived installation token for the
+environment must provide an authenticated `gh` CLI for read-only operator
+checks, a short-lived installation token for the
 policy-bound release App scoped to this repository with Contents write access,
 the reviewed local governance policy, and the reviewed Pro account login. Never
 substitute the operator's user token for the App token:
@@ -414,9 +416,20 @@ git switch --detach "$RELEASE_SHA"
 trap 'git switch - >/dev/null || true' EXIT
 test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
 REPOSITORY=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
-GH_TOKEN="$(gh auth token)" python scripts/verify_main_ci.py \
+CANDIDATE_JSON=$(GH_TOKEN="$(gh auth token)" python scripts/verify_main_ci.py \
   --repository "$REPOSITORY" --commit "$RELEASE_SHA" \
-  --attempts 180 --delay 10
+  --print-candidate-json --attempts 180 --delay 10)
+candidate_field() {
+  python -c 'import json,sys; print(json.loads(sys.argv[1])[sys.argv[2]])' \
+    "$CANDIDATE_JSON" "$1"
+}
+CI_RUN_ID=$(candidate_field run_id)
+CI_RUN_ATTEMPT=$(candidate_field run_attempt)
+CI_ARTIFACT_ID=$(candidate_field artifact_id)
+CI_ARTIFACT_NAME=$(candidate_field artifact_name)
+CI_ARTIFACT_DIGEST=$(candidate_field artifact_digest)
+CI_ARTIFACT_SIZE=$(candidate_field artifact_size)
+CI_ARTIFACT_EXPIRES_AT=$(candidate_field artifact_expires_at)
 ROOT=$PWD
 COMMIT=$(git rev-parse HEAD)
 TREE=$(git rev-parse 'HEAD^{tree}')
@@ -431,20 +444,35 @@ PY
 )
 TAG="v$VERSION"
 python scripts/verify_release.py --tag "$TAG"
-DIST="$ROOT/../gpt2agent-$TAG-$COMMIT-local-candidate"
+DIST="$ROOT/../gpt2agent-$TAG-$COMMIT-main-ci-candidate"
 RECEIPT="$ROOT/../gpt2agent-$TAG-$COMMIT.account-receipt.json"
 test ! -e "$DIST"
 test ! -e "$RECEIPT"
+gh run download "$CI_RUN_ID" --repo "$REPOSITORY" \
+  --name "$CI_ARTIFACT_NAME" --dir "$DIST"
 CREATE_OUTPUT=$(python scripts/verify_account_receipt.py create \
   --checkout "$ROOT" --dist "$DIST" --output "$RECEIPT" \
-  --commit "$COMMIT" --tree "$TREE" --expected-plan pro)
-RECEIPT_SHA256=${CREATE_OUTPUT##*=}
-test "$CREATE_OUTPUT" = "account receipt created: sha256=$RECEIPT_SHA256"
+  --commit "$COMMIT" --tree "$TREE" --expected-plan pro \
+  --repository "$REPOSITORY" \
+  --ci-run-id "$CI_RUN_ID" --ci-run-attempt "$CI_RUN_ATTEMPT" \
+  --ci-artifact-id "$CI_ARTIFACT_ID" \
+  --ci-artifact-digest "$CI_ARTIFACT_DIGEST" \
+  --ci-artifact-size "$CI_ARTIFACT_SIZE" \
+  --ci-artifact-expires-at "$CI_ARTIFACT_EXPIRES_AT")
+RECEIPT_SHA256=$(printf '%s\n' "$CREATE_OUTPUT" | \
+  sed -n 's/^account-receipt-sha256: //p')
 test "${#RECEIPT_SHA256}" -eq 64
 case "$RECEIPT_SHA256" in (*[!0-9a-f]*) exit 1;; esac
-python scripts/verify_account_receipt.py verify \
+VERIFY_OUTPUT=$(python scripts/verify_account_receipt.py verify \
   --receipt "$RECEIPT" --checkout "$ROOT" --dist "$DIST" \
-  --commit "$COMMIT" --tree "$TREE" --sha256 "$RECEIPT_SHA256"
+  --commit "$COMMIT" --tree "$TREE" --sha256 "$RECEIPT_SHA256" \
+  --repository "$REPOSITORY" \
+  --ci-run-id "$CI_RUN_ID" --ci-run-attempt "$CI_RUN_ATTEMPT" \
+  --ci-artifact-id "$CI_ARTIFACT_ID" \
+  --ci-artifact-digest "$CI_ARTIFACT_DIGEST" \
+  --ci-artifact-size "$CI_ARTIFACT_SIZE" \
+  --ci-artifact-expires-at "$CI_ARTIFACT_EXPIRES_AT")
+test "$VERIFY_OUTPUT" = "$CREATE_OUTPUT"
 REMOTE_TAG_SHA="$(
   git ls-remote --tags origin |
     awk -v ref="refs/tags/$TAG" '$2 == ref { print $1 }'
@@ -453,8 +481,7 @@ if [ -n "$REMOTE_TAG_SHA" ]; then
   echo "Release tag already exists on origin: $TAG" >&2
   exit 1
 fi
-TAG_MESSAGE=$(printf 'gpt2agent %s\n\naccount-receipt-sha256: %s' \
-  "$VERSION" "$RECEIPT_SHA256")
+TAG_MESSAGE=$(printf 'gpt2agent %s\n\n%s' "$VERSION" "$CREATE_OUTPUT")
 TAG_OBJECT_SHA=$(
   GH_TOKEN="$GPT2AGENT_RELEASE_APP_TOKEN" gh api --method POST \
     "repos/$REPOSITORY/git/tags" \
@@ -484,22 +511,24 @@ of checkout's runner-local tag ref, binds it to the event SHA, and proves that
 commit is on `origin/main`. Both the local pre-tag command and the tagged
 workflow require a successful `ci.yml` `push` run for that exact commit on
 `main`; a green PR run or a newer branch head cannot substitute. The workflow
-also requires exactly one valid receipt-digest line in the annotated tag and
-creates canonical evidence binding that digest to the tag object, source
-commit/tree, workflow identity, and exact wheel/sdist hashes.
+requires exactly one valid value for every receipt and candidate-identity field
+in the annotated tag. It fetches the pinned run and immutable artifact ID live,
+then creates canonical evidence binding the receipt digest and full account
+handoff identity to the tag object, source commit/tree, release workflow, and
+exact wheel/sdist hashes.
 
-The workflow then runs the test matrix, installs and tests both artifacts in
-clean environments, publishes to PyPI via OIDC trusted publishing, verifies the
+The workflow never rebuilds after the account gate. It downloads the exact
+account-tested main-CI artifact by numeric ID, reconstructs its artifact-set
+digest, runs Twine and clean-install tests, publishes those same bytes to PyPI
+via OIDC trusted publishing, verifies the
 published filenames and hashes, and installs that exact PyPI version in a clean
 canary environment. The GitHub Release is created only after the canary passes;
 its initial assets include the distributions and `release-workflow-artifacts.json`.
-The local candidate hashes in the receipt are not claims that an independently
-built hosted artifact will be byte-identical.
 
-The annotated-tag SHA-256 is a commitment to the local receipt bytes and a
-post-publish audit link. It is not proof that hosted automation saw, parsed, or
-validated the receipt before publishing, because the receipt is uploaded only
-after the release exists. Treat publication as blocked unless independent live
+The annotated-tag SHA-256 is a commitment to the local receipt bytes. Hosted
+automation validates the tag-bound artifact identity and set digest, but it
+does not receive the account receipt or its shape-only probe records. Treat
+publication as blocked unless independent live
 controls are also configured and verified: a policy-bound release App is the
 only actor that can create `v*` tags; separate no-bypass rules make existing
 tags immutable; the `pypi` environment requires the policy-bound independent
@@ -510,12 +539,10 @@ tree, version, and receipt digest before allowing publication.
 performs these reviewed, read-only GitHub checks and exits nonzero when the
 closed identity policy or any required live control is absent.
 
-Only after that tagged workflow is green and the GitHub Release exists, the
-release owner manually uploads the exact sanitized receipt. The receipt schema
-contains shape/status evidence and source/artifact hashes, not account identity,
-content, credentials, headers, bodies, or full URLs. Upload without `--clobber`
-so a pre-existing asset fails closed, then download it to a new owned directory
-and verify its bytes against the annotated-tag digest:
+After the tagged workflow is green, verify the retained local receipt bytes
+against the annotated-tag commitment. Keep that mode-0600 account evidence in
+the approved local evidence store; do not upload it to Actions or the public
+GitHub Release:
 
 ```bash
 read -r -p "Release tag (for example v0.0.12): " TAG
@@ -525,7 +552,6 @@ test "$(git cat-file -t "$TAG")" = tag
 COMMIT=$(git rev-parse "$TAG^{}")
 RECEIPT="$ROOT/../gpt2agent-$TAG-$COMMIT.account-receipt.json"
 test -f "$RECEIPT"
-ASSET_NAME=$(basename "$RECEIPT")
 TAG_RECEIPT_SHA256=$(
   git for-each-ref --format='%(contents)' "refs/tags/$TAG" |
     sed -n 's/^account-receipt-sha256: \([0-9a-f]\{64\}\)$/\1/p'
@@ -541,31 +567,20 @@ print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
 PY
 )
 test "$LOCAL_RECEIPT_SHA256" = "$TAG_RECEIPT_SHA256"
-gh release upload "$TAG" "$RECEIPT"
-VERIFY_DIR="$ROOT/../gpt2agent-$TAG-$COMMIT-receipt-download"
-test ! -e "$VERIFY_DIR"
-mkdir -m 700 "$VERIFY_DIR"
-gh release download "$TAG" --pattern "$ASSET_NAME" --dir "$VERIFY_DIR"
-DOWNLOADED_SHA256=$(python - "$VERIFY_DIR/$ASSET_NAME" <<'PY'
-import hashlib
-import pathlib
-import sys
-
-print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
-PY
-)
-test "$DOWNLOADED_SHA256" = "$TAG_RECEIPT_SHA256"
-rm -r -- "$VERIFY_DIR"
 ```
 
-Retain or dispose of the owned local receipt and candidate directory according
-to the release-evidence policy only after the uploaded asset has been verified.
+Retain or dispose of the owned local receipt and candidate directory only under
+the reviewed local release-evidence policy. The public tag and
+`release-workflow-artifacts.json` retain the non-account provenance commitments.
 
 If a publish or downstream release job fails, use GitHub Actions' **Re-run
-failed jobs** on that same workflow run so it reuses the original build
-artifact. Do not re-run the whole workflow after any file reaches PyPI: Python
-sdists are not guaranteed byte-reproducible, and the hash guard intentionally
-rejects different rebuilt bytes for an existing version.
+failed jobs** on that same workflow run so it reuses the pinned main-CI artifact.
+Do not re-run the whole workflow after any file reaches PyPI. Before tagging, a
+deleted, expired, replaced, or near-expiry candidate requires a full main-CI
+rerun and a new account gate. A failed-only CI rerun may reuse an earlier package
+attempt only when its exact producing attempt and artifact ID remain pinned.
+After tagging, loss or mismatch of the pinned artifact blocks that release:
+never rebuild, move, delete, or recreate the immutable version tag.
 
 If the source gate itself exposes a workflow defect before anything is
 published, fix the workflow on `main` and prepare the next version. Never

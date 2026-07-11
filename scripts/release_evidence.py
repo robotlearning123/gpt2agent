@@ -16,6 +16,10 @@ HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-(?:alpha|beta|rc)[0-9]+)?\Z")
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 RUN_NUMBER = re.compile(r"[1-9][0-9]*\Z")
+ARTIFACT_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+EXPIRES_AT = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z\Z"
+)
 
 
 def _require(pattern: re.Pattern[str], value: str, label: str) -> str:
@@ -36,6 +40,14 @@ def _require_build_job(value: str) -> str:
     if value != "build":
         raise ValueError("release evidence workflow job must be build")
     return value
+
+
+def _positive_int(value: str, label: str, *, maximum: int = 10**20) -> int:
+    normalized = _require(RUN_NUMBER, value, label)
+    parsed = int(normalized)
+    if parsed > maximum:
+        raise ValueError(f"invalid {label}")
+    return parsed
 
 
 def _artifact_records(dist: Path) -> list[dict[str, Any]]:
@@ -60,6 +72,129 @@ def _artifact_records(dist: Path) -> list[dict[str, Any]]:
     ]
 
 
+def account_artifact_set(
+    dist: Path,
+    *,
+    source_commit: str,
+    source_tree: str,
+    repository: str,
+    run_id: str,
+    run_attempt: str,
+    artifact_id: str,
+    artifact_digest: str,
+    artifact_size: str,
+    artifact_expires_at: str,
+) -> dict[str, Any]:
+    """Reconstruct the closed account-tested artifact identity from exact files."""
+    commit = _require(HEX40, source_commit, "source commit")
+    tree = _require(HEX40, source_tree, "source tree")
+    normalized_run_id = _positive_int(run_id, "candidate run ID")
+    normalized_run_attempt = _positive_int(run_attempt, "candidate run attempt", maximum=10**9)
+    normalized_artifact_id = _positive_int(artifact_id, "candidate artifact ID")
+    normalized_artifact_size = _positive_int(
+        artifact_size,
+        "candidate artifact size",
+        maximum=10**12,
+    )
+    records = _artifact_records(dist)
+    wheel = next(record for record in records if record["filename"].endswith(".whl"))
+    sdist = next(record for record in records if record["filename"].endswith(".tar.gz"))
+    return {
+        "build_origin": "main_ci_package_artifact",
+        "source": {"commit": commit, "tree": tree},
+        "workflow": {
+            "artifact_digest": _require(
+                ARTIFACT_DIGEST,
+                artifact_digest,
+                "candidate artifact digest",
+            ),
+            "artifact_expires_at": _require(
+                EXPIRES_AT,
+                artifact_expires_at,
+                "candidate artifact expiry",
+            ),
+            "artifact_id": normalized_artifact_id,
+            "artifact_name": (
+                f"release-candidate-{commit}-{normalized_run_id}-{normalized_run_attempt}"
+            ),
+            "artifact_size": normalized_artifact_size,
+            "event": "push",
+            "job": "package",
+            "ref": "refs/heads/main",
+            "repository": _require(REPOSITORY, repository, "repository"),
+            "run_attempt": normalized_run_attempt,
+            "run_id": normalized_run_id,
+            "workflow_file": ".github/workflows/ci.yml",
+        },
+        "wheel": {
+            "filename": wheel["filename"],
+            "sha256": wheel["sha256"],
+            "size_bytes": wheel["size"],
+        },
+        "sdist": {
+            "filename": sdist["filename"],
+            "sha256": sdist["sha256"],
+            "size_bytes": sdist["size"],
+        },
+    }
+
+
+def account_artifact_set_sha256(dist: Path, **identity: str) -> str:
+    return hashlib.sha256(canonical_json(account_artifact_set(dist, **identity))).hexdigest()
+
+
+def verify_account_artifact_handoff(
+    dist: Path,
+    *,
+    artifact_set_sha256: str,
+    **identity: str,
+) -> None:
+    expected = _require(HEX64, artifact_set_sha256, "account artifact-set SHA-256")
+    if account_artifact_set_sha256(dist, **identity) != expected:
+        raise ValueError("account-tested artifact set does not match the release handoff")
+
+
+def _account_handoff_record(
+    dist: Path,
+    *,
+    commit: str,
+    tree: str,
+    repository: str,
+    candidate_run_id: str,
+    candidate_run_attempt: str,
+    candidate_artifact_id: str,
+    candidate_artifact_digest: str,
+    candidate_artifact_size: str,
+    candidate_artifact_expires_at: str,
+    account_artifact_set_sha256: str,
+) -> dict[str, Any]:
+    identity = {
+        "source_commit": commit,
+        "source_tree": tree,
+        "repository": repository,
+        "run_id": candidate_run_id,
+        "run_attempt": candidate_run_attempt,
+        "artifact_id": candidate_artifact_id,
+        "artifact_digest": candidate_artifact_digest,
+        "artifact_size": candidate_artifact_size,
+        "artifact_expires_at": candidate_artifact_expires_at,
+    }
+    verify_account_artifact_handoff(
+        dist,
+        artifact_set_sha256=account_artifact_set_sha256,
+        **identity,
+    )
+    artifacts = account_artifact_set(dist, **identity)
+    return {
+        "artifact_set_sha256": _require(
+            HEX64,
+            account_artifact_set_sha256,
+            "account artifact-set SHA-256",
+        ),
+        "candidate": artifacts["workflow"],
+    }
+
+
 def build_manifest(
     dist: Path,
     *,
@@ -72,10 +207,17 @@ def build_manifest(
     run_id: str,
     run_attempt: str,
     job: str,
+    candidate_run_id: str,
+    candidate_run_attempt: str,
+    candidate_artifact_id: str,
+    candidate_artifact_digest: str,
+    candidate_artifact_size: str,
+    candidate_artifact_expires_at: str,
+    account_artifact_set_sha256: str,
 ) -> dict[str, Any]:
     """Return canonical-data-ready provenance for one immutable artifact set."""
     return {
-        "schema_version": "1",
+        "schema_version": "2",
         "artifact_set": "release_workflow_artifacts",
         "tag": _require(TAG, tag, "tag"),
         "tag_object": _require(HEX40, tag_object, "tag object"),
@@ -90,6 +232,19 @@ def build_manifest(
             "run_attempt": _require(RUN_NUMBER, run_attempt, "workflow run attempt"),
             "job": _require_build_job(job),
         },
+        "account_handoff": _account_handoff_record(
+            dist,
+            commit=commit,
+            tree=tree,
+            repository=repository,
+            candidate_run_id=candidate_run_id,
+            candidate_run_attempt=candidate_run_attempt,
+            candidate_artifact_id=candidate_artifact_id,
+            candidate_artifact_digest=candidate_artifact_digest,
+            candidate_artifact_size=candidate_artifact_size,
+            candidate_artifact_expires_at=candidate_artifact_expires_at,
+            account_artifact_set_sha256=account_artifact_set_sha256,
+        ),
         "artifacts": _artifact_records(dist),
     }
 
@@ -119,6 +274,13 @@ def verify_manifest(
     repository: str,
     run_id: str,
     run_attempt: str,
+    candidate_run_id: str,
+    candidate_run_attempt: str,
+    candidate_artifact_id: str,
+    candidate_artifact_digest: str,
+    candidate_artifact_size: str,
+    candidate_artifact_expires_at: str,
+    account_artifact_set_sha256: str,
 ) -> None:
     """Fail closed if evidence, expected workflow identity, or files drift."""
     if not isinstance(manifest, dict):
@@ -131,12 +293,13 @@ def verify_manifest(
         "source",
         "receipt_sha256",
         "workflow",
+        "account_handoff",
         "artifacts",
     }
     if set(manifest) != expected_keys:
         raise ValueError("release evidence has an unexpected schema")
     expected_identity = {
-        "schema_version": "1",
+        "schema_version": "2",
         "artifact_set": "release_workflow_artifacts",
         "tag": _require(TAG, tag, "tag"),
         "tag_object": _require(HEX40, tag_object, "tag object"),
@@ -173,6 +336,22 @@ def verify_manifest(
         raise ValueError("release evidence comes from a future workflow run attempt")
     _require_build_job(workflow.get("job", ""))
 
+    expected_handoff = _account_handoff_record(
+        dist,
+        commit=commit,
+        tree=tree,
+        repository=repository,
+        candidate_run_id=candidate_run_id,
+        candidate_run_attempt=candidate_run_attempt,
+        candidate_artifact_id=candidate_artifact_id,
+        candidate_artifact_digest=candidate_artifact_digest,
+        candidate_artifact_size=candidate_artifact_size,
+        candidate_artifact_expires_at=candidate_artifact_expires_at,
+        account_artifact_set_sha256=account_artifact_set_sha256,
+    )
+    if manifest.get("account_handoff") != expected_handoff:
+        raise ValueError("release evidence account handoff does not match")
+
     if manifest.get("artifacts") != _artifact_records(dist):
         raise ValueError("artifact metadata does not match release evidence")
 
@@ -191,16 +370,55 @@ def _parser() -> argparse.ArgumentParser:
         sub.add_argument("--repository", required=True)
         sub.add_argument("--run-id", required=True)
         sub.add_argument("--run-attempt", required=True)
+        sub.add_argument("--candidate-run-id", required=True)
+        sub.add_argument("--candidate-run-attempt", required=True)
+        sub.add_argument("--candidate-artifact-id", required=True)
+        sub.add_argument("--candidate-artifact-digest", required=True)
+        sub.add_argument("--candidate-artifact-size", required=True)
+        sub.add_argument("--candidate-artifact-expires-at", required=True)
+        sub.add_argument("--account-artifact-set-sha256", required=True)
     create = subparsers.choices["create"]
     create.add_argument("--job", required=True)
     create.add_argument("--output", type=Path, required=True)
     verify = subparsers.choices["verify"]
     verify.add_argument("--manifest", type=Path, required=True)
+    handoff = subparsers.add_parser("verify-account-handoff")
+    handoff.add_argument("--dist", type=Path, required=True)
+    handoff.add_argument("--commit", required=True)
+    handoff.add_argument("--tree", required=True)
+    handoff.add_argument("--repository", required=True)
+    handoff.add_argument("--run-id", required=True)
+    handoff.add_argument("--run-attempt", required=True)
+    handoff.add_argument("--artifact-id", required=True)
+    handoff.add_argument("--artifact-digest", required=True)
+    handoff.add_argument("--artifact-size", required=True)
+    handoff.add_argument("--artifact-expires-at", required=True)
+    handoff.add_argument("--artifact-set-sha256", required=True)
     return parser
 
 
 def main() -> int:
     args = _parser().parse_args()
+    if args.command == "verify-account-handoff":
+        try:
+            verify_account_artifact_handoff(
+                args.dist,
+                source_commit=args.commit,
+                source_tree=args.tree,
+                repository=args.repository,
+                run_id=args.run_id,
+                run_attempt=args.run_attempt,
+                artifact_id=args.artifact_id,
+                artifact_digest=args.artifact_digest,
+                artifact_size=args.artifact_size,
+                artifact_expires_at=args.artifact_expires_at,
+                artifact_set_sha256=args.artifact_set_sha256,
+            )
+            print("account-tested release artifact handoff verified")
+        except (OSError, ValueError) as error:
+            print(f"release evidence verification failed: {error}", file=__import__("sys").stderr)
+            return 1
+        return 0
     common = {
         "tag": args.tag,
         "tag_object": args.tag_object,
@@ -210,6 +428,13 @@ def main() -> int:
         "repository": args.repository,
         "run_id": args.run_id,
         "run_attempt": args.run_attempt,
+        "candidate_run_id": args.candidate_run_id,
+        "candidate_run_attempt": args.candidate_run_attempt,
+        "candidate_artifact_id": args.candidate_artifact_id,
+        "candidate_artifact_digest": args.candidate_artifact_digest,
+        "candidate_artifact_size": args.candidate_artifact_size,
+        "candidate_artifact_expires_at": args.candidate_artifact_expires_at,
+        "account_artifact_set_sha256": args.account_artifact_set_sha256,
     }
     try:
         if args.command == "create":

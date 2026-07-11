@@ -144,47 +144,45 @@ they are not presented as a supported MCP audio capability.
 ## Release operators
 
 The account gate must run on a trusted local machine from the clean repository
-root at the exact candidate commit. Give it new sibling paths outside the
-checkout so the fresh local artifacts do not dirty the source tree:
+root at the exact candidate commit. Follow the complete build-once operator
+procedure in the README: query the successful main `ci.yml` push run with at
+least 72 hours of artifact lifetime, download its attempt-specific artifact,
+and pass the returned run ID, producing attempt, artifact ID, REST digest, size,
+and expiry to both account-receipt commands. Give the downloaded distribution
+and receipt new sibling paths outside the checkout.
 
-```bash
-ROOT=$PWD
-COMMIT=$(git rev-parse HEAD)
-TREE=$(git rev-parse 'HEAD^{tree}')
-DIST="$ROOT/../gpt2agent-v0.0.12-$COMMIT-local-candidate"
-RECEIPT="$ROOT/../gpt2agent-v0.0.12-$COMMIT.account-receipt.json"
-test ! -e "$DIST"
-test ! -e "$RECEIPT"
-CREATE_OUTPUT=$(python scripts/verify_account_receipt.py create \
-  --checkout "$ROOT" --dist "$DIST" --output "$RECEIPT" \
-  --commit "$COMMIT" --tree "$TREE" --expected-plan pro)
-RECEIPT_SHA256=${CREATE_OUTPUT##*=}
-test "$CREATE_OUTPUT" = "account receipt created: sha256=$RECEIPT_SHA256"
-test "${#RECEIPT_SHA256}" -eq 64
-case "$RECEIPT_SHA256" in (*[!0-9a-f]*) exit 1;; esac
-python scripts/verify_account_receipt.py verify \
-  --receipt "$RECEIPT" --checkout "$ROOT" --dist "$DIST" \
-  --commit "$COMMIT" --tree "$TREE" --sha256 "$RECEIPT_SHA256"
-```
-
-The command fresh-builds, separately checks both distributions, probes from the
+The command separately checks both exact main-CI distributions, probes from the
 installed wheel environment, measures the active account entitlement against
 the expected Pro plan, and writes a mode-0600 canonical receipt. Its public
 shape evidence records empty/nonempty classes without exact account collection
 counts. Never upload a browser cookie, bearer token, raw response, or
-unsanitized account payload to GitHub Actions. Put exactly one line in the
-annotated tag message:
+unsanitized account payload to GitHub Actions. Put the exact eight lines emitted
+by the create command in the annotated tag message:
 
 ```text
 account-receipt-sha256: <64 lowercase hex>
+account-artifact-set-sha256: <64 lowercase hex>
+account-ci-run-id: <positive integer>
+account-ci-run-attempt: <positive integer>
+account-ci-artifact-id: <positive integer>
+account-ci-artifact-digest: sha256:<64 lowercase hex>
+account-ci-artifact-size: <positive integer>
+account-ci-artifact-expires-at: <UTC timestamp>
 ```
 
-The hosted release workflow receives only that digest. It binds the digest to
-the immutable tag object, commit, tree, workflow identity, and hosted wheel/sdist
-hashes; publishes through PyPI trusted publishing; verifies published hashes;
-installs the exact PyPI version in a clean canary environment; and creates the
-GitHub Release only after the canary passes. Local candidate hashes in the
-receipt are not compared to independently built hosted/PyPI artifact hashes.
+The hosted release workflow validates the pinned run and candidate live with a
+small execution headroom, downloads by immutable artifact ID, reconstructs the
+account artifact-set digest, and never rebuilds. It publishes those same bytes
+through PyPI trusted publishing, verifies published hashes, installs the exact
+PyPI version in a clean canary environment, and creates the GitHub Release only
+after the canary passes. The release evidence asset carries the full pinned
+candidate identity and artifact-set digest.
+
+Before tagging, an expired, deleted, replaced, or near-expiry candidate requires
+a full main-CI rerun and a new account gate. After tagging, such a loss is a hard
+release blocker; do not rebuild or move the version tag. Historical receipt
+verification remains valid after normal Actions retention expiry when the exact
+distribution bytes and recorded metadata have been retained.
 
 The digest is only a commitment to the local receipt bytes and a post-publish
 audit link. Hosted automation cannot validate a receipt it does not receive
@@ -210,10 +208,9 @@ snapshot being audited. The command emits deterministic JSON and exits nonzero
 if the policy is missing or invalid, any required control is absent, or the
 live snapshot cannot be validated.
 
-After the workflow is green, the release owner manually uploads the exact
-closed-schema sanitized receipt as a GitHub Release asset without `--clobber`,
-downloads it into a new owned verification directory, and checks its SHA-256
-against the annotated-tag line. The receipt contains fixed route categories,
-shape/status classes, UTC timestamps, source identity, artifact
-filenames/hashes, and verifier metadata; it contains no account identity,
-credentials, headers, response bodies, full URLs, names, IDs, or content.
+After the workflow is green, verify the retained mode-0600 local receipt's
+SHA-256 against the annotated-tag line and keep it only in the approved local
+evidence store. Do not upload the account receipt to Actions or the public
+GitHub Release. The public tag and release-evidence asset carry only its digest
+and exact artifact handoff; they do not expose the shape-only account probe
+records.

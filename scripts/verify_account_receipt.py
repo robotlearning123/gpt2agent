@@ -14,7 +14,7 @@ import sys
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field as dataclass_field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse
@@ -26,12 +26,16 @@ REQUEST_TIMEOUT_SECONDS = 20
 _ACCOUNT_ORIGIN = "https://chatgpt.com"
 _MAX_ITEMS = 10_000
 _MAX_RECEIPT_BYTES = 1024 * 1024
+_PRETAG_ARTIFACT_HEADROOM = timedelta(hours=72)
 _PACKAGE_VERSION = "0.0.12"
-_SCHEMA_VERSION = "3"
+_SCHEMA_VERSION = "4"
 _VERIFIER_NAME = "gpt2agent-account-receipt"
-_VERIFIER_VERSION = "3"
+_VERIFIER_VERSION = "4"
 _HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+_REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
+_RUN_ID = re.compile(r"[1-9][0-9]*\Z")
+_ARTIFACT_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 
 class ReceiptError(ValueError):
@@ -662,6 +666,32 @@ def _require_oid(value: Any) -> str:
     return value
 
 
+def _require_repository(value: Any) -> str:
+    if not isinstance(value, str) or not _REPOSITORY.fullmatch(value):
+        raise ReceiptError("candidate workflow identity is invalid")
+    return value
+
+
+def _require_positive_int(value: Any) -> int:
+    if isinstance(value, bool):
+        raise ReceiptError("candidate workflow identity is invalid")
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and _RUN_ID.fullmatch(value):
+        parsed = int(value)
+    else:
+        raise ReceiptError("candidate workflow identity is invalid")
+    if parsed < 1 or parsed > 10**20:
+        raise ReceiptError("candidate workflow identity is invalid")
+    return parsed
+
+
+def _require_artifact_digest(value: Any) -> str:
+    if not isinstance(value, str) or not _ARTIFACT_DIGEST.fullmatch(value):
+        raise ReceiptError("candidate workflow identity is invalid")
+    return value
+
+
 def _git_output(checkout: Path, *args: str) -> str:
     try:
         result = subprocess.run(
@@ -749,12 +779,32 @@ def collect_local_candidate_artifacts(
     package_version: str,
     source_commit: str,
     source_tree: str,
+    repository: str,
+    run_id: str,
+    run_attempt: str,
+    artifact_id: str,
+    artifact_digest: str,
+    artifact_size: str,
+    artifact_expires_at: str,
+    require_unexpired: bool = True,
 ) -> dict[str, Any]:
-    """Hash exactly one local wheel and sdist without exposing their bytes."""
+    """Hash the exact main-CI wheel and sdist without exposing their bytes."""
     if package_version != _PACKAGE_VERSION:
         raise ReceiptError("candidate package version is invalid")
     commit = _require_oid(source_commit)
     tree = _require_oid(source_tree)
+    repository = _require_repository(repository)
+    normalized_run_id = _require_positive_int(run_id)
+    normalized_run_attempt = _require_positive_int(run_attempt)
+    normalized_artifact_id = _require_positive_int(artifact_id)
+    normalized_artifact_size = _require_positive_int(artifact_size)
+    artifact_digest = _require_artifact_digest(artifact_digest)
+    expires_at = _timestamp(artifact_expires_at)
+    if (
+        require_unexpired
+        and expires_at <= datetime.now(timezone.utc) + _PRETAG_ARTIFACT_HEADROOM
+    ):
+        raise ReceiptError("candidate CI artifact is expired or expires too soon")
     dist = Path(dist)
     if dist.is_symlink() or not dist.is_dir():
         raise ReceiptError("candidate artifact directory is invalid")
@@ -774,10 +824,34 @@ def collect_local_candidate_artifacts(
     wheel_name = _validate_artifact_filename("wheel", wheel.name, package_version)
     sdist_name = _validate_artifact_filename("sdist", sdist.name, package_version)
     return {
-        "build_origin": "local_live_gate",
+        "build_origin": "main_ci_package_artifact",
         "source": {"commit": commit, "tree": tree},
-        "wheel": {"filename": wheel_name, "sha256": _sha256(wheel)},
-        "sdist": {"filename": sdist_name, "sha256": _sha256(sdist)},
+        "workflow": {
+            "artifact_digest": artifact_digest,
+            "artifact_expires_at": artifact_expires_at,
+            "artifact_id": normalized_artifact_id,
+            "artifact_name": (
+                f"release-candidate-{commit}-{normalized_run_id}-{normalized_run_attempt}"
+            ),
+            "artifact_size": normalized_artifact_size,
+            "event": "push",
+            "job": "package",
+            "ref": "refs/heads/main",
+            "repository": repository,
+            "run_attempt": normalized_run_attempt,
+            "run_id": normalized_run_id,
+            "workflow_file": ".github/workflows/ci.yml",
+        },
+        "wheel": {
+            "filename": wheel_name,
+            "sha256": _sha256(wheel),
+            "size_bytes": wheel.stat().st_size,
+        },
+        "sdist": {
+            "filename": sdist_name,
+            "sha256": _sha256(sdist),
+            "size_bytes": sdist.stat().st_size,
+        },
     }
 
 
@@ -812,14 +886,71 @@ def _validate_artifact_record(
     package_version: str,
     source: dict[str, str],
 ) -> None:
-    artifacts = _exact_keys(value, {"build_origin", "source", "wheel", "sdist"})
-    if artifacts["build_origin"] != "local_live_gate" or artifacts["source"] != source:
+    artifacts = _exact_keys(
+        value,
+        {"build_origin", "source", "workflow", "wheel", "sdist"},
+    )
+    if artifacts["build_origin"] != "main_ci_package_artifact" or artifacts["source"] != source:
         raise ReceiptError("account receipt artifact binding is invalid")
+    workflow = _exact_keys(
+        artifacts["workflow"],
+        {
+            "artifact_digest",
+            "artifact_expires_at",
+            "artifact_id",
+            "artifact_name",
+            "artifact_size",
+            "event",
+            "job",
+            "ref",
+            "repository",
+            "run_attempt",
+            "run_id",
+            "workflow_file",
+        },
+    )
+    run_id = _require_positive_int(workflow["run_id"])
+    run_attempt = _require_positive_int(workflow["run_attempt"])
+    if (
+        workflow["artifact_name"] != f"release-candidate-{source['commit']}-{run_id}-{run_attempt}"
+        or workflow["job"] != "package"
+        or workflow["workflow_file"] != ".github/workflows/ci.yml"
+        or workflow["event"] != "push"
+        or workflow["ref"] != "refs/heads/main"
+    ):
+        raise ReceiptError("account receipt artifact binding is invalid")
+    _require_repository(workflow["repository"])
+    _require_positive_int(workflow["artifact_id"])
+    _require_positive_int(workflow["artifact_size"])
+    _require_artifact_digest(workflow["artifact_digest"])
+    _timestamp(workflow["artifact_expires_at"])
     for kind in ("wheel", "sdist"):
-        record = _exact_keys(artifacts[kind], {"filename", "sha256"})
+        record = _exact_keys(artifacts[kind], {"filename", "sha256", "size_bytes"})
         _validate_artifact_filename(kind, record["filename"], package_version)
-        if not isinstance(record["sha256"], str) or not _HEX64.fullmatch(record["sha256"]):
+        if (
+            not isinstance(record["sha256"], str)
+            or not _HEX64.fullmatch(record["sha256"])
+            or isinstance(record["size_bytes"], bool)
+            or not isinstance(record["size_bytes"], int)
+            or record["size_bytes"] < 1
+        ):
             raise ReceiptError("account receipt artifact binding is invalid")
+
+
+def artifact_set_sha256(value: Any) -> str:
+    """Digest one closed, source-and-workflow-bound candidate artifact set."""
+    artifacts = _exact_keys(
+        value,
+        {"build_origin", "source", "workflow", "wheel", "sdist"},
+    )
+    source = _exact_keys(artifacts["source"], {"commit", "tree"})
+    source = {"commit": _require_oid(source["commit"]), "tree": _require_oid(source["tree"])}
+    _validate_artifact_record(
+        artifacts,
+        package_version=_PACKAGE_VERSION,
+        source=source,
+    )
+    return hashlib.sha256(canonical_json(artifacts)).hexdigest()
 
 
 def _validate_shape_results(value: Any) -> list[dict[str, Any]]:
@@ -1157,6 +1288,13 @@ def verify_receipt_file(
     declared_commit: str,
     declared_tree: str,
     expected_sha256: str,
+    ci_repository: str,
+    ci_run_id: str,
+    ci_run_attempt: str,
+    ci_artifact_id: str,
+    ci_artifact_digest: str,
+    ci_artifact_size: str,
+    ci_artifact_expires_at: str,
 ) -> str:
     """Bind canonical evidence to current clean source and artifact bytes."""
     receipt, payload = _read_receipt(receipt_path)
@@ -1176,6 +1314,14 @@ def verify_receipt_file(
         package_version=package_version,
         source_commit=commit,
         source_tree=tree,
+        repository=ci_repository,
+        run_id=ci_run_id,
+        run_attempt=ci_run_attempt,
+        artifact_id=ci_artifact_id,
+        artifact_digest=ci_artifact_digest,
+        artifact_size=ci_artifact_size,
+        artifact_expires_at=ci_artifact_expires_at,
+        require_unexpired=False,
     )
     if receipt["local_candidate_artifacts"] != current_artifacts:
         raise ReceiptError("candidate artifact bytes do not match the account receipt")
@@ -1582,6 +1728,16 @@ def _outside_checkout(path: Path, checkout: Path) -> bool:
     return False
 
 
+def _inside_candidate_dist(path: Path, dist: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(dist.resolve(strict=False))
+    except ValueError:
+        return False
+    except OSError:
+        raise ReceiptError("receipt output location is invalid") from None
+    return True
+
+
 def run_create_gate(
     *,
     checkout: Path,
@@ -1590,11 +1746,17 @@ def run_create_gate(
     declared_commit: str,
     declared_tree: str,
     expected_plan: str,
-    builder: Callable[[Path, Path], None] = build_distributions,
+    ci_repository: str,
+    ci_run_id: str,
+    ci_run_attempt: str,
+    ci_artifact_id: str,
+    ci_artifact_digest: str,
+    ci_artifact_size: str,
+    ci_artifact_expires_at: str,
     installation_context: Callable[..., Any] = installed_candidate_context,
     probe_runner: Callable[[Path, str], dict[str, Any]] = probe_installed_candidate,
 ) -> str:
-    """Build, install, probe, re-bind, and finally emit one exact receipt."""
+    """Install, probe, re-bind, and attest one exact main-CI artifact set."""
     checkout = Path(checkout)
     dist = Path(dist)
     output = Path(output)
@@ -1604,21 +1766,26 @@ def run_create_gate(
         raise ReceiptError("candidate artifact output must be outside the checkout")
     if not _outside_checkout(output, checkout) or output.exists() or output.is_symlink():
         raise ReceiptError("receipt output must be new and outside the checkout")
+    if _inside_candidate_dist(output, dist):
+        raise ReceiptError("receipt output must be outside the candidate artifact directory")
     commit, tree = verify_checkout(
         checkout,
         declared_commit=declared_commit,
         declared_tree=declared_tree,
     )
     package_version = _project_version(checkout)
-    if dist.exists() or dist.is_symlink():
-        raise ReceiptError("candidate artifact output must not already exist")
-    builder(checkout, dist)
-    verify_checkout(checkout, declared_commit=commit, declared_tree=tree)
     artifacts = collect_local_candidate_artifacts(
         dist,
         package_version=package_version,
         source_commit=commit,
         source_tree=tree,
+        repository=ci_repository,
+        run_id=ci_run_id,
+        run_attempt=ci_run_attempt,
+        artifact_id=ci_artifact_id,
+        artifact_digest=ci_artifact_digest,
+        artifact_size=ci_artifact_size,
+        artifact_expires_at=ci_artifact_expires_at,
     )
     with installation_context(dist, artifacts, package_version) as wheel_python:
         payload = _validate_probe_payload(probe_runner(wheel_python, expected_plan))
@@ -1629,6 +1796,13 @@ def run_create_gate(
         package_version=package_version,
         source_commit=commit,
         source_tree=tree,
+        repository=ci_repository,
+        run_id=ci_run_id,
+        run_attempt=ci_run_attempt,
+        artifact_id=ci_artifact_id,
+        artifact_digest=ci_artifact_digest,
+        artifact_size=ci_artifact_size,
+        artifact_expires_at=ci_artifact_expires_at,
     )
     if final_artifacts != artifacts:
         raise ReceiptError("candidate artifacts changed during the live gate")
@@ -1657,6 +1831,13 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--commit", required=True)
     create.add_argument("--tree", required=True)
     create.add_argument("--expected-plan", choices=("pro",), required=True)
+    create.add_argument("--repository", required=True)
+    create.add_argument("--ci-run-id", required=True)
+    create.add_argument("--ci-run-attempt", required=True)
+    create.add_argument("--ci-artifact-id", required=True)
+    create.add_argument("--ci-artifact-digest", required=True)
+    create.add_argument("--ci-artifact-size", required=True)
+    create.add_argument("--ci-artifact-expires-at", required=True)
 
     verify = commands.add_parser("verify")
     verify.add_argument("--receipt", type=Path, required=True)
@@ -1665,6 +1846,13 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--commit", required=True)
     verify.add_argument("--tree", required=True)
     verify.add_argument("--sha256", required=True)
+    verify.add_argument("--repository", required=True)
+    verify.add_argument("--ci-run-id", required=True)
+    verify.add_argument("--ci-run-attempt", required=True)
+    verify.add_argument("--ci-artifact-id", required=True)
+    verify.add_argument("--ci-artifact-digest", required=True)
+    verify.add_argument("--ci-artifact-size", required=True)
+    verify.add_argument("--ci-artifact-expires-at", required=True)
 
     internal = commands.add_parser("_probe", help=argparse.SUPPRESS)
     internal.add_argument("--output", type=Path, required=True)
@@ -1683,8 +1871,23 @@ def main(argv: list[str] | None = None) -> int:
                 declared_commit=args.commit,
                 declared_tree=args.tree,
                 expected_plan=args.expected_plan,
+                ci_repository=args.repository,
+                ci_run_id=args.ci_run_id,
+                ci_run_attempt=args.ci_run_attempt,
+                ci_artifact_id=args.ci_artifact_id,
+                ci_artifact_digest=args.ci_artifact_digest,
+                ci_artifact_size=args.ci_artifact_size,
+                ci_artifact_expires_at=args.ci_artifact_expires_at,
             )
-            print(f"account receipt created: sha256={digest}")
+            receipt, _payload = _read_receipt(args.output)
+            print(f"account-receipt-sha256: {digest}")
+            print(f"account-artifact-set-sha256: {artifact_set_sha256(receipt['local_candidate_artifacts'])}")
+            print(f"account-ci-run-id: {args.ci_run_id}")
+            print(f"account-ci-run-attempt: {args.ci_run_attempt}")
+            print(f"account-ci-artifact-id: {args.ci_artifact_id}")
+            print(f"account-ci-artifact-digest: {args.ci_artifact_digest}")
+            print(f"account-ci-artifact-size: {args.ci_artifact_size}")
+            print(f"account-ci-artifact-expires-at: {args.ci_artifact_expires_at}")
         elif args.command == "verify":
             digest = verify_receipt_file(
                 args.receipt,
@@ -1693,8 +1896,23 @@ def main(argv: list[str] | None = None) -> int:
                 declared_commit=args.commit,
                 declared_tree=args.tree,
                 expected_sha256=args.sha256,
+                ci_repository=args.repository,
+                ci_run_id=args.ci_run_id,
+                ci_run_attempt=args.ci_run_attempt,
+                ci_artifact_id=args.ci_artifact_id,
+                ci_artifact_digest=args.ci_artifact_digest,
+                ci_artifact_size=args.ci_artifact_size,
+                ci_artifact_expires_at=args.ci_artifact_expires_at,
             )
-            print(f"account receipt verified: sha256={digest}")
+            receipt, _payload = _read_receipt(args.receipt)
+            print(f"account-receipt-sha256: {digest}")
+            print(f"account-artifact-set-sha256: {artifact_set_sha256(receipt['local_candidate_artifacts'])}")
+            print(f"account-ci-run-id: {args.ci_run_id}")
+            print(f"account-ci-run-attempt: {args.ci_run_attempt}")
+            print(f"account-ci-artifact-id: {args.ci_artifact_id}")
+            print(f"account-ci-artifact-digest: {args.ci_artifact_digest}")
+            print(f"account-ci-artifact-size: {args.ci_artifact_size}")
+            print(f"account-ci-artifact-expires-at: {args.ci_artifact_expires_at}")
         else:
             run_installed_live_probe(args.output, args.expected_plan)
     except Exception:

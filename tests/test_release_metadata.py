@@ -8,8 +8,10 @@ import os
 import re
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 import urllib.response
+from datetime import datetime, timezone
 from email.message import Message
 from pathlib import Path
 
@@ -91,12 +93,24 @@ def _release_source_guard() -> str:
     return "\n".join(script)
 
 
+VALID_TAG_EVIDENCE_LINES = (
+    "account-receipt-sha256: " + "a" * 64,
+    "account-artifact-set-sha256: " + "b" * 64,
+    "account-ci-run-id: 12345",
+    "account-ci-run-attempt: 2",
+    "account-ci-artifact-id: 67890",
+    "account-ci-artifact-digest: sha256:" + "c" * 64,
+    "account-ci-artifact-size: 31415",
+    "account-ci-artifact-expires-at: 2099-07-10T13:17:42Z",
+)
+
+
 def _run_release_source_guard(
     tmp_path: Path,
     tag_kind: str,
     *,
     mismatched_event: bool = False,
-    receipt_lines: tuple[str, ...] = ("account-receipt-sha256: " + "a" * 64,),
+    receipt_lines: tuple[str, ...] = VALID_TAG_EVIDENCE_LINES,
 ) -> subprocess.CompletedProcess[str]:
     remote = tmp_path / "origin.git"
     source = tmp_path / "source"
@@ -463,23 +477,14 @@ def test_workflow_actions_are_pinned_to_full_commit_shas() -> None:
     assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for _, _, revision in references)
 
 
-def test_ci_checkouts_do_not_persist_credentials() -> None:
-    lines = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text(
-        encoding="utf-8"
-    ).splitlines()
-    checkout_indexes = [
-        index for index, line in enumerate(lines) if "- uses: actions/checkout@" in line
-    ]
-
-    assert checkout_indexes
-    for index in checkout_indexes:
-        step_indent = len(lines[index]) - len(lines[index].lstrip())
-        block: list[str] = []
-        for line in lines[index + 1 :]:
-            if line.strip() and len(line) - len(line.lstrip()) <= step_indent:
-                break
-            block.append(line.strip())
-        assert "persist-credentials: false" in block
+def test_ci_and_release_checkouts_do_not_persist_git_credentials() -> None:
+    for name in ("ci.yml", "release.yml"):
+        workflow = (PROJECT_ROOT / ".github" / "workflows" / name).read_text(
+            encoding="utf-8"
+        )
+        checkout_count = workflow.count("uses: actions/checkout@")
+        assert checkout_count > 0
+        assert checkout_count == workflow.count("persist-credentials: false")
 
 
 def test_release_source_guard_accepts_remote_annotated_tag_after_local_clobber(
@@ -493,14 +498,22 @@ def test_release_source_guard_accepts_remote_annotated_tag_after_local_clobber(
 @pytest.mark.parametrize(
     ("receipt_lines", "expected_error"),
     [
-        ((), "exactly one account receipt SHA-256"),
-        (("account-receipt-sha256: not-a-digest",), "must be 64 lowercase hex"),
+        ((), "exactly one account-receipt-sha256 field"),
+        (
+            tuple(
+                "account-receipt-sha256: not-a-digest"
+                if line.startswith("account-receipt-sha256:")
+                else line
+                for line in VALID_TAG_EVIDENCE_LINES
+            ),
+            "must be 64 lowercase hex",
+        ),
         (
             (
                 "account-receipt-sha256: " + "a" * 64,
                 "account-receipt-sha256: " + "b" * 64,
             ),
-            "exactly one account receipt SHA-256",
+            "exactly one account-receipt-sha256 field",
         ),
     ],
 )
@@ -517,6 +530,73 @@ def test_release_source_guard_rejects_missing_or_malformed_receipt_digest(
 
     assert result.returncode == 1
     assert expected_error in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "account-artifact-set-sha256",
+        "account-ci-run-id",
+        "account-ci-run-attempt",
+        "account-ci-artifact-id",
+        "account-ci-artifact-digest",
+        "account-ci-artifact-size",
+        "account-ci-artifact-expires-at",
+    ],
+)
+@pytest.mark.parametrize("mode", ["missing", "duplicate"])
+def test_release_source_guard_requires_each_candidate_field_exactly_once(
+    tmp_path: Path,
+    field: str,
+    mode: str,
+) -> None:
+    matching = next(line for line in VALID_TAG_EVIDENCE_LINES if line.startswith(f"{field}:"))
+    if mode == "missing":
+        lines = tuple(line for line in VALID_TAG_EVIDENCE_LINES if line != matching)
+    else:
+        lines = (*VALID_TAG_EVIDENCE_LINES, matching)
+
+    result = _run_release_source_guard(tmp_path, "annotated", receipt_lines=lines)
+
+    assert result.returncode == 1
+    assert f"exactly one {field} field" in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    ("field", "malformed", "expected_error"),
+    [
+        ("account-ci-run-id", "0", "positive integers"),
+        ("account-ci-artifact-digest", "sha256:not-hex", "digest is malformed"),
+        ("account-ci-artifact-expires-at", "2099-07-10", "expiry is malformed"),
+    ],
+)
+def test_release_source_guard_rejects_malformed_candidate_identity(
+    tmp_path: Path,
+    field: str,
+    malformed: str,
+    expected_error: str,
+) -> None:
+    lines = tuple(
+        f"{field}: {malformed}" if line.startswith(f"{field}:") else line
+        for line in VALID_TAG_EVIDENCE_LINES
+    )
+
+    result = _run_release_source_guard(tmp_path, "annotated", receipt_lines=lines)
+
+    assert result.returncode == 1
+    assert expected_error in result.stdout + result.stderr
+
+
+def test_release_source_guard_does_not_prefix_match_candidate_fields(tmp_path: Path) -> None:
+    lines = tuple(
+        "account-ci-run-id-extra: 12345" if line.startswith("account-ci-run-id:") else line
+        for line in VALID_TAG_EVIDENCE_LINES
+    )
+
+    result = _run_release_source_guard(tmp_path, "annotated", receipt_lines=lines)
+
+    assert result.returncode == 1
+    assert "exactly one account-ci-run-id field" in result.stdout + result.stderr
 
 
 @pytest.mark.parametrize(
@@ -559,12 +639,22 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert "python -m twine check dist/*" in ci
     assert 'scripts/package_smoke.sh dist "$PROJECT_VERSION" "$DIST_VERSION"' in ci
     assert (
+        "name: release-candidate-${{ github.sha }}-${{ github.run_id }}-"
+        "${{ github.run_attempt }}" in ci
+    )
+    assert "path: dist/" in ci
+    assert "retention-days: 90" in ci
+    assert "overwrite: false" in ci
+    assert "overwrite: true" not in ci
+    assert "if: github.event_name == 'push' && github.ref == 'refs/heads/main'" in ci
+    assert (
         "needs: [quality, dependency-audit, test, windows-smoke, lint-installer, mcp-compat, package]"
         in ci
     )
     assert "PUBLIC_SURFACE" not in ci
     assert "workflow_dispatch:" not in release
     assert "  actions: read" in release
+    assert release.count("      actions: read") == 2
     assert "    timeout-minutes: 35" in release
     assert 'VERIFY_REF="refs/release-verification/tag"' in release
     assert 'git fetch --force --no-tags origin "$GITHUB_REF:$VERIFY_REF"' in release
@@ -575,6 +665,13 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert 'git merge-base --is-ancestor "$TAG_COMMIT" origin/main' in release
     assert 'git for-each-ref --format="%(contents)" "$VERIFY_REF"' in release
     assert "account-receipt-sha256:" in release
+    assert "account-artifact-set-sha256:" in release
+    assert "account-ci-run-id:" in release
+    assert "account-ci-run-attempt:" in release
+    assert "account-ci-artifact-id:" in release
+    assert "account-ci-artifact-digest:" in release
+    assert "account-ci-artifact-size:" in release
+    assert "account-ci-artifact-expires-at:" in release
     assert "receipt_sha256:" in release
     assert 'git cat-file -t "$GITHUB_REF"' not in release
     assert "python scripts/verify_release.py --tag" in release
@@ -584,6 +681,13 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert "DIST_VERSION" in release
     assert "Test built artifacts in clean environments" in release
     assert 'scripts/package_smoke.sh dist "$PROJECT_VERSION" "$DIST_VERSION"' in release
+    assert "name: Download the exact account-tested main-CI artifacts" in release
+    assert "run-id: ${{ needs.verify.outputs.candidate_run_id }}" in release
+    assert "artifact-ids: ${{ needs.verify.outputs.candidate_artifact_id }}" in release
+    assert "merge-multiple: true" in release
+    assert "python scripts/release_evidence.py verify-account-handoff" in release
+    assert "--artifact-set-sha256 \"$ACCOUNT_ARTIFACT_SET_SHA256\"" in release
+    assert release.index("verify-account-handoff") < release.index("Publish to PyPI")
     assert "Require the PyPI version to be absent before publication" in release
     assert "--require-absent --attempts 3 --delay 5" in release
     assert "skip-existing: true" in release
@@ -595,6 +699,7 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert "scripts/release_evidence.py create" in release
     assert "scripts/release_evidence.py verify" in release
     assert "release-workflow-artifacts.json" in release
+    assert "python -m build" not in release
     assert 'gh pr view "$PR_NUMBER" --json mergeCommit,state' in readme
     assert (
         "```bash\nset -euo pipefail\ngit fetch --no-tags origin main:refs/remotes/origin/main"
@@ -711,6 +816,34 @@ def test_exact_main_ci_selector_uses_latest_attempt_and_fails_closed() -> None:
         select_exact_main_run(payload, commit)
 
 
+def test_exact_main_ci_selector_prioritizes_distinct_run_id_over_attempt() -> None:
+    commit = "e" * 40
+    payload = {
+        "workflow_runs": [
+            {
+                "id": 20,
+                "run_attempt": 9,
+                "head_sha": commit,
+                "head_branch": "main",
+                "event": "push",
+                "status": "completed",
+                "conclusion": "failure",
+            },
+            {
+                "id": 21,
+                "run_attempt": 1,
+                "head_sha": commit,
+                "head_branch": "main",
+                "event": "push",
+                "status": "completed",
+                "conclusion": "success",
+            },
+        ]
+    }
+
+    assert select_exact_main_run(payload, commit) == ("success", 21)
+
+
 def test_exact_main_ci_selector_reports_pending_or_missing_without_guessing() -> None:
     commit = "d" * 40
     pending = {
@@ -731,6 +864,116 @@ def test_exact_main_ci_selector_reports_pending_or_missing_without_guessing() ->
     assert select_exact_main_run({"workflow_runs": []}, commit) == ("missing", None)
     with pytest.raises(ValueError, match="workflow_runs list"):
         select_exact_main_run({"workflow_runs": "wrong"}, commit)
+
+
+def test_exact_main_ci_artifact_selector_binds_immutable_attempt_and_expiry() -> None:
+    from scripts.verify_main_ci import select_exact_candidate_artifact
+
+    commit = "a" * 40
+    payload = {
+        "artifacts": [
+            {
+                "id": 67890,
+                "name": f"release-candidate-{commit}-12345-2",
+                "size_in_bytes": 31415,
+                "digest": "sha256:" + "b" * 64,
+                "expired": False,
+                "expires_at": "2099-07-10T13:17:42Z",
+                "workflow_run": {
+                    "id": 12345,
+                    "head_branch": "main",
+                    "head_sha": commit,
+                },
+            }
+        ]
+    }
+
+    identity = select_exact_candidate_artifact(
+        payload,
+        commit=commit,
+        run_id=12345,
+        run_attempt=2,
+        now=datetime(2026, 7, 10, tzinfo=timezone.utc),
+        minimum_lifetime_hours=72,
+    )
+
+    assert identity == {
+        "artifact_digest": "sha256:" + "b" * 64,
+        "artifact_expires_at": "2099-07-10T13:17:42Z",
+        "artifact_id": 67890,
+        "artifact_name": f"release-candidate-{commit}-12345-2",
+        "artifact_size": 31415,
+        "run_attempt": 2,
+        "run_id": 12345,
+    }
+
+    payload["artifacts"][0]["expired"] = True
+    with pytest.raises(ValueError, match="expired"):
+        select_exact_candidate_artifact(
+            payload,
+            commit=commit,
+            run_id=12345,
+            run_attempt=2,
+            now=datetime(2026, 7, 10, tzinfo=timezone.utc),
+            minimum_lifetime_hours=72,
+        )
+
+
+@pytest.mark.parametrize(
+    ("candidate_attempts", "expected_attempt"),
+    [
+        ([1], 1),
+        ([1, 2], 2),
+    ],
+)
+def test_main_ci_discovery_selects_newest_available_producing_attempt(
+    candidate_attempts: list[int],
+    expected_attempt: int,
+) -> None:
+    from scripts.verify_main_ci import select_latest_candidate_artifact
+
+    commit = "a" * 40
+    artifacts = [
+        {
+            "id": 67000 + attempt,
+            "name": f"release-candidate-{commit}-12345-{attempt}",
+            "size_in_bytes": 31415 + attempt,
+            "digest": "sha256:" + str(attempt) * 64,
+            "expired": False,
+            "expires_at": "2099-07-10T13:17:42Z",
+            "workflow_run": {
+                "id": 12345,
+                "head_branch": "main",
+                "head_sha": commit,
+            },
+        }
+        for attempt in candidate_attempts
+    ]
+
+    selected = select_latest_candidate_artifact(
+        {"artifacts": artifacts},
+        commit=commit,
+        run_id=12345,
+        latest_run_attempt=2,
+        now=datetime(2026, 7, 10, tzinfo=timezone.utc),
+    )
+
+    assert selected["run_attempt"] == expected_attempt
+    assert selected["artifact_id"] == 67000 + expected_attempt
+
+
+def test_main_ci_artifact_page_rejects_partial_or_invalid_pagination() -> None:
+    from scripts.verify_main_ci import _complete_artifact_page
+
+    artifact = {"id": 1}
+    assert _complete_artifact_page({"total_count": 1, "artifacts": [artifact]}) == {
+        "total_count": 1,
+        "artifacts": [artifact],
+    }
+    with pytest.raises(ValueError, match="incomplete"):
+        _complete_artifact_page({"total_count": 2, "artifacts": [artifact]})
+    with pytest.raises(ValueError, match="invalid"):
+        _complete_artifact_page({"total_count": True, "artifacts": [artifact]})
 
 
 class _NoNetworkHTTPTransport(urllib.request.BaseHandler):
@@ -797,6 +1040,218 @@ def test_exact_main_ci_fetch_preserves_non_redirect_behavior(monkeypatch) -> Non
     }
     assert len(transport.requests) == 1
     assert transport.requests[0].get_header("Authorization") == "Bearer SYNTHETIC_GITHUB_TOKEN"
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_exact_main_ci_fetch_rejects_permanent_http_errors_without_retry(
+    status: int,
+    monkeypatch,
+    capsys,
+) -> None:
+    calls = 0
+
+    def fetch(_repository: str, _token: str):
+        nonlocal calls
+        calls += 1
+        raise urllib.error.HTTPError(
+            "https://api.github.com/repos/owner/repo/actions/workflows/ci.yml/runs",
+            status,
+            "synthetic",
+            Message(),
+            None,
+        )
+
+    monkeypatch.setattr(verify_main_ci, "_fetch_runs", fetch)
+    monkeypatch.setenv("GH_TOKEN", "SYNTHETIC_GITHUB_TOKEN")
+
+    result = verify_main_ci.main(
+        [
+            "--repository",
+            "owner/repo",
+            "--commit",
+            "a" * 40,
+            "--attempts",
+            "3",
+            "--delay",
+            "0",
+        ]
+    )
+
+    assert result == 1
+    assert calls == 1
+    assert f"HTTP {status}" in capsys.readouterr().err
+
+
+def test_exact_main_ci_fetch_retries_transient_http_error(monkeypatch) -> None:
+    commit = "a" * 40
+    calls = 0
+    sleeps: list[float] = []
+
+    def fetch(_repository: str, _token: str):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise urllib.error.HTTPError(
+                "https://api.github.com/repos/owner/repo/actions/workflows/ci.yml/runs",
+                503,
+                "synthetic",
+                Message(),
+                None,
+            )
+        return {
+            "workflow_runs": [
+                {
+                    "id": 123,
+                    "run_attempt": 1,
+                    "head_sha": commit,
+                    "head_branch": "main",
+                    "event": "push",
+                    "status": "completed",
+                    "conclusion": "success",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(verify_main_ci, "_fetch_runs", fetch)
+    monkeypatch.setattr(verify_main_ci.time, "sleep", sleeps.append)
+    monkeypatch.setenv("GH_TOKEN", "SYNTHETIC_GITHUB_TOKEN")
+
+    assert verify_main_ci.main(
+        [
+            "--repository",
+            "owner/repo",
+            "--commit",
+            commit,
+            "--attempts",
+            "2",
+            "--delay",
+            "0",
+        ]
+    ) == 0
+    assert calls == 2
+    assert sleeps == [0.0]
+
+
+def test_pinned_main_ci_accepts_artifact_from_earlier_successful_attempt(
+    monkeypatch,
+) -> None:
+    commit = "a" * 40
+    expected_run_id = 12345
+    fetched_runs: list[int] = []
+
+    def fetch_run(_repository: str, _token: str, run_id: int):
+        fetched_runs.append(run_id)
+        return {
+            "id": expected_run_id,
+            "run_attempt": 2,
+            "head_sha": commit,
+            "head_branch": "main",
+            "event": "push",
+            "path": ".github/workflows/ci.yml@refs/heads/main",
+            "status": "completed",
+            "conclusion": "success",
+        }
+
+    def fetch_artifacts(_repository: str, _token: str, run_id: int):
+        assert run_id == expected_run_id
+        return {
+            "artifacts": [
+                {
+                    "id": 67890,
+                    "name": f"release-candidate-{commit}-{expected_run_id}-1",
+                    "size_in_bytes": 31415,
+                    "digest": "sha256:" + "b" * 64,
+                    "expired": False,
+                    "expires_at": "2099-07-10T13:17:42Z",
+                    "workflow_run": {
+                        "id": expected_run_id,
+                        "head_branch": "main",
+                        "head_sha": commit,
+                    },
+                }
+            ]
+        }
+
+    monkeypatch.setattr(verify_main_ci, "_fetch_run", fetch_run)
+    monkeypatch.setattr(verify_main_ci, "_fetch_artifacts", fetch_artifacts)
+    monkeypatch.setenv("GH_TOKEN", "SYNTHETIC_GITHUB_TOKEN")
+
+    assert verify_main_ci.main(
+        [
+            "--repository",
+            "owner/repo",
+            "--commit",
+            commit,
+            "--attempts",
+            "1",
+            "--expected-run-id",
+            str(expected_run_id),
+            "--expected-run-attempt",
+            "1",
+            "--expected-artifact-id",
+            "67890",
+            "--expected-artifact-digest",
+            "sha256:" + "b" * 64,
+            "--expected-artifact-size",
+            "31415",
+            "--expected-artifact-expires-at",
+            "2099-07-10T13:17:42Z",
+            "--minimum-artifact-lifetime-hours",
+            "1",
+        ]
+    ) == 0
+    assert fetched_runs == [expected_run_id]
+
+
+def test_pinned_main_ci_rejects_matching_run_from_a_different_workflow(
+    monkeypatch,
+    capsys,
+) -> None:
+    commit = "a" * 40
+
+    monkeypatch.setattr(
+        verify_main_ci,
+        "_fetch_run",
+        lambda _repository, _token, _run_id: {
+            "id": 12345,
+            "run_attempt": 1,
+            "head_sha": commit,
+            "head_branch": "main",
+            "event": "push",
+            "path": ".github/workflows/not-ci.yml@refs/heads/main",
+            "status": "completed",
+            "conclusion": "success",
+        },
+    )
+    monkeypatch.setenv("GH_TOKEN", "SYNTHETIC_GITHUB_TOKEN")
+
+    result = verify_main_ci.main(
+        [
+            "--repository",
+            "owner/repo",
+            "--commit",
+            commit,
+            "--attempts",
+            "1",
+            "--expected-run-id",
+            "12345",
+            "--expected-run-attempt",
+            "1",
+            "--expected-artifact-id",
+            "67890",
+            "--expected-artifact-digest",
+            "sha256:" + "b" * 64,
+            "--expected-artifact-size",
+            "31415",
+            "--expected-artifact-expires-at",
+            "2099-07-10T13:17:42Z",
+            "--minimum-artifact-lifetime-hours",
+            "1",
+        ]
+    )
+
+    assert result == 1
+    assert "workflow path" in capsys.readouterr().err
 
 
 def test_account_reported_quota_is_not_documented_as_a_fixed_limit() -> None:
@@ -909,8 +1364,66 @@ def test_release_artifact_uploads_are_safe_to_rerun_in_the_same_run() -> None:
     )
 
 
+def test_account_artifact_handoff_digest_is_shared_and_fails_closed(tmp_path: Path) -> None:
+    from scripts.release_evidence import (
+        account_artifact_set,
+        account_artifact_set_sha256,
+        verify_account_artifact_handoff,
+    )
+    from scripts.verify_account_receipt import (
+        artifact_set_sha256,
+        collect_local_candidate_artifacts,
+    )
+
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    wheel = dist / "gpt2agent-0.0.12-py3-none-any.whl"
+    sdist = dist / "gpt2agent-0.0.12.tar.gz"
+    wheel.write_bytes(b"wheel")
+    sdist.write_bytes(b"sdist")
+    identity = {
+        "source_commit": "1" * 40,
+        "source_tree": "2" * 40,
+        "repository": "robotlearning123/gpt2agent",
+        "run_id": "12345",
+        "run_attempt": "2",
+        "artifact_id": "67890",
+        "artifact_digest": "sha256:" + "a" * 64,
+        "artifact_size": "31415",
+        "artifact_expires_at": "2099-07-10T13:17:42Z",
+    }
+
+    receipt_artifacts = collect_local_candidate_artifacts(
+        dist,
+        package_version="0.0.12",
+        **identity,
+    )
+    release_artifacts = account_artifact_set(dist, **identity)
+    digest = artifact_set_sha256(receipt_artifacts)
+
+    assert receipt_artifacts == release_artifacts
+    assert digest == account_artifact_set_sha256(dist, **identity)
+    verify_account_artifact_handoff(
+        dist,
+        artifact_set_sha256=digest,
+        **identity,
+    )
+
+    wheel.write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="account-tested artifact set"):
+        verify_account_artifact_handoff(
+            dist,
+            artifact_set_sha256=digest,
+            **identity,
+        )
+
+
 def test_release_evidence_binds_source_receipt_and_artifact_hashes(tmp_path: Path) -> None:
-    from scripts.release_evidence import build_manifest, verify_manifest
+    from scripts.release_evidence import (
+        account_artifact_set_sha256,
+        build_manifest,
+        verify_manifest,
+    )
 
     dist = tmp_path / "dist"
     dist.mkdir()
@@ -922,6 +1435,27 @@ def test_release_evidence_binds_source_receipt_and_artifact_hashes(tmp_path: Pat
     tree = "2" * 40
     tag_object = "3" * 40
     receipt = "4" * 64
+    candidate = {
+        "candidate_run_id": "54321",
+        "candidate_run_attempt": "2",
+        "candidate_artifact_id": "67890",
+        "candidate_artifact_digest": "sha256:" + "6" * 64,
+        "candidate_artifact_size": "31415",
+        "candidate_artifact_expires_at": "2099-07-10T13:17:42Z",
+    }
+    account_artifact_set = account_artifact_set_sha256(
+        dist,
+        source_commit=commit,
+        source_tree=tree,
+        repository="robotlearning123/gpt2agent",
+        run_id=candidate["candidate_run_id"],
+        run_attempt=candidate["candidate_run_attempt"],
+        artifact_id=candidate["candidate_artifact_id"],
+        artifact_digest=candidate["candidate_artifact_digest"],
+        artifact_size=candidate["candidate_artifact_size"],
+        artifact_expires_at=candidate["candidate_artifact_expires_at"],
+    )
+    candidate["account_artifact_set_sha256"] = account_artifact_set
 
     manifest = build_manifest(
         dist,
@@ -934,11 +1468,29 @@ def test_release_evidence_binds_source_receipt_and_artifact_hashes(tmp_path: Pat
         run_id="12345",
         run_attempt="1",
         job="build",
+        **candidate,
     )
 
     assert manifest["receipt_sha256"] == receipt
     assert manifest["source"] == {"commit": commit, "tree": tree}
     assert manifest["workflow"]["run_attempt"] == "1"
+    assert manifest["account_handoff"] == {
+        "artifact_set_sha256": account_artifact_set,
+        "candidate": {
+            "artifact_digest": "sha256:" + "6" * 64,
+            "artifact_expires_at": "2099-07-10T13:17:42Z",
+            "artifact_id": 67890,
+            "artifact_name": f"release-candidate-{commit}-54321-2",
+            "artifact_size": 31415,
+            "event": "push",
+            "job": "package",
+            "ref": "refs/heads/main",
+            "repository": "robotlearning123/gpt2agent",
+            "run_attempt": 2,
+            "run_id": 54321,
+            "workflow_file": ".github/workflows/ci.yml",
+        },
+    }
     assert [artifact["filename"] for artifact in manifest["artifacts"]] == [
         sdist.name,
         wheel.name,
@@ -954,6 +1506,7 @@ def test_release_evidence_binds_source_receipt_and_artifact_hashes(tmp_path: Pat
         repository="robotlearning123/gpt2agent",
         run_id="12345",
         run_attempt="2",
+        **candidate,
     )
 
     manifest["workflow"]["job"] = "test"
@@ -969,11 +1522,12 @@ def test_release_evidence_binds_source_receipt_and_artifact_hashes(tmp_path: Pat
             repository="robotlearning123/gpt2agent",
             run_id="12345",
             run_attempt="2",
+            **candidate,
         )
     manifest["workflow"]["job"] = "build"
 
     wheel.write_bytes(b"tampered")
-    with pytest.raises(ValueError, match="artifact metadata does not match"):
+    with pytest.raises(ValueError, match="account-tested artifact set"):
         verify_manifest(
             manifest,
             dist,
@@ -985,6 +1539,24 @@ def test_release_evidence_binds_source_receipt_and_artifact_hashes(tmp_path: Pat
             repository="robotlearning123/gpt2agent",
             run_id="12345",
             run_attempt="2",
+            **candidate,
+        )
+
+    wheel.write_bytes(b"wheel")
+    manifest["account_handoff"]["candidate"]["artifact_id"] = 99999
+    with pytest.raises(ValueError, match="account handoff"):
+        verify_manifest(
+            manifest,
+            dist,
+            tag="v1.2.3",
+            tag_object=tag_object,
+            commit=commit,
+            tree=tree,
+            receipt_sha256=receipt,
+            repository="robotlearning123/gpt2agent",
+            run_id="12345",
+            run_attempt="2",
+            **candidate,
         )
 
 
@@ -1006,6 +1578,13 @@ def test_release_evidence_requires_build_job_and_exact_dist_contents(
         "repository": "robotlearning123/gpt2agent",
         "run_id": "12345",
         "run_attempt": "1",
+        "candidate_run_id": "54321",
+        "candidate_run_attempt": "2",
+        "candidate_artifact_id": "67890",
+        "candidate_artifact_digest": "sha256:" + "6" * 64,
+        "candidate_artifact_size": "31415",
+        "candidate_artifact_expires_at": "2099-07-10T13:17:42Z",
+        "account_artifact_set_sha256": "5" * 64,
     }
 
     with pytest.raises(ValueError, match="workflow job must be build"):

@@ -217,6 +217,16 @@ jobs:
           DIST_VERSION="$(python scripts/verify_release.py --print-distribution-version)"
           scripts/package_smoke.sh dist "$PROJECT_VERSION" "$DIST_VERSION"
 
+      - name: Retain exact main-CI release candidate
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-candidate-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 90
+
   required:
     name: Required checks
     if: ${{ always() }}

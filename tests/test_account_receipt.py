@@ -541,7 +541,7 @@ def test_installed_probe_payload_requires_coherent_adapter_evidence() -> None:
     from scripts.verify_account_receipt import ReceiptError, _validate_probe_payload
 
     payload = {
-        "schema_version": "3",
+        "schema_version": "4",
         "package_version": "0.0.12",
         "plan_class": "pro",
         "started_at": "2026-07-10T13:17:00Z",
@@ -653,6 +653,13 @@ def _create_receipt_fixture(tmp_path: Path, *, secret: str = "SYNTHETIC-SECRET")
         package_version="0.0.12",
         source_commit=commit,
         source_tree=tree,
+        repository="robotlearning123/gpt2agent",
+        run_id="12345",
+        run_attempt="2",
+        artifact_id="67890",
+        artifact_digest="sha256:" + "a" * 64,
+        artifact_size="31415",
+        artifact_expires_at="2099-07-10T13:17:42Z",
     )
     receipt = build_receipt(
         package_version="0.0.12",
@@ -695,10 +702,10 @@ def test_receipt_is_closed_canonical_secret_free_and_sha256_bound(tmp_path: Path
         "counts",
         "shape_results",
     }
-    assert receipt["schema_version"] == "3"
+    assert receipt["schema_version"] == "4"
     assert receipt["verifier"] == {
         "name": "gpt2agent-account-receipt",
-        "version": "3",
+        "version": "4",
     }
     assert receipt["adapter_status"] == "passed"
     assert {
@@ -770,6 +777,13 @@ def test_verify_receipt_invalidates_later_artifact_or_source_change(tmp_path: Pa
             declared_commit=commit,
             declared_tree=tree,
             expected_sha256=digest,
+            ci_repository="robotlearning123/gpt2agent",
+            ci_run_id="12345",
+            ci_run_attempt="2",
+            ci_artifact_id="67890",
+            ci_artifact_digest="sha256:" + "a" * 64,
+            ci_artifact_size="31415",
+            ci_artifact_expires_at="2099-07-10T13:17:42Z",
         )
         == digest
     )
@@ -785,6 +799,13 @@ def test_verify_receipt_invalidates_later_artifact_or_source_change(tmp_path: Pa
             declared_commit=commit,
             declared_tree=tree,
             expected_sha256=digest,
+            ci_repository="robotlearning123/gpt2agent",
+            ci_run_id="12345",
+            ci_run_attempt="2",
+            ci_artifact_id="67890",
+            ci_artifact_digest="sha256:" + "a" * 64,
+            ci_artifact_size="31415",
+            ci_artifact_expires_at="2099-07-10T13:17:42Z",
         )
     wheel.write_bytes(original_wheel)
 
@@ -798,6 +819,13 @@ def test_verify_receipt_invalidates_later_artifact_or_source_change(tmp_path: Pa
             declared_commit=commit,
             declared_tree=tree,
             expected_sha256=digest,
+            ci_repository="robotlearning123/gpt2agent",
+            ci_run_id="12345",
+            ci_run_attempt="2",
+            ci_artifact_id="67890",
+            ci_artifact_digest="sha256:" + "a" * 64,
+            ci_artifact_size="31415",
+            ci_artifact_expires_at="2099-07-10T13:17:42Z",
         )
     assert extra_name not in str(caught.value)
     (dist / extra_name).unlink()
@@ -811,7 +839,47 @@ def test_verify_receipt_invalidates_later_artifact_or_source_change(tmp_path: Pa
             declared_commit=commit,
             declared_tree=tree,
             expected_sha256=digest,
+            ci_repository="robotlearning123/gpt2agent",
+            ci_run_id="12345",
+            ci_run_attempt="2",
+            ci_artifact_id="67890",
+            ci_artifact_digest="sha256:" + "a" * 64,
+            ci_artifact_size="31415",
+            ci_artifact_expires_at="2099-07-10T13:17:42Z",
         )
+
+
+def test_historical_receipt_verification_survives_actions_artifact_expiry(
+    tmp_path: Path,
+) -> None:
+    from scripts.verify_account_receipt import verify_receipt_file, write_receipt
+
+    checkout, dist, commit, tree, receipt, _receipt_path, _digest = _create_receipt_fixture(
+        tmp_path
+    )
+    expired_at = "2020-01-01T00:00:00Z"
+    receipt["local_candidate_artifacts"]["workflow"]["artifact_expires_at"] = expired_at
+    historical_receipt = tmp_path / "historical-account-receipt.json"
+    digest = write_receipt(historical_receipt, receipt)
+
+    assert (
+        verify_receipt_file(
+            historical_receipt,
+            checkout=checkout,
+            dist=dist,
+            declared_commit=commit,
+            declared_tree=tree,
+            expected_sha256=digest,
+            ci_repository="robotlearning123/gpt2agent",
+            ci_run_id="12345",
+            ci_run_attempt="2",
+            ci_artifact_id="67890",
+            ci_artifact_digest="sha256:" + "a" * 64,
+            ci_artifact_size="31415",
+            ci_artifact_expires_at=expired_at,
+        )
+        == digest
+    )
 
 
 def test_verify_receipt_rejects_noncanonical_or_wrong_digest_without_value_leak(
@@ -831,6 +899,13 @@ def test_verify_receipt_rejects_noncanonical_or_wrong_digest_without_value_leak(
             declared_commit=commit,
             declared_tree=tree,
             expected_sha256="0" * 64,
+            ci_repository="robotlearning123/gpt2agent",
+            ci_run_id="12345",
+            ci_run_attempt="2",
+            ci_artifact_id="67890",
+            ci_artifact_digest="sha256:" + "a" * 64,
+            ci_artifact_size="31415",
+            ci_artifact_expires_at="2099-07-10T13:17:42Z",
         )
     assert secret not in str(caught.value)
 
@@ -843,11 +918,18 @@ def test_verify_receipt_rejects_noncanonical_or_wrong_digest_without_value_leak(
             declared_commit=commit,
             declared_tree=tree,
             expected_sha256=digest,
+            ci_repository="robotlearning123/gpt2agent",
+            ci_run_id="12345",
+            ci_run_attempt="2",
+            ci_artifact_id="67890",
+            ci_artifact_digest="sha256:" + "a" * 64,
+            ci_artifact_size="31415",
+            ci_artifact_expires_at="2099-07-10T13:17:42Z",
         )
     assert secret not in str(caught.value)
 
 
-def test_create_gate_builds_and_installs_both_artifacts_before_probe(tmp_path: Path) -> None:
+def test_create_gate_tests_existing_main_ci_artifacts_before_probe(tmp_path: Path) -> None:
     from scripts.verify_account_receipt import (
         canonical_json,
         run_create_gate,
@@ -856,15 +938,9 @@ def test_create_gate_builds_and_installs_both_artifacts_before_probe(tmp_path: P
 
     checkout, commit, tree = _create_checkout(tmp_path)
     inside_dist = checkout / "dist"
-    dist = tmp_path / "candidate-dist"
+    dist = _create_artifacts(tmp_path)
     output = tmp_path / "created-account-receipt.json"
     events: list[str] = []
-
-    def builder(_checkout: Path, build_dist: Path) -> None:
-        events.append("build")
-        build_dist.mkdir()
-        (build_dist / "gpt2agent-0.0.12-py3-none-any.whl").write_bytes(b"wheel")
-        (build_dist / "gpt2agent-0.0.12.tar.gz").write_bytes(b"sdist")
 
     @contextmanager
     def installer(_dist: Path, _artifacts: dict, _version: str):
@@ -875,7 +951,7 @@ def test_create_gate_builds_and_installs_both_artifacts_before_probe(tmp_path: P
         events.append("probe")
         assert expected_plan == "pro"
         return {
-            "schema_version": "3",
+            "schema_version": "4",
             "package_version": "0.0.12",
             "plan_class": "pro",
             "started_at": "2026-07-10T13:17:00Z",
@@ -893,7 +969,13 @@ def test_create_gate_builds_and_installs_both_artifacts_before_probe(tmp_path: P
             declared_commit=commit,
             declared_tree=tree,
             expected_plan="pro",
-            builder=builder,
+            ci_repository="robotlearning123/gpt2agent",
+            ci_run_id="12345",
+            ci_run_attempt="2",
+            ci_artifact_id="67890",
+            ci_artifact_digest="sha256:" + "a" * 64,
+            ci_artifact_size="31415",
+            ci_artifact_expires_at="2099-07-10T13:17:42Z",
             installation_context=installer,
             probe_runner=probe_runner,
         )
@@ -906,18 +988,121 @@ def test_create_gate_builds_and_installs_both_artifacts_before_probe(tmp_path: P
         declared_commit=commit,
         declared_tree=tree,
         expected_plan="pro",
-        builder=builder,
+        ci_repository="robotlearning123/gpt2agent",
+        ci_run_id="12345",
+        ci_run_attempt="2",
+        ci_artifact_id="67890",
+        ci_artifact_digest="sha256:" + "a" * 64,
+        ci_artifact_size="31415",
+        ci_artifact_expires_at="2099-07-10T13:17:42Z",
         installation_context=installer,
         probe_runner=probe_runner,
     )
 
-    assert events == ["build", "install-wheel", "install-sdist", "probe"]
+    assert events == ["install-wheel", "install-sdist", "probe"]
     receipt = json.loads(output.read_text(encoding="utf-8"))
     assert output.read_bytes() == canonical_json(receipt)
     assert len(digest) == 64
     assert validate_receipt(receipt) is None
     assert receipt["counts"]["adapters_passed"] == 11
+    assert receipt["local_candidate_artifacts"]["build_origin"] == "main_ci_package_artifact"
+    assert receipt["local_candidate_artifacts"]["workflow"] == {
+        "artifact_digest": "sha256:" + "a" * 64,
+        "artifact_expires_at": "2099-07-10T13:17:42Z",
+        "artifact_id": 67890,
+        "artifact_name": f"release-candidate-{commit}-12345-2",
+        "artifact_size": 31415,
+        "event": "push",
+        "job": "package",
+        "ref": "refs/heads/main",
+        "repository": "robotlearning123/gpt2agent",
+        "run_attempt": 2,
+        "run_id": 12345,
+        "workflow_file": ".github/workflows/ci.yml",
+    }
     assert "SYNTHETIC-SECRET-IN-PROBE" not in output.read_text(encoding="utf-8")
+
+
+def test_create_gate_rejects_receipt_nested_under_not_yet_created_dist(
+    tmp_path: Path,
+) -> None:
+    from scripts.verify_account_receipt import ReceiptError, run_create_gate
+
+    checkout, commit, tree = _create_checkout(tmp_path)
+    dist = tmp_path / "not-yet-created-dist"
+    output = dist / "account-receipt.json"
+    with pytest.raises(
+        ReceiptError,
+        match="outside the candidate artifact directory",
+    ):
+        run_create_gate(
+            checkout=checkout,
+            dist=dist,
+            output=output,
+            declared_commit=commit,
+            declared_tree=tree,
+            expected_plan="pro",
+            ci_repository="robotlearning123/gpt2agent",
+            ci_run_id="12345",
+            ci_run_attempt="2",
+            ci_artifact_id="67890",
+            ci_artifact_digest="sha256:" + "a" * 64,
+            ci_artifact_size="31415",
+            ci_artifact_expires_at="2099-07-10T13:17:42Z",
+        )
+
+
+def test_account_artifact_binding_rejects_expired_ci_artifact(tmp_path: Path) -> None:
+    from scripts.verify_account_receipt import (
+        ReceiptError,
+        collect_local_candidate_artifacts,
+    )
+
+    dist = _create_artifacts(tmp_path)
+    with pytest.raises(ReceiptError, match="expired"):
+        collect_local_candidate_artifacts(
+            dist,
+            package_version="0.0.12",
+            source_commit="a" * 40,
+            source_tree="b" * 40,
+            repository="robotlearning123/gpt2agent",
+            run_id="12345",
+            run_attempt="2",
+            artifact_id="67890",
+            artifact_digest="sha256:" + "a" * 64,
+            artifact_size="31415",
+            artifact_expires_at="2020-01-01T00:00:00Z",
+        )
+
+
+def test_account_artifact_binding_requires_pretag_retention_headroom(
+    tmp_path: Path,
+) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from scripts.verify_account_receipt import (
+        ReceiptError,
+        collect_local_candidate_artifacts,
+    )
+
+    dist = _create_artifacts(tmp_path)
+    expires_soon = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat(
+        timespec="seconds"
+    ).replace("+00:00", "Z")
+    with pytest.raises(ReceiptError, match="expires too soon"):
+        collect_local_candidate_artifacts(
+            dist,
+            package_version="0.0.12",
+            source_commit="a" * 40,
+            source_tree="b" * 40,
+            repository="robotlearning123/gpt2agent",
+            run_id="12345",
+            run_attempt="2",
+            artifact_id="67890",
+            artifact_digest="sha256:" + "a" * 64,
+            artifact_size="31415",
+            artifact_expires_at=expires_soon,
+        )
 
 
 def test_install_context_runs_isolated_wheel_and_sdist_checks_before_yield(
@@ -933,10 +1118,24 @@ def test_install_context_runs_isolated_wheel_and_sdist_checks_before_yield(
     wheel.write_bytes(b"wheel")
     sdist.write_bytes(b"sdist")
     artifacts = {
-        "build_origin": "local_live_gate",
+        "build_origin": "main_ci_package_artifact",
         "source": {"commit": "a" * 40, "tree": "b" * 40},
-        "wheel": {"filename": wheel.name, "sha256": "c" * 64},
-        "sdist": {"filename": sdist.name, "sha256": "d" * 64},
+        "workflow": {
+            "artifact_digest": "sha256:" + "a" * 64,
+            "artifact_expires_at": "2099-07-10T13:17:42Z",
+            "artifact_id": 67890,
+            "artifact_name": "release-candidate-" + "a" * 40 + "-12345-2",
+            "artifact_size": 31415,
+            "event": "push",
+            "job": "package",
+            "ref": "refs/heads/main",
+            "repository": "robotlearning123/gpt2agent",
+            "run_attempt": 2,
+            "run_id": 12345,
+            "workflow_file": ".github/workflows/ci.yml",
+        },
+        "wheel": {"filename": wheel.name, "sha256": "c" * 64, "size_bytes": 5},
+        "sdist": {"filename": sdist.name, "sha256": "d" * 64, "size_bytes": 5},
     }
     commands: list[tuple[str, ...]] = []
 
@@ -1059,6 +1258,20 @@ def test_cli_failure_never_prints_synthetic_receipt_values(tmp_path: Path, capsy
             "b" * 40,
             "--sha256",
             __import__("hashlib").sha256(payload).hexdigest(),
+            "--repository",
+            "robotlearning123/gpt2agent",
+            "--ci-run-id",
+            "12345",
+            "--ci-run-attempt",
+            "2",
+            "--ci-artifact-id",
+            "67890",
+            "--ci-artifact-digest",
+            "sha256:" + "a" * 64,
+            "--ci-artifact-size",
+            "31415",
+            "--ci-artifact-expires-at",
+            "2099-07-10T13:17:42Z",
         ]
     )
 

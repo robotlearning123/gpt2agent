@@ -1,8 +1,9 @@
 name: Release
 
 # Triggers on tag pushes that look like v1.2.3 — typical SemVer.
-# Builds wheel + sdist, publishes to PyPI via OIDC trusted publishing, and
-# creates a GitHub release with the matching CHANGELOG section as body.
+# Validates and publishes the exact account-tested main-CI wheel + sdist via
+# OIDC trusted publishing, then creates a GitHub release with the matching
+# CHANGELOG section as body. It never rebuilds release distributions.
 #
 # One-time PyPI setup (no secrets needed):
 #   https://docs.pypi.org/trusted-publishers/
@@ -36,10 +37,18 @@ jobs:
       commit: ${{ steps.provenance.outputs.commit }}
       tree: ${{ steps.provenance.outputs.tree }}
       receipt_sha256: ${{ steps.provenance.outputs.receipt_sha256 }}
+      account_artifact_set_sha256: ${{ steps.provenance.outputs.account_artifact_set_sha256 }}
+      candidate_run_id: ${{ steps.provenance.outputs.candidate_run_id }}
+      candidate_run_attempt: ${{ steps.provenance.outputs.candidate_run_attempt }}
+      candidate_artifact_id: ${{ steps.provenance.outputs.candidate_artifact_id }}
+      candidate_artifact_digest: ${{ steps.provenance.outputs.candidate_artifact_digest }}
+      candidate_artifact_size: ${{ steps.provenance.outputs.candidate_artifact_size }}
+      candidate_artifact_expires_at: ${{ steps.provenance.outputs.candidate_artifact_expires_at }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -67,17 +76,53 @@ jobs:
             exit 1
           fi
           TAG_MESSAGE="$(git for-each-ref --format="%(contents)" "$VERIFY_REF")"
-          RECEIPT_LINES=()
-          while IFS= read -r receipt_line; do
-            RECEIPT_LINES+=("$receipt_line")
-          done < <(printf '%s\n' "$TAG_MESSAGE" | grep '^account-receipt-sha256:' || true)
-          if [ "${#RECEIPT_LINES[@]}" -ne 1 ]; then
-            echo "::error::Annotated release tag must contain exactly one account receipt SHA-256"
-            exit 1
-          fi
-          RECEIPT_SHA256="${RECEIPT_LINES[0]#account-receipt-sha256: }"
+          tag_field() {
+            LABEL="${1%:}"
+            MATCHES="$(printf '%s\n' "$TAG_MESSAGE" | grep "^${LABEL}:" || true)"
+            MATCH_COUNT="$(printf '%s\n' "$MATCHES" | grep -c . || true)"
+            if [ "$MATCH_COUNT" -ne 1 ] || [ "${MATCHES#"$LABEL: "}" = "$MATCHES" ]; then
+              echo "::error::Annotated release tag must contain exactly one $LABEL field"
+              exit 1
+            fi
+            TAG_VALUE="${MATCHES#"$LABEL: "}"
+          }
+          tag_field account-receipt-sha256:
+          RECEIPT_SHA256="$TAG_VALUE"
+          tag_field account-artifact-set-sha256:
+          ACCOUNT_ARTIFACT_SET_SHA256="$TAG_VALUE"
+          tag_field account-ci-run-id:
+          CANDIDATE_RUN_ID="$TAG_VALUE"
+          tag_field account-ci-run-attempt:
+          CANDIDATE_RUN_ATTEMPT="$TAG_VALUE"
+          tag_field account-ci-artifact-id:
+          CANDIDATE_ARTIFACT_ID="$TAG_VALUE"
+          tag_field account-ci-artifact-digest:
+          CANDIDATE_ARTIFACT_DIGEST="$TAG_VALUE"
+          tag_field account-ci-artifact-size:
+          CANDIDATE_ARTIFACT_SIZE="$TAG_VALUE"
+          tag_field account-ci-artifact-expires-at:
+          CANDIDATE_ARTIFACT_EXPIRES_AT="$TAG_VALUE"
           if ! [[ "$RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
             echo "::error::Account receipt SHA-256 must be 64 lowercase hex characters"
+            exit 1
+          fi
+          if ! [[ "$ACCOUNT_ARTIFACT_SET_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Account artifact-set SHA-256 must be 64 lowercase hex characters"
+            exit 1
+          fi
+          if ! [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]] ||
+             ! [[ "$CANDIDATE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] ||
+             ! [[ "$CANDIDATE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] ||
+             ! [[ "$CANDIDATE_ARTIFACT_SIZE" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Account CI numeric identity fields must be positive integers"
+            exit 1
+          fi
+          if ! [[ "$CANDIDATE_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Account CI artifact digest is malformed"
+            exit 1
+          fi
+          if ! [[ "$CANDIDATE_ARTIFACT_EXPIRES_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?Z$ ]]; then
+            echo "::error::Account CI artifact expiry is malformed"
             exit 1
           fi
           {
@@ -85,6 +130,13 @@ jobs:
             echo "commit=$TAG_COMMIT"
             echo "tree=$(git rev-parse "$TAG_COMMIT^{tree}")"
             echo "receipt_sha256=$RECEIPT_SHA256"
+            echo "account_artifact_set_sha256=$ACCOUNT_ARTIFACT_SET_SHA256"
+            echo "candidate_run_id=$CANDIDATE_RUN_ID"
+            echo "candidate_run_attempt=$CANDIDATE_RUN_ATTEMPT"
+            echo "candidate_artifact_id=$CANDIDATE_ARTIFACT_ID"
+            echo "candidate_artifact_digest=$CANDIDATE_ARTIFACT_DIGEST"
+            echo "candidate_artifact_size=$CANDIDATE_ARTIFACT_SIZE"
+            echo "candidate_artifact_expires_at=$CANDIDATE_ARTIFACT_EXPIRES_AT"
           } >> "$GITHUB_OUTPUT"
 
       - name: Verify tag, manifests, and changelog
@@ -106,7 +158,13 @@ jobs:
           python scripts/verify_main_ci.py
           --repository "$GITHUB_REPOSITORY"
           --commit "${{ steps.provenance.outputs.commit }}"
-          --attempts 180 --delay 10
+          --expected-run-id "${{ steps.provenance.outputs.candidate_run_id }}"
+          --expected-run-attempt "${{ steps.provenance.outputs.candidate_run_attempt }}"
+          --expected-artifact-id "${{ steps.provenance.outputs.candidate_artifact_id }}"
+          --expected-artifact-digest "${{ steps.provenance.outputs.candidate_artifact_digest }}"
+          --expected-artifact-size "${{ steps.provenance.outputs.candidate_artifact_size }}"
+          --expected-artifact-expires-at "${{ steps.provenance.outputs.candidate_artifact_expires_at }}"
+          --minimum-artifact-lifetime-hours 1 --attempts 180 --delay 10
 
   test:
     name: Tests must pass before publish
@@ -119,6 +177,8 @@ jobs:
         python: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: ${{ matrix.python }}
@@ -131,20 +191,55 @@ jobs:
       - run: SKIP_LIVE=1 pytest -q
 
   build:
-    name: Build and test wheel + sdist
+    name: Validate and relay exact wheel + sdist
     needs: [verify, test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
-      - run: python -m pip install --upgrade pip build
-      - name: Build wheel and sdist
-        run: python -m build
+
+      - name: Download the exact account-tested main-CI artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.verify.outputs.candidate_artifact_id }}
+          path: dist/
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.verify.outputs.candidate_run_id }}
+          merge-multiple: true
+
+      - name: Verify the exact account-tested artifact handoff
+        env:
+          SOURCE_COMMIT: ${{ needs.verify.outputs.commit }}
+          SOURCE_TREE: ${{ needs.verify.outputs.tree }}
+          ACCOUNT_ARTIFACT_SET_SHA256: ${{ needs.verify.outputs.account_artifact_set_sha256 }}
+          CANDIDATE_RUN_ID: ${{ needs.verify.outputs.candidate_run_id }}
+          CANDIDATE_RUN_ATTEMPT: ${{ needs.verify.outputs.candidate_run_attempt }}
+          CANDIDATE_ARTIFACT_ID: ${{ needs.verify.outputs.candidate_artifact_id }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ needs.verify.outputs.candidate_artifact_digest }}
+          CANDIDATE_ARTIFACT_SIZE: ${{ needs.verify.outputs.candidate_artifact_size }}
+          CANDIDATE_ARTIFACT_EXPIRES_AT: ${{ needs.verify.outputs.candidate_artifact_expires_at }}
+        run: |
+          python scripts/release_evidence.py verify-account-handoff \
+            --dist dist \
+            --commit "$SOURCE_COMMIT" \
+            --tree "$SOURCE_TREE" \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$CANDIDATE_RUN_ID" \
+            --run-attempt "$CANDIDATE_RUN_ATTEMPT" \
+            --artifact-id "$CANDIDATE_ARTIFACT_ID" \
+            --artifact-digest "$CANDIDATE_ARTIFACT_DIGEST" \
+            --artifact-size "$CANDIDATE_ARTIFACT_SIZE" \
+            --artifact-expires-at "$CANDIDATE_ARTIFACT_EXPIRES_AT" \
+            --artifact-set-sha256 "$ACCOUNT_ARTIFACT_SET_SHA256"
+
       - name: Twine check
         run: |
-          python -m pip install twine
+          python -m pip install --upgrade pip twine
           twine check dist/*
 
       - name: Test built artifacts in clean environments
@@ -166,6 +261,13 @@ jobs:
           SOURCE_COMMIT: ${{ needs.verify.outputs.commit }}
           SOURCE_TREE: ${{ needs.verify.outputs.tree }}
           RECEIPT_SHA256: ${{ needs.verify.outputs.receipt_sha256 }}
+          ACCOUNT_ARTIFACT_SET_SHA256: ${{ needs.verify.outputs.account_artifact_set_sha256 }}
+          CANDIDATE_RUN_ID: ${{ needs.verify.outputs.candidate_run_id }}
+          CANDIDATE_RUN_ATTEMPT: ${{ needs.verify.outputs.candidate_run_attempt }}
+          CANDIDATE_ARTIFACT_ID: ${{ needs.verify.outputs.candidate_artifact_id }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ needs.verify.outputs.candidate_artifact_digest }}
+          CANDIDATE_ARTIFACT_SIZE: ${{ needs.verify.outputs.candidate_artifact_size }}
+          CANDIDATE_ARTIFACT_EXPIRES_AT: ${{ needs.verify.outputs.candidate_artifact_expires_at }}
         run: |
           python scripts/release_evidence.py create \
             --dist dist \
@@ -178,6 +280,13 @@ jobs:
             --repository "$GITHUB_REPOSITORY" \
             --run-id "$GITHUB_RUN_ID" \
             --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --candidate-run-id "$CANDIDATE_RUN_ID" \
+            --candidate-run-attempt "$CANDIDATE_RUN_ATTEMPT" \
+            --candidate-artifact-id "$CANDIDATE_ARTIFACT_ID" \
+            --candidate-artifact-digest "$CANDIDATE_ARTIFACT_DIGEST" \
+            --candidate-artifact-size "$CANDIDATE_ARTIFACT_SIZE" \
+            --candidate-artifact-expires-at "$CANDIDATE_ARTIFACT_EXPIRES_AT" \
+            --account-artifact-set-sha256 "$ACCOUNT_ARTIFACT_SET_SHA256" \
             --job build
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -202,6 +311,7 @@ jobs:
       name: pypi
       url: https://pypi.org/p/gpt2agent
     permissions:
+      actions: read
       id-token: write   # OIDC for PyPI trusted publishing
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -222,6 +332,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: dist
@@ -243,6 +355,13 @@ jobs:
           SOURCE_COMMIT: ${{ needs.verify.outputs.commit }}
           SOURCE_TREE: ${{ needs.verify.outputs.tree }}
           RECEIPT_SHA256: ${{ needs.verify.outputs.receipt_sha256 }}
+          ACCOUNT_ARTIFACT_SET_SHA256: ${{ needs.verify.outputs.account_artifact_set_sha256 }}
+          CANDIDATE_RUN_ID: ${{ needs.verify.outputs.candidate_run_id }}
+          CANDIDATE_RUN_ATTEMPT: ${{ needs.verify.outputs.candidate_run_attempt }}
+          CANDIDATE_ARTIFACT_ID: ${{ needs.verify.outputs.candidate_artifact_id }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ needs.verify.outputs.candidate_artifact_digest }}
+          CANDIDATE_ARTIFACT_SIZE: ${{ needs.verify.outputs.candidate_artifact_size }}
+          CANDIDATE_ARTIFACT_EXPIRES_AT: ${{ needs.verify.outputs.candidate_artifact_expires_at }}
         run: |
           python scripts/release_evidence.py verify \
             --manifest release-evidence/release-workflow-artifacts.json \
@@ -254,7 +373,14 @@ jobs:
             --receipt-sha256 "$RECEIPT_SHA256" \
             --repository "$GITHUB_REPOSITORY" \
             --run-id "$GITHUB_RUN_ID" \
-            --run-attempt "$GITHUB_RUN_ATTEMPT"
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --candidate-run-id "$CANDIDATE_RUN_ID" \
+            --candidate-run-attempt "$CANDIDATE_RUN_ATTEMPT" \
+            --candidate-artifact-id "$CANDIDATE_ARTIFACT_ID" \
+            --candidate-artifact-digest "$CANDIDATE_ARTIFACT_DIGEST" \
+            --candidate-artifact-size "$CANDIDATE_ARTIFACT_SIZE" \
+            --candidate-artifact-expires-at "$CANDIDATE_ARTIFACT_EXPIRES_AT" \
+            --account-artifact-set-sha256 "$ACCOUNT_ARTIFACT_SET_SHA256"
 
   pypi-canary:
     name: Verify PyPI install in a clean environment
@@ -326,9 +452,12 @@ jobs:
     needs: [pypi-canary, verify]
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: dist
