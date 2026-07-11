@@ -33,8 +33,11 @@ likely disabled in the consumer product today; see the investigation doc.)
 | `src/session.mjs` — WebRTC lifecycle wiring | wired to the real adapter; needs a WebRTC impl (browser / `werift`) to run |
 | `capture/gpt-live-capture.js` — live confirmation harness | ready to run |
 
-The consumer handshake is **captured** — read directly from ChatGPT's public web
-bundle, no session/mic/credentials (`docs/…/2026-07-11-gpt-live-handshake-evidence.md`):
+The consumer handshake is **captured from the bundle AND confirmed live
+end-to-end** — a `POST` of an Opus-audio SDP offer to `/realtime/vp?dcid=0` with
+the account bearer (`~/.codex/auth.json`) returns **HTTP 201 + a full SDP answer
+with server ICE candidates**. No browser, mic, ephemeral token, or sentinel
+needed (`docs/…/2026-07-11-gpt-live-handshake-evidence.md`).
 
 | mode | SDP-exchange endpoint |
 |---|---|
@@ -50,21 +53,23 @@ datachannel is negotiated, `id:0`.
 cd sidecar && npm test    # 21/21 green (reconnect, liveness, events, adapter)
 ```
 
-## The one remaining step: a live confirmation POST
+## What remains: wire the WebRTC media (control plane is done)
 
-Routes and mechanism are verified from shipped code; what remains is a single
-authenticated round-trip to confirm the **token source** (the SDP `Authorization`
-bearer — very likely the account token gpt2agent already loads from
-`~/.codex/auth.json`, which would mean the sidecar bootstraps with **no browser
-at all**) and to enumerate the datachannel event names + ICE servers.
+The token/route/SDP-exchange control plane is verified end-to-end. To get a
+working spoken bridge, the remaining work is media transport:
 
-Two ways to run it:
-- **Token path (no browser):** POST a throwaway SDP offer to `/realtime/vp?dcid=0`
-  with the account bearer; a `200` + SDP answer confirms the token path.
-- **Console harness:** paste `capture/gpt-live-capture.js` into an authenticated
-  `chatgpt.com` voice session (real or `--use-fake-device-for-media-stream`),
-  run ~5s, then `copy(JSON.stringify(window.__gptLiveCapture, null, 2))`. Records
-  routes/shapes only — no raw audio, tokens, or transcript text.
+1. **Node WebRTC peer** — add `werift` (pure-JS WebRTC) or `wrtc`, build the real
+   offer (Opus audio + negotiated datachannel id 0), run `exchangeSdp` (already
+   implemented + tested), then complete ICE/DTLS with the answer's candidates.
+2. **Mic + speaker** at the human's machine (the sidecar runs where the human is).
+3. **Datachannel event enum** — `session.update` to pin voice/instructions, then
+   route `response.*` / input-transcription events through `EventRouter` into the
+   Mode B loop (`onUserSaid` → agent → `speak`).
+4. **MCP control tools** in the Python server (below).
+
+To enumerate the exact datachannel event names quickly, either connect a real
+peer (step 1) or paste `capture/gpt-live-capture.js` into an authenticated
+`chatgpt.com` voice session and read `window.__gptLiveCapture.eventTypes`.
 
 ## MCP control plane (to add in the Python server once the adapter is captured)
 

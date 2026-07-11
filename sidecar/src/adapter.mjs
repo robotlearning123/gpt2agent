@@ -62,9 +62,13 @@ export async function exchangeSdp({ url, token, offerSdp, extraHeaders = {}, fet
   return { answerSdp };
 }
 
-// Confirmation-only (routes above are verified from shipped code):
-//  - token source: appears to be the account bearer (~/.codex/auth.json), so the
-//    sidecar can exchange SDP without a browser — confirm with one live POST.
-//  - iceServers: server-provided or default STUN (not literal in the bundle).
+// CONFIRMED LIVE (2026-07-11, no browser): POSTing an Opus-audio SDP offer here
+// with the account bearer from ~/.codex/auth.json returns HTTP 201 + a full SDP
+// answer carrying the server's ICE candidates. So:
+//  - token source = the account bearer (the sidecar needs no browser);
+//  - ICE servers arrive inside the SDP answer, not a separate config.
+// Remaining is media only (a real WebRTC peer to finish ICE/DTLS/SRTP) plus the
+// exact `live`-mode selector and full datachannel event enum.
 export const CAPTURED = true;
-export const NEEDS_LIVE_CONFIRMATION = Object.freeze(["token_source", "ice_servers", "live_mode_selector"]);
+export const LIVE_CONFIRMED = true;
+export const NEEDS_LIVE_CONFIRMATION = Object.freeze(["live_mode_selector", "datachannel_event_enum"]);
