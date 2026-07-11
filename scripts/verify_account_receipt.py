@@ -80,6 +80,27 @@ class ReceiptError(ValueError):
     """The trusted-local gate violated its fail-closed contract."""
 
 
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("JSON object contains a duplicate key")
+        value[key] = item
+    return value
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("JSON contains a non-finite number")
+
+
+def _loads_strict_json(payload: str | bytes) -> Any:
+    return json.loads(
+        payload,
+        object_pairs_hook=_unique_json_object,
+        parse_constant=_reject_json_constant,
+    )
+
+
 @dataclass(frozen=True)
 class ProbeSpec:
     """One fixed, shape-only v0.0.12 account probe."""
@@ -471,8 +492,8 @@ def _decode_and_check_shape(
     if content_type != "application/json":
         raise ReceiptError("account response content type is not JSON")
     try:
-        data = json.loads(response.body)
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        data = _loads_strict_json(response.body)
+    except (UnicodeDecodeError, ValueError, RecursionError):
         raise ReceiptError("account response is not valid JSON") from None
     try:
         validator = _SHAPE_VALIDATORS[probe.category]
@@ -661,8 +682,8 @@ def execute_plan_probe(
     if content_type != "application/json":
         raise ReceiptError("authenticated account plan response is invalid")
     try:
-        payload = json.loads(response.body)
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        payload = _loads_strict_json(response.body)
+    except (UnicodeDecodeError, ValueError, RecursionError):
         raise ReceiptError("authenticated account plan response is invalid") from None
     return parse_active_pro_entitlement(payload)
 
@@ -1507,8 +1528,8 @@ def _read_receipt(path: Path) -> tuple[dict[str, Any], bytes]:
         if descriptor >= 0:
             os.close(descriptor)
     try:
-        receipt = json.loads(payload)
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        receipt = _loads_strict_json(payload)
+    except (UnicodeDecodeError, ValueError, RecursionError):
         raise ReceiptError("account receipt is not valid JSON") from None
     if canonical_json(receipt) != payload:
         raise ReceiptError("account receipt is not canonical JSON")
@@ -1720,8 +1741,8 @@ def _account_token_from_file(path: Path, *, codex: bool) -> str | None:
             raw = stream.read(_MAX_AUTH_BYTES + 1)
         if len(raw) > _MAX_AUTH_BYTES:
             return None
-        value = json.loads(raw)
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        value = _loads_strict_json(raw)
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError):
         return None
     finally:
         if descriptor >= 0:

@@ -392,6 +392,63 @@ def test_exact_plan_route_and_parser_fail_closed() -> None:
         parse_active_pro_entitlement(ambiguous)
 
 
+@pytest.mark.parametrize(
+    "body",
+    (
+        b'{"accounts":{},"accounts":{"account":{"entitlement":{"subscription_plan":"pro","has_active_subscription":true}}}}',
+        b'{"accounts":{"same":{"entitlement":{"subscription_plan":"plus","has_active_subscription":true}},"same":{"entitlement":{"subscription_plan":"pro","has_active_subscription":true}}}}',
+        b'{"accounts":{"account":{"entitlement":{"subscription_plan":"plus","subscription_plan":"pro","has_active_subscription":true}}}}',
+        b'{"accounts":{"account":{"entitlement":{"subscription_plan":"pro","has_active_subscription":false,"has_active_subscription":true}}}}',
+    ),
+)
+def test_plan_probe_rejects_duplicate_json_keys_without_echoing_values(body: bytes) -> None:
+    from scripts.verify_account_receipt import RawResponse, ReceiptError, execute_plan_probe
+
+    url = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27"
+    response = RawResponse(
+        status=200,
+        headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+        body=body,
+        url=url,
+    )
+
+    with pytest.raises(ReceiptError, match="plan response is invalid") as caught:
+        execute_plan_probe(requester=lambda **_request: response, auth_headers={})
+
+    assert "same" not in str(caught.value)
+    assert "plus" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        b'{"models":[],"models":[{"slug":"synthetic"}]}',
+        b'{"models":[{"slug":"hidden","slug":"synthetic"}]}',
+        b'{"models":[{"slug":"synthetic","score":NaN}]}',
+    ),
+)
+def test_route_shape_rejects_non_strict_json_without_echoing_values(body: bytes) -> None:
+    from scripts.verify_account_receipt import PROBES, RawResponse, ReceiptError, execute_probe
+
+    probe = PROBES[0]
+    url = "https://chatgpt.com/backend-api/models?history_and_training_disabled=false"
+    response = RawResponse(
+        status=200,
+        headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+        body=body,
+        url=url,
+    )
+
+    with pytest.raises(ReceiptError, match="not valid JSON") as caught:
+        execute_probe(
+            probe,
+            requester=lambda **_request: response,
+            auth_headers={},
+        )
+
+    assert "hidden" not in str(caught.value)
+
+
 def test_trusted_live_probe_keeps_token_only_in_fake_transport_headers(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -541,6 +598,12 @@ def test_auth_file_requires_owned_regular_private_bounded_token_file(
     auth.chmod(0o640)
     assert _account_token_from_file(auth, codex=True) is None
     auth.chmod(0o600)
+
+    auth.write_bytes(
+        b'{"tokens":{"access_token":"eyJfirst.canary.signature",'
+        b'"access_token":"eyJsecond.canary.signature"}}'
+    )
+    assert _account_token_from_file(auth, codex=True) is None
 
     link = tmp_path / "auth-link.json"
     link.symlink_to(auth)
