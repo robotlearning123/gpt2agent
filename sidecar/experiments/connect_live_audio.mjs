@@ -27,7 +27,13 @@ function exchange(offerSdp) {
 }
 
 // werift track fed by RTP arriving on a UDP port (ffmpeg -> here -> WebRTC).
-const { track } = await MediaStreamTrackFactory.rtpSource({ kind: "audio", port: PORT });
+// rtpSource returns [track, port, dispose] — an ARRAY, not an object.
+let rtpCount = 0;
+const [track] = await MediaStreamTrackFactory.rtpSource({
+  kind: "audio",
+  port: PORT,
+  cb: (msg) => { rtpCount += 1; return msg; },
+});
 
 const pc = new RTCPeerConnection({});
 const seen = new Set();
@@ -35,13 +41,14 @@ let audioStarted = false;
 function startAudio(OPUS_PT) {
   if (audioStarted) return;
   audioStarted = true;
-  const SSRC = globalThis.__SSRC || "1";
+  // No -ssrc: werift's RTCRtpSender re-stamps SSRC to its negotiated value, and
+  // werift's SSRC often exceeds ffmpeg's signed-int32 -ssrc range anyway.
   const ff = spawn("ffmpeg", [
     "-hide_banner", "-loglevel", "error", "-re", "-i", MP3,
     "-c:a", "libopus", "-ar", "48000", "-ac", "1", "-b:a", "24k",
-    "-payload_type", OPUS_PT, "-ssrc", SSRC, "-f", "rtp", `rtp://127.0.0.1:${PORT}`,
+    "-payload_type", OPUS_PT, "-f", "rtp", `rtp://127.0.0.1:${PORT}`,
   ]);
-  console.log(`[audio] ffmpeg PT=${OPUS_PT} SSRC=${SSRC}`);
+  console.log(`[audio] ffmpeg PT=${OPUS_PT}`);
   ff.stderr.on("data", (d) => process.stderr.write("[ffmpeg] " + d));
   ff.on("close", (c) => console.log("[ffmpeg] done", c));
   console.log("[audio] streaming utterance NOW (on dc open)…");
@@ -64,7 +71,9 @@ dc.onMessage.subscribe((msg) => {
   } catch { console.log("[dc-raw]", raw.slice(0, 200)); }
 });
 
-pc.addTransceiver("audio", { direction: "sendrecv", track });
+// Pass the TRACK as the first arg (werift: addTransceiver(trackOrKind, opts)) so
+// it is actually wired to the sender — a kind string here would send nothing.
+pc.addTransceiver(track, { direction: "sendrecv" });
 pc.connectionStateChange.subscribe((s) => console.log("[conn]", s));
 
 const offer = await pc.createOffer();
@@ -86,8 +95,9 @@ console.log("[state] remote set; audio starts on dc open");
 // Fallback: if dc already open, start now.
 if (dc.readyState === "open") startAudio(OPUS_PT);
 
+setInterval(() => console.log(`[rtp] received ${rtpCount} packets from ffmpeg`), 3000);
 setTimeout(() => {
-  console.log("\n=== RESULT ===  conn:", pc.connectionState, " dc:", dc.readyState, " events:", JSON.stringify([...seen]));
+  console.log("\n=== RESULT ===  conn:", pc.connectionState, " dc:", dc.readyState, " rtpPkts:", rtpCount, " events:", JSON.stringify([...seen]));
   pc.close();
   process.exit(0);
 }, 30000);
