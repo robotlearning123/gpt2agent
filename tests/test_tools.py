@@ -264,6 +264,69 @@ def test_list_voices_rejects_catalog_above_documented_bound() -> None:
         _run(_reg(voice, client).tools["list_voices"])
 
 
+def test_list_voices_default_sends_no_voice_mode() -> None:
+    route = "/backend-api/settings/voices"
+    client = FakeClient(routes={route: {"selected": None, "voices": [_voice_item()]}})
+
+    _run(_reg(voice, client).tools["list_voices"])
+
+    # Default preserves the bare route — no query string appended.
+    assert client.get_calls == [(route, route)]
+
+
+@pytest.mark.parametrize("mode", ["standard", "advanced", "wingman"])
+def test_list_voices_passes_observed_voice_mode(mode: str) -> None:
+    # Values accepted by the live /backend-api/settings/voices route on
+    # 2026-07-11. The bare route (target_path) is unchanged; the mode rides the
+    # query string. GPT-Live audio uses a separate session contract.
+    route = "/backend-api/settings/voices"
+    client = FakeClient(routes={route: {
+        "selected": "cove",
+        "voices": [_voice_item("cove", name="Breeze", description="Animated and earnest")],
+    }})
+
+    out = _run(_reg(voice, client).tools["list_voices"], voice_mode=mode)
+
+    assert client.get_calls == [(f"{route}?voice_mode={mode}", route)]
+    assert out == [{
+        "id": "cove",
+        "name": "Breeze",
+        "description": "Animated and earnest",
+        "selected": True,
+        "has_preview": True,
+    }]
+
+
+def test_list_voices_forwards_a_bounded_future_mode_without_hard_coding() -> None:
+    route = "/backend-api/settings/voices"
+    client = FakeClient(routes={route: {"selected": None, "voices": []}})
+
+    out = _run(_reg(voice, client).tools["list_voices"], voice_mode="future_mode")
+
+    assert out == []
+    assert client.get_calls == [(f"{route}?voice_mode=future_mode", route)]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["", " ", "Advanced", "a b", "../secret", "x?y=z", "voice_mode=1", "m" * 33],
+)
+def test_list_voices_rejects_malformed_voice_mode(bad: str) -> None:
+    route = "/backend-api/settings/voices"
+    client = FakeClient(routes={route: {"selected": None, "voices": [_voice_item()]}})
+
+    with pytest.raises(ValueError) as exc:
+        _run(_reg(voice, client).tools["list_voices"], voice_mode=bad)
+
+    message = str(exc.value)
+    assert "voice_mode" in message
+    # Payload-free: a meaningful rejected value is never echoed back into the
+    # error (whitespace-only inputs trivially appear in ordinary spacing).
+    assert not bad.strip() or bad not in message
+    # A malformed mode must be rejected before any backend call.
+    assert client.get_calls == []
+
+
 @pytest.mark.parametrize(
     "payload",
     [

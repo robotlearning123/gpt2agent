@@ -306,7 +306,8 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 ### list_voices
 
 - **Purpose**: Return the Voice choices currently available to the signed-in ChatGPT account.
-- **Parameters**: None.
+- **Parameters**:
+  - `voice_mode` (str, optional) -- select a mode-specific catalog. Values accepted by the live account contract on 2026-07-11 are `standard`, `advanced`, and `wingman`. Omit for the account default. The value is not restricted to that list (modes change), but must be a short lowercase token or it is rejected before any request. GPT-Live audio is a separate session contract, not a currently accepted catalog mode.
 - **Returns**: `list[dict]` -- each dict contains exactly:
   - `id` (str) -- the opaque backend Voice ID; preserved verbatim and not derived from the display name
   - `name` (str) -- display name, with common PII/secret patterns redacted
@@ -316,11 +317,12 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **When to use**: Discover account/rollout-specific Voice IDs and display metadata.
 - **Example**:
   ```python
-  voices = list_voices()
+  voices = list_voices()                          # account default
+  advanced_voices = list_voices(voice_mode="advanced")
   selected = next((voice for voice in voices if voice["selected"] is True), None)
   ```
 - **Notes**:
-  - Uses the private `GET /backend-api/settings/voices` website route. Voice is an official ChatGPT product, but this adapter is not an official API and may drift.
+  - Uses the private `GET /backend-api/settings/voices` website route (with `?voice_mode=` when a mode is given). Voice is an official ChatGPT product, but this adapter is not an official API and may drift.
   - The catalog is live and rollout-specific; names, IDs, ordering, selection, and count are not hard-coded.
   - Raw preview URLs, colors, gain values, unknown response fields, and account identifiers are not returned.
   - This tool does not fetch preview audio, start a Voice session, capture a microphone, synthesize speech, stream GPT-Live audio, or guarantee transcript extraction.

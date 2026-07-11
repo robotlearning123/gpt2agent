@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 from typing import Any
+from urllib.parse import urlencode
 
 from mcp.types import ToolAnnotations
 
@@ -12,6 +14,16 @@ from gpt2agent.tools._redact import redact
 _ROUTE = "/backend-api/settings/voices"
 _CONTRACT_ERROR = "voice catalog contract changed"
 _MAX_VOICES = 128
+# ChatGPT currently serves mode-specific catalogs for `standard`, `advanced`,
+# and `wingman`. The set is not hard-coded — any short lowercase token is
+# forwarded so a future rollout can be probed — but the value is bounded to this
+# charset so it cannot inject into the query string. GPT-Live is a product/audio
+# session name, not a currently accepted value for this catalog query.
+_VOICE_MODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+_VOICE_MODE_ERROR = (
+    "voice_mode must be a short lowercase token like 'standard', 'advanced', "
+    "or 'wingman'"
+)
 
 
 def _fail_contract() -> None:
@@ -82,12 +94,23 @@ def register(mcp, client: BackendClient) -> None:
             openWorldHint=True,
         )
     )
-    async def list_voices() -> list[dict[str, Any]]:
+    async def list_voices(voice_mode: str | None = None) -> list[dict[str, Any]]:
         """List Voice choices currently available to the signed-in account.
+
+        `voice_mode` optionally selects a mode-specific catalog. ChatGPT
+        currently accepts `standard`, `advanced`, and `wingman`; omit it for
+        the account default. The value is not restricted to that list (modes
+        change), but must be a short lowercase token. GPT-Live audio is a
+        separate session contract, not a catalog mode exposed by this tool.
 
         Returns only stable catalog metadata: `id`, `name`, `description`,
         `selected`, and `has_preview`. This does not start a Voice session,
         fetch preview audio, synthesize speech, or expose GPT-Live audio.
         """
-        data = await async_get(client, _ROUTE, target_path=_ROUTE)
+        path = _ROUTE
+        if voice_mode is not None:
+            if not _VOICE_MODE_RE.fullmatch(voice_mode):
+                raise ValueError(_VOICE_MODE_ERROR)
+            path = f"{_ROUTE}?{urlencode({'voice_mode': voice_mode})}"
+        data = await async_get(client, path, target_path=_ROUTE)
         return _normalize_catalog(data)
