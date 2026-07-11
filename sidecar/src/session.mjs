@@ -74,20 +74,23 @@ export class VoiceSession {
    */
   async connect() {
     this._setState(this.state === State.IDLE ? State.CONNECTING : State.RECONNECTING);
-    const boot = await adapter.bootstrapSession(this.opts.auth); // throws until captured
-    const pc = this.opts.createPeer(boot.iceServers);
+    // ICE servers are server-provided/default STUN (not in the bundle); pass
+    // whatever the caller supplies, empty is valid for host/srflx.
+    const pc = this.opts.createPeer(this.opts.iceServers ?? []);
     const track = await this.opts.getMicTrack();
     pc.addTrack(track);
-    this._dc = pc.createDataChannel("oai-events");
+    // Verified from the bundle: negotiated datachannel, id 0 (== ?dcid=0).
+    this._dc = pc.createDataChannel("", { negotiated: true, id: adapter.DATACHANNEL_ID });
     this._dc.addEventListener("message", (m) => {
       this.liveness.seen(Date.now());
       this.router.handle(m.data);
     });
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+    const url = adapter.realtimeUrl({ mode: this.opts.voiceMode, sessionType: this.opts.sessionType });
     const { answerSdp } = await adapter.exchangeSdp({
-      sdpUrl: boot.sdpUrl,
-      clientSecret: boot.clientSecret,
+      url,
+      token: this.opts.auth.token,
       offerSdp: offer.sdp,
     });
     await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });

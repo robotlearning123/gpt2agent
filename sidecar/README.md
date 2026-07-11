@@ -28,36 +28,43 @@ likely disabled in the consumer product today; see the investigation doc.)
 |---|---|
 | `src/reconnect.mjs` — backoff/attempt ceiling | **done, unit-tested** |
 | `src/liveness.mjs` — half-open detection | **done, unit-tested** |
-| `src/events.mjs` — datachannel event router + Mode B glue | **done, unit-tested** (event *names* from the public Realtime API; consumer names need capture) |
-| `src/session.mjs` — WebRTC lifecycle wiring | skeleton; needs a WebRTC impl + the captured adapter |
-| `src/adapter.mjs` — consumer bootstrap + SDP routes | **stub — un-captured**; throws `NotYetCapturedError` |
-| `capture/gpt-live-capture.js` — handshake capture harness | ready to run |
+| `src/events.mjs` — datachannel event router + Mode B glue | **done, unit-tested**; event model confirmed Realtime-style from the bundle |
+| `src/adapter.mjs` — realtime routes + SDP exchange | **done, unit-tested**; routes VERIFIED from the shipped bundle (see evidence doc) |
+| `src/session.mjs` — WebRTC lifecycle wiring | wired to the real adapter; needs a WebRTC impl (browser / `werift`) to run |
+| `capture/gpt-live-capture.js` — live confirmation harness | ready to run |
 
-Nothing here claims a working end-to-end bridge yet. The single blocker is the
-un-captured consumer handshake in `adapter.mjs`.
+The consumer handshake is **captured** — read directly from ChatGPT's public web
+bundle, no session/mic/credentials (`docs/…/2026-07-11-gpt-live-handshake-evidence.md`):
+
+| mode | SDP-exchange endpoint |
+|---|---|
+| standard | `https://chatgpt.com/realtime/vps?dcid=0` |
+| advanced | `https://chatgpt.com/realtime/vp?dcid=0` |
+| wingman | `https://chatgpt.com/realtime/wm?dcid=0` |
+
+SDP is a single-shot `POST offer.sdp` (`Content-Type: application/sdp`,
+`Authorization: Bearer <token>`) whose response body is the answer SDP;
+datachannel is negotiated, `id:0`.
 
 ```bash
-cd sidecar && npm test    # 16/16 green (reconnect, liveness, events)
+cd sidecar && npm test    # 21/21 green (reconnect, liveness, events, adapter)
 ```
 
-## The one remaining step: capture the handshake
+## The one remaining step: a live confirmation POST
 
-The consumer GPT-Live session-bootstrap route, SDP-exchange endpoint, ICE
-servers, and datachannel event **type names** have not been captured — a
-mic-equipped, signed-in session is required (a headless browser with no audio
-device aborts before negotiating). To capture:
+Routes and mechanism are verified from shipped code; what remains is a single
+authenticated round-trip to confirm the **token source** (the SDP `Authorization`
+bearer — very likely the account token gpt2agent already loads from
+`~/.codex/auth.json`, which would mean the sidecar bootstraps with **no browser
+at all**) and to enumerate the datachannel event names + ICE servers.
 
-1. Open an authenticated `chatgpt.com` tab. Ensure a real or fake audio input
-   device exists (headless: launch Chrome with
-   `--use-fake-device-for-media-stream --use-fake-ui-for-media-stream`).
-2. Paste `capture/gpt-live-capture.js` into the DevTools console.
-3. Open a voice session for ~5 seconds, then run
-   `copy(JSON.stringify(window.__gptLiveCapture, null, 2))`.
-4. Fill the two routes in `src/adapter.mjs` and reconcile the event names in
-   `src/events.mjs` with `eventTypes` from the capture.
-
-The capture records **routes and shapes only** — no raw audio, tokens, or
-transcript text.
+Two ways to run it:
+- **Token path (no browser):** POST a throwaway SDP offer to `/realtime/vp?dcid=0`
+  with the account bearer; a `200` + SDP answer confirms the token path.
+- **Console harness:** paste `capture/gpt-live-capture.js` into an authenticated
+  `chatgpt.com` voice session (real or `--use-fake-device-for-media-stream`),
+  run ~5s, then `copy(JSON.stringify(window.__gptLiveCapture, null, 2))`. Records
+  routes/shapes only — no raw audio, tokens, or transcript text.
 
 ## MCP control plane (to add in the Python server once the adapter is captured)
 

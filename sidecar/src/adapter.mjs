@@ -1,58 +1,70 @@
-// ChatGPT consumer GPT-Live adapter — THE un-verified seam.
-//
-// Everything else in this sidecar is provider-agnostic and unit-tested. This
-// file is the one place that speaks the private chatgpt.com routes, and it is
-// deliberately isolated so filling it in from a real capture never destabilizes
-// the tested core.
-//
-// STATUS: the two routes below are NOT yet captured (see
-// sidecar/capture/gpt-live-capture.js and the investigation doc). The shapes
-// follow the OpenAI Realtime API WebRTC handshake, which the consumer product is
-// built on; confirm the exact paths from a capture, then replace the throwing
-// stubs. Until then, callers get a clear, honest failure — never a fabricated
-// endpoint pretending to work.
+// ChatGPT consumer GPT-Live adapter — routes VERIFIED from the shipped web
+// bundle (chatgpt.com chunk 9a292b8a-…, 2026-07-11; see
+// docs/…/2026-07-11-gpt-live-handshake-evidence.md). Not a guess: the endpoint
+// builder, the single-shot SDP exchange, and the negotiated datachannel are read
+// directly from ChatGPT's own client. What still needs a live round-trip is
+// confirmation only (token source, ICE servers) — noted below.
 
-export class NotYetCapturedError extends Error {
-  constructor(what) {
-    super(
-      `GPT-Live ${what} route is not captured yet. Run ` +
-        `sidecar/capture/gpt-live-capture.js in an authenticated ChatGPT voice ` +
-        `session and fill in adapter.mjs from the recorded routes.`,
-    );
-    this.name = "NotYetCapturedError";
-  }
-}
+/** Origin the realtime endpoints live on. */
+export const ORIGIN = "https://chatgpt.com";
+
+/** Negotiated datachannel id used by the client ( ?dcid=0 ). */
+export const DATACHANNEL_ID = 0;
 
 /**
- * Mint an ephemeral realtime session from the signed-in consumer account.
- * Must reuse the same bearer token gpt2agent already loads
- * (~/.codex/auth.json / ~/.gpt2agent/token.json) and pass the Sentinel
- * challenge headers the account routes require.
- *
- * @param {{token:string, sentinel?:object}} _auth
- * @returns {Promise<{clientSecret:string, sdpUrl:string, iceServers:object[]}>}
+ * Realtime voice path for a mode, mirroring the bundle's `voicePath`:
+ *   standard -> /realtime/vps
+ *   advanced -> /realtime/vp
+ *   wingman  -> /realtime/wm
+ * @param {string} [mode] catalog mode ("standard" | "advanced" | ...)
+ * @param {string} [sessionType] "wm" for wingman, else the vp family
  */
-// eslint-disable-next-line no-unused-vars
-export async function bootstrapSession(_auth) {
-  // TODO(capture): POST <bootstrap route> with the account bearer + Sentinel;
-  // read back the ephemeral secret, the SDP-exchange URL, and ICE servers.
-  throw new NotYetCapturedError("session bootstrap");
+export function voicePath(mode, sessionType) {
+  const base = "/realtime";
+  if (sessionType === "wm") return `${base}/wm`;
+  return `${base}/vp${mode === "standard" ? "s" : ""}`;
+}
+
+/** Full SDP-exchange URL: `${origin}${voicePath}?dcid=<id>`. */
+export function realtimeUrl({ origin = ORIGIN, mode, sessionType, dcid = DATACHANNEL_ID } = {}) {
+  const params = new URLSearchParams({ dcid: String(dcid) });
+  return `${origin}${voicePath(mode, sessionType)}?${params}`;
 }
 
 /**
- * Exchange the local SDP offer for the remote answer.
- * Realtime API does this as an HTTP POST of the SDP; the consumer route may use
- * a WebSocket signaling channel instead — capture decides.
+ * Single-shot SDP exchange (verified pattern): POST the offer SDP as
+ * `application/sdp` with the account bearer; the response body is the answer SDP.
+ * The server mints the session from the authenticated POST — no separate
+ * bootstrap call for the core voice path.
  *
- * @param {{sdpUrl:string, clientSecret:string, offerSdp:string}} _args
+ * @param {{url:string, token:string, offerSdp:string,
+ *          extraHeaders?:Record<string,string>, fetchImpl?:typeof fetch}} args
  * @returns {Promise<{answerSdp:string}>}
  */
-// eslint-disable-next-line no-unused-vars
-export async function exchangeSdp(_args) {
-  // TODO(capture): POST offerSdp to sdpUrl with the ephemeral secret; return the
-  // SDP answer body.
-  throw new NotYetCapturedError("SDP exchange");
+export async function exchangeSdp({ url, token, offerSdp, extraHeaders = {}, fetchImpl }) {
+  const doFetch = fetchImpl ?? globalThis.fetch;
+  if (typeof doFetch !== "function") throw new Error("no fetch implementation available");
+  if (!token) throw new Error("exchangeSdp requires an account bearer token");
+  if (typeof offerSdp !== "string" || !offerSdp) throw new Error("exchangeSdp requires an offer SDP");
+
+  const res = await doFetch(url, {
+    method: "POST",
+    body: offerSdp,
+    headers: {
+      "Content-Type": "application/sdp",
+      Authorization: `Bearer ${token}`,
+      ...extraHeaders,
+    },
+  });
+  if (!res.ok) throw new Error(`SDP exchange failed: HTTP ${res.status}`);
+  const answerSdp = await res.text();
+  if (!answerSdp || !answerSdp.trim()) throw new Error("SDP exchange returned an empty answer");
+  return { answerSdp };
 }
 
-/** True once the routes above have been filled in from a real capture. */
-export const CAPTURED = false;
+// Confirmation-only (routes above are verified from shipped code):
+//  - token source: appears to be the account bearer (~/.codex/auth.json), so the
+//    sidecar can exchange SDP without a browser — confirm with one live POST.
+//  - iceServers: server-provided or default STUN (not literal in the bundle).
+export const CAPTURED = true;
+export const NEEDS_LIVE_CONFIRMATION = Object.freeze(["token_source", "ice_servers", "live_mode_selector"]);

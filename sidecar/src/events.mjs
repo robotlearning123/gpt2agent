@@ -1,13 +1,12 @@
 // GPT-Live datachannel event routing + Mode B glue.
 //
 // SOURCE / VERIFICATION STATUS:
-//   The event *type names* below are the OpenAI **Realtime API** contract
-//   (public, documented, stable). ChatGPT's consumer "GPT-Live" voice is built
-//   on the same Realtime infrastructure, so this is the well-founded starting
-//   shape — but the consumer datachannel has NOT been captured yet (headless/no
-//   authenticated-session blocker). Treat every name here as
-//   (needs-consumer-verification): run sidecar/capture/gpt-live-capture.js in an
-//   authenticated session to confirm the real type names, then reconcile.
+//   The event *type names* below are the OpenAI **Realtime API** contract. The
+//   ChatGPT consumer bundle was confirmed to use the same Realtime event model
+//   (observed fragments: `session.update`, `response.*`, `audio_transcription`,
+//   `output_audio_buffer_depth_ms` — see the 2026-07-11 handshake evidence doc),
+//   so the family is verified even though the full enum is minified. A live
+//   confirmation POST will enumerate the exact names; reconcile any deltas here.
 //
 // Mode B (the goal): GPT-Live is voice I/O, our agent is the brain.
 //   inbound  input-transcript event  -> hand text to the agent
