@@ -493,8 +493,8 @@ jobs:
           overwrite: true
           if-no-files-found: error
 
-  github-release:
-    name: Create GitHub Release
+  github-release-draft:
+    name: Create complete GitHub Release draft
     needs: [prepare-release-notes, verify]
     runs-on: ubuntu-latest
     permissions:
@@ -523,8 +523,20 @@ jobs:
             ${{ runner.temp }}/github-release-${{ github.run_id }}-${{ github.run_attempt }}/dist/gpt2agent-${{ needs.verify.outputs.distribution_version }}.tar.gz
             ${{ runner.temp }}/github-release-${{ github.run_id }}-${{ github.run_attempt }}/release-evidence/release-workflow-artifacts.json
           fail_on_unmatched_files: true
-          draft: false
+          draft: true
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}
+
+  github-release:
+    name: Publish immutable GitHub Release
+    needs: [github-release-draft, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the complete draft
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          tag_name: ${{ github.ref_name }}
 
   verify-github-release:
     name: Verify public GitHub Release bytes

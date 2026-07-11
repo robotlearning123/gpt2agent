@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import sys
 import tempfile
@@ -27,11 +28,13 @@ from urllib.request import Request, urlopen
 
 
 API_ROOT = "https://api.github.com"
-API_VERSION = "2022-11-28"
+API_VERSION = "2026-03-10"
 MAX_PAGES = 100
 MAX_ASSETS = 1000
 MAX_JSON_BYTES = 4 * 1024 * 1024
 MAX_NOTES_BYTES = 1024 * 1024
+MAX_ASSET_BYTES = 128 * 1024 * 1024
+MAX_TOTAL_ASSET_BYTES = 256 * 1024 * 1024
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-(?:alpha|beta|rc)[0-9]+)?\Z")
 POSITIVE_INTEGER = re.compile(r"[1-9][0-9]*\Z")
@@ -109,14 +112,22 @@ def expected_release_assets(dist: Path, evidence: Path) -> dict[str, ExpectedAss
     if evidence.name != "release-workflow-artifacts.json":
         raise ValueError("release evidence has an unexpected filename")
     _require_regular_file(evidence, "release evidence")
-    for path in paths:
-        _require_regular_file(path, "release artifacts")
+    metadata: dict[Path, os.stat_result] = {}
+    total_size = 0
+    for path in [*paths, evidence]:
+        item = _require_regular_file(path, "release artifacts")
+        if item.st_size > MAX_ASSET_BYTES:
+            raise ValueError("release asset exceeds size limit")
+        total_size += item.st_size
+        metadata[path] = item
+    if total_size > MAX_TOTAL_ASSET_BYTES:
+        raise ValueError("release asset set exceeds total size limit")
     if evidence.name in {path.name for path in paths}:
         raise ValueError("release asset filenames must be unique")
     return {
         path.name: ExpectedAsset(
             path=path,
-            size=path.lstat().st_size,
+            size=metadata[path].st_size,
             sha256=_sha256(path),
         )
         for path in [*paths, evidence]
@@ -145,6 +156,8 @@ def verify_release_metadata(
         raise ValueError("GitHub Release must not be a draft")
     if release.get("prerelease") is not expected_prerelease:
         raise ValueError("GitHub Release prerelease flag does not match")
+    if release.get("immutable") is not True:
+        raise ValueError("GitHub Release must be immutable")
     if not isinstance(assets, list):
         raise ValueError("GitHub Release assets response must be an array")
 
@@ -429,6 +442,7 @@ def verify_public_release(
 
     last_error = "public release was not observable"
     for attempt in range(1, attempts + 1):
+        attempt_dir: Path | None = None
         try:
             release, _ = fetch_json(release_url, token)
             if not isinstance(release, dict):
@@ -461,8 +475,17 @@ def verify_public_release(
             return attempt_dir
         except (OSError, ValueError) as error:
             last_error = str(error)
+            if attempt_dir is not None:
+                try:
+                    shutil.rmtree(attempt_dir)
+                except OSError:
+                    raise ValueError("failed to clean GitHub Release verification attempt") from None
             if attempt < attempts:
                 sleep(delay)
+    try:
+        download_root.rmdir()
+    except OSError:
+        raise ValueError("failed to clean GitHub Release verification root") from None
     raise ValueError(f"public GitHub Release did not match after {attempts} attempts: {last_error}")
 
 

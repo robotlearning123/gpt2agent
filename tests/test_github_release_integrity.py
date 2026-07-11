@@ -100,13 +100,20 @@ def _api_assets(expected: Mapping[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _release(*, body: str = "release notes\n", draft: bool = False, prerelease: bool = False):
+def _release(
+    *,
+    body: str = "release notes\n",
+    draft: bool = False,
+    prerelease: bool = False,
+    immutable: bool = True,
+):
     return {
         "id": 42,
         "tag_name": "v1.2.3",
         "body": body,
         "draft": draft,
         "prerelease": prerelease,
+        "immutable": immutable,
     }
 
 
@@ -146,8 +153,8 @@ def test_release_notes_prep_job_is_explicitly_read_only() -> None:
     assert "path: release-notes/release_notes.md" in text
 
 
-def test_github_release_writer_is_action_only_and_closed_to_approved_pins() -> None:
-    job = _workflow_job("github-release")
+def test_github_release_draft_writer_is_action_only_and_closed_to_approved_pins() -> None:
+    job = _workflow_job("github-release-draft")
     text = "\n".join(job)
     actions = _job_actions(job)
 
@@ -174,6 +181,20 @@ def test_github_release_writer_is_action_only_and_closed_to_approved_pins() -> N
     ]
     assert all("*" not in path for path in files)
     assert "          fail_on_unmatched_files: true" in job
+    assert "          draft: true" in job
+
+
+def test_github_release_publisher_is_action_only_and_publishes_existing_draft() -> None:
+    job = _workflow_job("github-release")
+    text = "\n".join(job)
+
+    assert _job_permissions(job) == {"contents": "write"}
+    assert "    needs: [github-release-draft, verify]" in job
+    assert not any(re.match(r"^\s+(?:- )?run:", line) for line in job)
+    assert _job_actions(job) == [SOFTPROPS_RELEASE]
+    assert "          tag_name: ${{ github.ref_name }}" in job
+    assert "          draft:" not in text
+    assert "          files:" not in text
 
 
 def test_github_release_readback_job_is_read_only_and_closes_public_bytes() -> None:
@@ -245,6 +266,22 @@ def test_expected_release_assets_rejects_symlinked_evidence(tmp_path: Path) -> N
         expected_release_assets(dist, evidence)
 
 
+def test_expected_release_assets_rejects_oversized_local_asset(tmp_path: Path) -> None:
+    verifier = importlib.import_module("scripts.verify_github_release")
+    limit = getattr(verifier, "MAX_ASSET_BYTES", None)
+    assert isinstance(limit, int) and limit > 0
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "gpt2agent-1.2.3-py3-none-any.whl").write_bytes(b"wheel")
+    (dist / "gpt2agent-1.2.3.tar.gz").write_bytes(b"sdist")
+    evidence = tmp_path / "release-workflow-artifacts.json"
+    with evidence.open("wb") as stream:
+        stream.truncate(limit + 1)
+
+    with pytest.raises(ValueError, match="asset exceeds size limit"):
+        expected_release_assets(dist, evidence)
+
+
 def test_release_metadata_accepts_exact_body_state_and_closed_asset_set(tmp_path: Path) -> None:
     _, _, expected = _closed_local_assets(tmp_path)
     assets = _api_assets(expected)
@@ -259,6 +296,29 @@ def test_release_metadata_accepts_exact_body_state_and_closed_asset_set(tmp_path
     )
 
     assert ids == {asset["name"]: asset["id"] for asset in assets}
+
+
+@pytest.mark.parametrize("immutable", [False, None])
+def test_release_metadata_rejects_mutable_or_unreported_release(
+    tmp_path: Path,
+    immutable: bool | None,
+) -> None:
+    _, _, expected = _closed_local_assets(tmp_path)
+    release = _release()
+    if immutable is None:
+        release.pop("immutable")
+    else:
+        release["immutable"] = immutable
+
+    with pytest.raises(ValueError, match="immutable"):
+        verify_release_metadata(
+            release,
+            _api_assets(expected),
+            tag="v1.2.3",
+            expected_body="release notes\n",
+            expected_prerelease=False,
+            expected_assets=expected,
+        )
 
 
 def test_release_metadata_rejects_extra_asset(tmp_path: Path) -> None:
@@ -742,6 +802,56 @@ def test_public_release_poll_retries_then_downloads_exact_numeric_asset_ids(
     assert set(downloaded_ids) == {asset["id"] for asset in api_assets}
     assert verified.name.startswith("attempt-2-")
     verify_downloaded_assets(verified, expected)
+
+
+def test_public_release_poll_removes_failed_attempt_before_retry(tmp_path: Path) -> None:
+    dist, evidence, expected = _closed_local_assets(tmp_path)
+    notes = tmp_path / "release_notes.md"
+    notes.write_text("release notes\n", encoding="utf-8")
+    api_assets = _api_assets(expected)
+    sources = {asset["id"]: expected[asset["name"]].path for asset in api_assets}
+    download_root = tmp_path / "public-downloads"
+    calls = 0
+
+    def fetch_json(url: str, token: str) -> tuple[Any, Mapping[str, str]]:
+        if "/releases/tags/v1.2.3" in url:
+            return (_release(), {})
+        return (api_assets, {})
+
+    def download_asset(
+        repository: str,
+        asset_id: int,
+        destination: Path,
+        token: str,
+        expected_asset: ExpectedAsset,
+    ) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise ValueError("transient download failure")
+        destination.write_bytes(sources[asset_id].read_bytes())
+
+    def sleep(delay: float) -> None:
+        assert delay == 0
+        assert list(download_root.iterdir()) == []
+
+    verified = verify_public_release(
+        "robotlearning123/gpt2agent",
+        "v1.2.3",
+        notes,
+        dist,
+        evidence,
+        download_root,
+        expected_prerelease=False,
+        token="",
+        attempts=2,
+        delay=0,
+        fetch_json=fetch_json,
+        download_asset=download_asset,
+        sleep=sleep,
+    )
+
+    assert [entry for entry in download_root.iterdir()] == [verified]
 
 
 def test_downloaded_assets_require_exact_regular_files_sizes_and_hashes(tmp_path: Path) -> None:

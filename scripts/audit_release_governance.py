@@ -323,6 +323,10 @@ _CHECK_DETAILS = {
         "v* tags have only the policy-bound release App bypass actor",
         "v* tags lack the exact policy-bound release App as their sole bypass actor",
     ),
+    "release_immutability_enabled": (
+        "repository release immutability is enabled",
+        "repository release immutability is not enabled",
+    ),
     "pypi_independent_gate": (
         "PyPI deployment matches the policy-bound independent gate identity",
         "PyPI deployment does not match the policy-bound independent gate identity",
@@ -412,6 +416,10 @@ def audit_snapshot(snapshot: Any, policy: Any = None) -> dict[str, Any]:
                 for ruleset in creation_tag_rulesets
             ),
         ),
+        (
+            "release_immutability_enabled",
+            _object(root.get("immutable_releases")).get("enabled") is True,
+        ),
         ("pypi_independent_gate", reviewer_rule is not None or protection_app),
         (
             "pypi_prevent_self_review",
@@ -469,7 +477,7 @@ def _gh_json(endpoint: str) -> Any:
         "-H",
         "Accept: application/vnd.github+json",
         "-H",
-        "X-GitHub-Api-Version: 2022-11-28",
+        "X-GitHub-Api-Version: 2026-03-10",
         endpoint,
     ]
     try:
@@ -496,6 +504,7 @@ def fetch_live_snapshot(
         raise GovernanceError("repository must be an owner/name pair")
     prefix = f"repos/{repository}"
     repository_payload = requester(prefix)
+    immutable_releases = requester(f"{prefix}/immutable-releases")
     summaries = requester(f"{prefix}/rulesets?includes_parents=true&per_page=100")
     if not isinstance(summaries, list) or len(summaries) >= 100:
         raise GovernanceError("GitHub ruleset snapshot is incomplete")
@@ -515,6 +524,7 @@ def fetch_live_snapshot(
     return {
         "schema_version": 1,
         "repository": repository_payload,
+        "immutable_releases": immutable_releases,
         "rulesets": rulesets,
         "environment": environment,
         "deployment_branch_policies": policies,

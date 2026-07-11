@@ -1,4 +1,8 @@
 {
+  "immutable_releases": {
+    "enabled": true,
+    "enforced_by_owner": false
+  },
   "custom_deployment_protection_rules": {
     "custom_deployment_protection_rules": [],
     "total_count": 0

@@ -46,6 +46,7 @@ def test_complete_fixture_passes_every_governance_check() -> None:
         "tag_creation_restricted": "pass",
         "tag_immutable": "pass",
         "tag_bypass_actor_narrow": "pass",
+        "release_immutability_enabled": "pass",
         "pypi_independent_gate": "pass",
         "pypi_prevent_self_review": "pass",
         "pypi_admin_bypass_disabled": "pass",
@@ -69,6 +70,7 @@ def test_complete_fixture_passes_every_governance_check() -> None:
         ("add_immutability_bypass", "tag_immutable"),
         ("malformed_immutability_bypass", "tag_immutable"),
         ("broad_tag_bypass", "tag_bypass_actor_narrow"),
+        ("disable_release_immutability", "release_immutability_enabled"),
         ("self_reviewer", "pypi_independent_gate"),
         ("mixed_owner_reviewer", "pypi_independent_gate"),
         ("allow_self_review", "pypi_prevent_self_review"),
@@ -109,6 +111,8 @@ def test_each_missing_control_fails_closed(mutation: str, failed_check: str) -> 
         creation_ruleset["bypass_actors"] = [
             {"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}
         ]
+    elif mutation == "disable_release_immutability":
+        snapshot["immutable_releases"]["enabled"] = False
     elif mutation == "self_reviewer":
         reviewer_rule["reviewers"][0]["reviewer"]["login"] = "example"
     elif mutation == "mixed_owner_reviewer":
@@ -424,6 +428,10 @@ def test_live_snapshot_fetches_only_reviewed_read_endpoints() -> None:
         "repos/example/gpt2agent": {
             "full_name": "example/gpt2agent",
             "default_branch": "main",
+        },
+        "repos/example/gpt2agent/immutable-releases": {
+            "enabled": True,
+            "enforced_by_owner": False,
         },
         "repos/example/gpt2agent/rulesets?includes_parents=true&per_page=100": [
             {"id": 1},
