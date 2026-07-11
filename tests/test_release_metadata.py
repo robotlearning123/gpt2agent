@@ -29,6 +29,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VERIFIER = PROJECT_ROOT / "scripts" / "verify_release.py"
 
 
+def test_coderabbit_is_an_assertive_required_reviewer_gate() -> None:
+    configuration = (PROJECT_ROOT / ".coderabbit.yaml").read_text(encoding="utf-8")
+
+    assert configuration == (
+        "# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json\n"
+        'language: "en-US"\n'
+        "reviews:\n"
+        '  profile: "assertive"\n'
+        "  request_changes_workflow: true\n"
+        "  auto_review:\n"
+        "    enabled: true\n"
+        "    auto_incremental_review: true\n"
+        "    auto_pause_after_reviewed_commits: 0\n"
+        "    drafts: false\n"
+    )
+
+
 def _project(root: Path, version: str = "1.2.3") -> Path:
     (root / "gpt2agent").mkdir(parents=True)
     (root / ".claude-plugin").mkdir()
