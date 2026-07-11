@@ -43,12 +43,17 @@ function startAudio(OPUS_PT) {
   audioStarted = true;
   // No -ssrc: werift's RTCRtpSender re-stamps SSRC to its negotiated value, and
   // werift's SSRC often exceeds ffmpeg's signed-int32 -ssrc range anyway.
+  // SILENCE=1 => continuous silence (like the browser client did), to isolate
+  // whether werift's audio egress reaches the server at all.
+  const inputArgs = process.env.SILENCE === "1"
+    ? ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono"]
+    : ["-re", "-i", MP3];
   const ff = spawn("ffmpeg", [
-    "-hide_banner", "-loglevel", "error", "-re", "-i", MP3,
+    "-hide_banner", "-loglevel", "error", ...inputArgs,
     "-c:a", "libopus", "-ar", "48000", "-ac", "1", "-b:a", "24k",
     "-payload_type", OPUS_PT, "-f", "rtp", `rtp://127.0.0.1:${PORT}`,
   ]);
-  console.log(`[audio] ffmpeg PT=${OPUS_PT}`);
+  console.log(`[audio] ffmpeg PT=${OPUS_PT} ${process.env.SILENCE === "1" ? "(continuous silence)" : ""}`);
   ff.stderr.on("data", (d) => process.stderr.write("[ffmpeg] " + d));
   ff.on("close", (c) => console.log("[ffmpeg] done", c));
   console.log("[audio] streaming utterance NOW (on dc open)…");
