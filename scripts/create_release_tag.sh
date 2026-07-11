@@ -228,7 +228,7 @@ read_protected_git_binding_line() {
 }
 
 resolve_checkout_git_directory() {
-  local marker="$CHECKOUT/.git" marker_line target backlink discovered
+  local marker="$CHECKOUT/.git" marker_line target backlink discovered config_status
   # A clone owns a .git directory. A linked worktree owns a one-line .git
   # gitfile whose canonical administration directory points back to that file.
   if [[ -L $marker ]]; then
@@ -260,6 +260,16 @@ resolve_checkout_git_directory() {
   fi
   if [[ $discovered != "$CHECKOUT_GIT_DIR" ]]; then
     checkout_binding_error
+  fi
+  if run_git -C "$CHECKOUT" --git-dir="$CHECKOUT_GIT_DIR" \
+    config --name-only --get-regexp '^core\.worktree$' >/dev/null; then
+    echo "release checkout core.worktree configuration is forbidden" >&2
+    exit 1
+  else
+    config_status=$?
+    if (( config_status != 1 )); then
+      checkout_binding_error
+    fi
   fi
 }
 

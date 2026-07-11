@@ -300,7 +300,8 @@ for ((index = 0; index < ${{#arguments[@]}}; index++)); do
   fi
 done
 if (( CHECKOUT_SELECTED == 1 && CHECKOUT_PINNED == 0 )) && \
-  [[ " $* " != *' rev-parse --absolute-git-dir '* ]]; then
+  [[ " $* " != *' rev-parse --absolute-git-dir '* ]] && \
+  [[ " $* " != *' config --name-only --get-regexp '* ]]; then
   printf '%s\n' 'git-checkout-unpinned' >> "$EVENT_LOG"
 fi
 printf 'git-env token=%s dir=%s worktree=%s ssh=%s path=%s global=%s nosystem=%s system=%s\n' "${{GH_TOKEN-unset}}" "${{GIT_DIR-unset}}" "${{GIT_WORK_TREE-unset}}" "${{GIT_SSH_COMMAND-unset}}" "${{PATH-unset}}" "${{GIT_CONFIG_GLOBAL-unset}}" "${{GIT_CONFIG_NOSYSTEM-unset}}" "${{GIT_CONFIG_SYSTEM-unset}}" >> "$EVENT_LOG"
@@ -321,6 +322,14 @@ case "$*" in
   *'rev-parse --absolute-git-dir'*)
     printf '%s\n' 'git-checkout-admin' >> "$EVENT_LOG"
     printf '%s\n' "$CHECKOUT/.git"
+    ;;
+  *'config --name-only --get-regexp'*)
+    printf '%s\n' 'git-checkout-core-worktree' >> "$EVENT_LOG"
+    if [ "${{FAKE_MODE-}}" = core-worktree-redirect ]; then
+      printf '%s\n' 'core.worktree'
+    else
+      exit 1
+    fi
     ;;
   *'rev-parse --show-toplevel'*)
     printf '%s\n' 'git-checkout-root' >> "$EVENT_LOG"
@@ -585,7 +594,7 @@ def test_real_shell_checkout_rejects_linked_worktree_with_wrong_admin_backlink(
     assert "Git administration binding" in result.stderr
 
 
-def test_real_shell_checkout_ignores_hostile_local_core_worktree(tmp_path: Path) -> None:
+def test_real_shell_checkout_rejects_hostile_local_core_worktree(tmp_path: Path) -> None:
     checkout, commit, tree = _create_real_checkout(tmp_path)
     redirected = tmp_path / "redirected"
     redirected.mkdir()
@@ -594,7 +603,24 @@ def test_real_shell_checkout_ignores_hostile_local_core_worktree(tmp_path: Path)
 
     result = _run_real_checkout_probe(tmp_path, checkout, commit, tree)
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode != 0
+    assert "core.worktree configuration is forbidden" in result.stderr
+
+
+def test_real_shell_checkout_rejects_worktree_scoped_core_worktree(tmp_path: Path) -> None:
+    checkout, commit, tree = _create_real_checkout(tmp_path)
+    _real_git(checkout, "config", "extensions.worktreeConfig", "true")
+    linked = tmp_path / "linked"
+    _real_git(checkout, "worktree", "add", "--quiet", "--detach", str(linked), commit)
+    redirected = tmp_path / "redirected"
+    redirected.mkdir()
+    _real_git(linked, "config", "--worktree", "core.worktree", str(redirected))
+    assert Path(_real_git(linked, "rev-parse", "--show-toplevel")) == redirected
+
+    result = _run_real_checkout_probe(tmp_path, linked, commit, tree)
+
+    assert result.returncode != 0
+    assert "core.worktree configuration is forbidden" in result.stderr
 
 
 def test_coordinator_closes_governance_action_and_tag_sequence(tmp_path: Path) -> None:
@@ -665,9 +691,15 @@ def test_every_git_call_disables_executable_local_config(tmp_path: Path) -> None
     assert "git-missing-safe-config" not in events
     assert "git-checkout-unpinned" not in events
     admin_checks = [index for index, event in enumerate(events) if event == "git-checkout-admin"]
+    config_checks = [
+        index for index, event in enumerate(events) if event == "git-checkout-core-worktree"
+    ]
     root_checks = [index for index, event in enumerate(events) if event == "git-checkout-root"]
-    assert len(admin_checks) == len(root_checks) == 3
-    assert all(admin < root for admin, root in zip(admin_checks, root_checks, strict=True))
+    assert len(admin_checks) == len(config_checks) == len(root_checks) == 3
+    assert all(
+        admin < config < root
+        for admin, config, root in zip(admin_checks, config_checks, root_checks, strict=True)
+    )
     git_environments = [event for event in events if event.startswith("git-env")]
     assert git_environments
     assert all(
@@ -794,8 +826,9 @@ def test_checkout_redirection_and_hidden_index_flags_fail_before_mutation(
     assert result["returncode"] != "0"
     assert not any(event.startswith(("python-tools", "gh-tag", "gh-ref")) for event in events)
     if mode == "core-worktree-redirect":
-        assert "release checkout must be clean" in result["stderr"]
-        assert "git-checkout-status" in events
+        assert "core.worktree configuration is forbidden" in result["stderr"]
+        assert "git-checkout-core-worktree" in events
+        assert "git-checkout-status" not in events
     else:
         assert "release checkout index contains hidden paths" in result["stderr"]
 

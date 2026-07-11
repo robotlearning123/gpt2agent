@@ -830,8 +830,8 @@ def test_checkout_validation_rejects_linked_worktree_with_wrong_admin_backlink(
         verify_checkout(linked, declared_commit=commit, declared_tree=tree)
 
 
-def test_checkout_validation_ignores_hostile_local_core_worktree(tmp_path: Path) -> None:
-    from scripts.verify_account_receipt import verify_checkout
+def test_checkout_validation_rejects_hostile_local_core_worktree(tmp_path: Path) -> None:
+    from scripts.verify_account_receipt import ReceiptError, verify_checkout
 
     checkout, commit, tree = _create_checkout(tmp_path)
     redirected = tmp_path / "redirected"
@@ -839,10 +839,24 @@ def test_checkout_validation_ignores_hostile_local_core_worktree(tmp_path: Path)
     _git(checkout, "config", "core.worktree", str(redirected))
     assert Path(_git(checkout, "rev-parse", "--show-toplevel")) == redirected
 
-    assert verify_checkout(checkout, declared_commit=commit, declared_tree=tree) == (
-        commit,
-        tree,
-    )
+    with pytest.raises(ReceiptError, match="core.worktree configuration is forbidden"):
+        verify_checkout(checkout, declared_commit=commit, declared_tree=tree)
+
+
+def test_checkout_validation_rejects_worktree_scoped_core_worktree(tmp_path: Path) -> None:
+    from scripts.verify_account_receipt import ReceiptError, verify_checkout
+
+    checkout, commit, tree = _create_checkout(tmp_path)
+    _git(checkout, "config", "extensions.worktreeConfig", "true")
+    linked = tmp_path / "linked"
+    _git(checkout, "worktree", "add", "--quiet", "--detach", str(linked), commit)
+    redirected = tmp_path / "redirected"
+    redirected.mkdir()
+    _git(linked, "config", "--worktree", "core.worktree", str(redirected))
+    assert Path(_git(linked, "rev-parse", "--show-toplevel")) == redirected
+
+    with pytest.raises(ReceiptError, match="core.worktree configuration is forbidden"):
+        verify_checkout(linked, declared_commit=commit, declared_tree=tree)
 
 
 @pytest.mark.parametrize("flag", ("--assume-unchanged", "--skip-worktree"))

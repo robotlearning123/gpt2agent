@@ -827,6 +827,7 @@ def _git_output(
     *args: str,
     git_directory: Path | None = None,
     pin_work_tree: bool = True,
+    allowed_returncodes: tuple[int, ...] = (0,),
 ) -> str:
     environment = {
         "GIT_CONFIG_GLOBAL": "/dev/null",
@@ -860,7 +861,7 @@ def _git_output(
         )
     except (OSError, subprocess.SubprocessError):
         raise ReceiptError("checkout Git inspection failed") from None
-    if result.returncode != 0:
+    if result.returncode not in allowed_returncodes:
         raise ReceiptError("checkout Git inspection failed")
     return result.stdout.strip()
 
@@ -894,6 +895,18 @@ def verify_checkout(
         raise ReceiptError("checkout Git administration binding is invalid") from None
     if discovered_git_directory != git_directory:
         raise ReceiptError("checkout Git administration binding is invalid")
+    core_worktree_keys = _git_output(
+        resolved,
+        "config",
+        "--name-only",
+        "--get-regexp",
+        r"^core\.worktree$",
+        git_directory=git_directory,
+        pin_work_tree=False,
+        allowed_returncodes=(0, 1),
+    )
+    if core_worktree_keys:
+        raise ReceiptError("checkout core.worktree configuration is forbidden")
     root_text = _git_output(
         resolved,
         "rev-parse",
