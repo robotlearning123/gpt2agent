@@ -1,0 +1,60 @@
+name: Publish exact GitHub Release
+description: Validate and publish one closed GitHub Release draft by numeric ID.
+
+inputs:
+  github-token:
+    description: Fine-scoped GitHub token with contents write permission.
+    required: true
+  repository:
+    description: Repository in owner/name form.
+    required: true
+  release-id:
+    description: Numeric ID returned by the draft creation action.
+    required: true
+  tag:
+    description: Exact release tag.
+    required: true
+  version:
+    description: Normalized Python distribution version.
+    required: true
+  expected-prerelease:
+    description: Literal true or false.
+    required: true
+  notes:
+    description: Exact UTF-8 release notes file.
+    required: true
+  dist:
+    description: Directory containing exactly one expected wheel and sdist.
+    required: true
+  evidence:
+    description: Exact release-workflow-artifacts.json path.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Validate and publish the exact numeric draft
+      shell: bash
+      env:
+        INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
+        INPUT_REPOSITORY: ${{ inputs.repository }}
+        INPUT_RELEASE_ID: ${{ inputs.release-id }}
+        INPUT_TAG: ${{ inputs.tag }}
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_EXPECTED_PRERELEASE: ${{ inputs.expected-prerelease }}
+        INPUT_NOTES: ${{ inputs.notes }}
+        INPUT_DIST: ${{ inputs.dist }}
+        INPUT_EVIDENCE: ${{ inputs.evidence }}
+      run: >-
+        /usr/bin/env -i
+        GH_TOKEN="$INPUT_GITHUB_TOKEN"
+        /usr/bin/python3 -I -S -B
+        "$GITHUB_ACTION_PATH/publish.py"
+        --repository "$INPUT_REPOSITORY"
+        --release-id "$INPUT_RELEASE_ID"
+        --tag "$INPUT_TAG"
+        --version "$INPUT_VERSION"
+        --expected-prerelease "$INPUT_EXPECTED_PRERELEASE"
+        --notes "$INPUT_NOTES"
+        --dist "$INPUT_DIST"
+        --evidence "$INPUT_EVIDENCE"

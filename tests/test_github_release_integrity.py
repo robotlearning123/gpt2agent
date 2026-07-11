@@ -854,6 +854,56 @@ def test_public_release_poll_removes_failed_attempt_before_retry(tmp_path: Path)
     assert [entry for entry in download_root.iterdir()] == [verified]
 
 
+@pytest.mark.parametrize("unexpected_attempt", [1, 2])
+def test_public_release_poll_removes_download_root_after_unexpected_failure(
+    tmp_path: Path,
+    unexpected_attempt: int,
+) -> None:
+    dist, evidence, expected = _closed_local_assets(tmp_path)
+    notes = tmp_path / "release_notes.md"
+    notes.write_text("release notes\n", encoding="utf-8")
+    api_assets = _api_assets(expected)
+    download_root = tmp_path / "public-downloads"
+    attempt = 0
+
+    def fetch_json(url: str, token: str) -> tuple[Any, Mapping[str, str]]:
+        nonlocal attempt
+        if "/releases/tags/v1.2.3" in url:
+            attempt += 1
+            return (_release(), {})
+        return (api_assets, {})
+
+    def download_asset(
+        repository: str,
+        asset_id: int,
+        destination: Path,
+        token: str,
+        expected_asset: ExpectedAsset,
+    ) -> None:
+        if attempt < unexpected_attempt:
+            raise ValueError("retryable download failure")
+        raise RuntimeError("unexpected stream failure")
+
+    with pytest.raises(RuntimeError, match="unexpected stream failure"):
+        verify_public_release(
+            "robotlearning123/gpt2agent",
+            "v1.2.3",
+            notes,
+            dist,
+            evidence,
+            download_root,
+            expected_prerelease=False,
+            token="",
+            attempts=2,
+            delay=0,
+            fetch_json=fetch_json,
+            download_asset=download_asset,
+            sleep=lambda delay: None,
+        )
+
+    assert not download_root.exists()
+
+
 def test_downloaded_assets_require_exact_regular_files_sizes_and_hashes(tmp_path: Path) -> None:
     _, _, expected = _closed_local_assets(tmp_path)
     downloads = tmp_path / "downloads"

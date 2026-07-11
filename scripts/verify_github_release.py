@@ -440,53 +440,72 @@ def verify_public_release(
         f"{API_ROOT}/repos/{normalized_repository}/releases/tags/{quote(normalized_tag, safe='')}"
     )
 
-    last_error = "public release was not observable"
-    for attempt in range(1, attempts + 1):
-        attempt_dir: Path | None = None
-        try:
-            release, _ = fetch_json(release_url, token)
-            if not isinstance(release, dict):
-                raise ValueError("GitHub Release response must be an object")
-            release_id = _require_positive_int(release.get("id"), "GitHub Release ID")
-            assets = collect_release_assets(
-                normalized_repository,
-                release_id,
-                token,
-                fetch_json=fetch_json,
-            )
-            asset_ids = verify_release_metadata(
-                release,
-                assets,
-                tag=normalized_tag,
-                expected_body=expected_body,
-                expected_prerelease=expected_prerelease,
-                expected_assets=expected_assets,
-            )
-            attempt_dir = Path(tempfile.mkdtemp(prefix=f"attempt-{attempt}-", dir=download_root))
-            for name in sorted(expected_assets):
-                download_asset(
-                    normalized_repository,
-                    asset_ids[name],
-                    attempt_dir / name,
-                    token,
-                    expected_assets[name],
-                )
-            verify_downloaded_assets(attempt_dir, expected_assets)
-            return attempt_dir
-        except (OSError, ValueError) as error:
-            last_error = str(error)
-            if attempt_dir is not None:
-                try:
-                    shutil.rmtree(attempt_dir)
-                except OSError:
-                    raise ValueError("failed to clean GitHub Release verification attempt") from None
-            if attempt < attempts:
-                sleep(delay)
     try:
-        download_root.rmdir()
-    except OSError:
-        raise ValueError("failed to clean GitHub Release verification root") from None
-    raise ValueError(f"public GitHub Release did not match after {attempts} attempts: {last_error}")
+        last_error = "public release was not observable"
+        for attempt in range(1, attempts + 1):
+            attempt_dir: Path | None = None
+            try:
+                release, _ = fetch_json(release_url, token)
+                if not isinstance(release, dict):
+                    raise ValueError("GitHub Release response must be an object")
+                release_id = _require_positive_int(release.get("id"), "GitHub Release ID")
+                assets = collect_release_assets(
+                    normalized_repository,
+                    release_id,
+                    token,
+                    fetch_json=fetch_json,
+                )
+                asset_ids = verify_release_metadata(
+                    release,
+                    assets,
+                    tag=normalized_tag,
+                    expected_body=expected_body,
+                    expected_prerelease=expected_prerelease,
+                    expected_assets=expected_assets,
+                )
+                attempt_dir = Path(
+                    tempfile.mkdtemp(prefix=f"attempt-{attempt}-", dir=download_root)
+                )
+                for name in sorted(expected_assets):
+                    download_asset(
+                        normalized_repository,
+                        asset_ids[name],
+                        attempt_dir / name,
+                        token,
+                        expected_assets[name],
+                    )
+                verify_downloaded_assets(attempt_dir, expected_assets)
+                return attempt_dir
+            except (OSError, ValueError) as error:
+                last_error = str(error)
+                if attempt_dir is not None:
+                    try:
+                        shutil.rmtree(attempt_dir)
+                    except OSError:
+                        raise ValueError(
+                            "failed to clean GitHub Release verification attempt"
+                        ) from None
+                if attempt < attempts:
+                    sleep(delay)
+        try:
+            download_root.rmdir()
+        except OSError:
+            raise ValueError("failed to clean GitHub Release verification root") from None
+        raise ValueError(
+            f"public GitHub Release did not match after {attempts} attempts: {last_error}"
+        )
+    except BaseException:
+        if download_root.exists() or download_root.is_symlink():
+            try:
+                if download_root.is_dir() and not download_root.is_symlink():
+                    shutil.rmtree(download_root)
+                else:
+                    download_root.unlink()
+            except OSError as cleanup_error:
+                raise ValueError(
+                    "failed to clean GitHub Release verification root"
+                ) from cleanup_error
+        raise
 
 
 def _parser() -> argparse.ArgumentParser:
