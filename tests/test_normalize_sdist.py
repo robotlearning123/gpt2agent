@@ -301,6 +301,37 @@ def test_normalizer_rejects_global_and_unsupported_member_pax_metadata(
         module.normalize_sdist(member_archive, epoch=EPOCH)
 
 
+@pytest.mark.parametrize(
+    "pax_headers",
+    [
+        {"comment": "not in the release contract"},
+        {"GNU.sparse.major": "1", "GNU.sparse.minor": "0"},
+        {"mtime": "not-a-timestamp"},
+    ],
+)
+def test_raw_preflight_rejects_unsupported_pax_before_tarfile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pax_headers: dict[str, str],
+) -> None:
+    module = _load_module()
+    archive = tmp_path / f"{ROOT}.tar.gz"
+    entries = _source_entries()
+    entries[-1][0].pax_headers = pax_headers
+    _write_custom_archive(archive, entries)
+    original = archive.read_bytes()
+
+    def fail_tarfile_open(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("unsupported PAX metadata reached tarfile")
+
+    monkeypatch.setattr(module.tarfile, "open", fail_tarfile_open)
+
+    with pytest.raises(module.SdistNormalizationError, match="PAX metadata"):
+        module.normalize_sdist(archive, epoch=EPOCH)
+
+    assert archive.read_bytes() == original
+
+
 def test_normalizer_preserves_long_pax_path_without_volatile_metadata(
     tmp_path: Path,
 ) -> None:
@@ -769,6 +800,82 @@ def test_snapshot_close_failure_preserves_active_validation_error(
     assert str(captured.value) == "sdist is missing its root, PKG-INFO, or pyproject.toml"
     assert "sensitive" not in str(captured.value)
     assert archive.read_bytes() == original
+    assert not list(tmp_path.glob(f".{archive.name}.*.tmp"))
+
+
+@pytest.mark.parametrize("replacement_kind", ["regular", "symlink"])
+def test_normalizer_binds_hash_to_created_temp_inode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_kind: str,
+) -> None:
+    module = _load_module()
+    archive = tmp_path / f"{ROOT}.tar.gz"
+    _write_custom_archive(archive, _source_entries())
+    original = archive.read_bytes()
+    attacker = tmp_path / "attacker-payload"
+    attacker.write_bytes(b"unvalidated replacement")
+    real_sha256 = module._sha256
+    swapped = False
+
+    def swap_before_hash(
+        candidate: Path,
+        *,
+        expected_identity: object | None = None,
+    ) -> str:
+        nonlocal swapped
+        if candidate.name.startswith(f".{archive.name}.") and not swapped:
+            if replacement_kind == "regular":
+                replacement = candidate.with_name(f"{candidate.name}.replacement")
+                replacement.write_bytes(attacker.read_bytes())
+                replacement.chmod(0o600)
+                os.replace(replacement, candidate)
+            else:
+                candidate.unlink()
+                candidate.symlink_to(attacker)
+            swapped = True
+        if expected_identity is None:
+            return real_sha256(candidate)
+        return real_sha256(candidate, expected_identity=expected_identity)
+
+    monkeypatch.setattr(module, "_sha256", swap_before_hash)
+
+    with pytest.raises(module.SdistNormalizationError):
+        module.normalize_sdist(archive, epoch=EPOCH)
+
+    assert swapped
+    assert archive.read_bytes() == original
+    assert not archive.is_symlink()
+    assert not list(tmp_path.glob(f".{archive.name}.*.tmp"))
+
+
+def test_normalizer_verifies_installed_inode_after_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    archive = tmp_path / f"{ROOT}.tar.gz"
+    _write_custom_archive(archive, _source_entries())
+    real_replace = module.os.replace
+    swapped = False
+
+    def swap_during_replace(source: Path, destination: Path) -> None:
+        nonlocal swapped
+        source_path = Path(source)
+        if source_path.name.startswith(f".{archive.name}.") and not swapped:
+            replacement = source_path.with_name(f"{source_path.name}.replacement")
+            replacement.write_bytes(b"unvalidated replacement")
+            replacement.chmod(0o600)
+            real_replace(replacement, source_path)
+            swapped = True
+        real_replace(source, destination)
+
+    monkeypatch.setattr(module.os, "replace", swap_during_replace)
+
+    with pytest.raises(module.SdistNormalizationError, match="installation"):
+        module.normalize_sdist(archive, epoch=EPOCH)
+
+    assert swapped
     assert not list(tmp_path.glob(f".{archive.name}.*.tmp"))
 
 

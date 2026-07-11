@@ -86,6 +86,29 @@ def _identity(metadata: os.stat_result) -> _Identity:
     )
 
 
+def _same_renamed_identity(current: _Identity, expected: _Identity) -> bool:
+    """Compare stable inode state while allowing rename to update ctime."""
+    return (
+        current.mode == expected.mode
+        and current.device == expected.device
+        and current.inode == expected.inode
+        and current.size == expected.size
+        and current.mtime_ns == expected.mtime_ns
+    )
+
+
+def _path_has_identity(path: Path, expected: _Identity) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and _identity(metadata) == expected
+    )
+
+
 def _validate_archive_path(path: Path) -> tuple[str, _Identity]:
     if not path.name.endswith(".tar.gz"):
         raise SdistNormalizationError("sdist path must end in .tar.gz")
@@ -191,19 +214,82 @@ def _discard_exact(stream: BinaryIO, size: int) -> None:
         remaining -= len(chunk)
 
 
-def _validate_payload_and_padding(stream: BinaryIO, size: int) -> None:
-    _discard_exact(stream, size)
+def _read_exact(stream: BinaryIO, size: int) -> bytes:
+    payload = bytearray()
+    while len(payload) < size:
+        chunk = stream.read(size - len(payload))
+        if not chunk:
+            raise SdistNormalizationError("sdist tar payload is truncated")
+        payload.extend(chunk)
+    return bytes(payload)
+
+
+def _validate_payload_and_padding(
+    stream: BinaryIO,
+    size: int,
+    *,
+    capture: bool = False,
+) -> bytes | None:
+    payload = _read_exact(stream, size) if capture else None
+    if not capture:
+        _discard_exact(stream, size)
     padding_size = (-size) % 512
     if not padding_size:
-        return
-    padding = bytearray()
-    while len(padding) < padding_size:
-        chunk = stream.read(padding_size - len(padding))
-        if not chunk:
-            raise SdistNormalizationError("sdist tar payload padding is truncated")
-        padding.extend(chunk)
+        return payload
+    padding = _read_exact(stream, padding_size)
     if any(padding):
         raise SdistNormalizationError("sdist tar payload padding must be zero")
+    return payload
+
+
+def _validate_local_pax(payload: bytes) -> None:
+    """Reject malformed or out-of-contract PAX records before ``tarfile``."""
+    offset = 0
+    seen: set[str] = set()
+    while offset < len(payload):
+        separator = payload.find(b" ", offset)
+        length_field = payload[offset:separator] if separator >= 0 else b""
+        if (
+            not length_field
+            or len(length_field) > len(str(_MAX_EXTENDED_HEADER_BYTES))
+            or not length_field.isdigit()
+            or length_field.startswith(b"0")
+        ):
+            raise SdistNormalizationError("sdist contains malformed PAX metadata")
+        record_size = int(length_field, 10)
+        record_end = offset + record_size
+        if (
+            str(record_size).encode("ascii") != length_field
+            or record_end > len(payload)
+            or separator >= record_end
+            or payload[record_end - 1 : record_end] != b"\n"
+        ):
+            raise SdistNormalizationError("sdist contains malformed PAX metadata")
+        assignment = payload[separator + 1 : record_end - 1]
+        key_bytes, marker, value = assignment.partition(b"=")
+        if not key_bytes or not marker:
+            raise SdistNormalizationError("sdist contains malformed PAX metadata")
+        try:
+            key = key_bytes.decode("utf-8", errors="strict")
+        except UnicodeError as error:
+            raise SdistNormalizationError("sdist contains malformed PAX metadata") from error
+        if key in seen:
+            raise SdistNormalizationError("sdist contains malformed PAX metadata")
+        seen.add(key)
+        if key not in {"mtime", "path"}:
+            raise SdistNormalizationError("sdist contains unsupported PAX metadata")
+        if key == "mtime" and (
+            len(value) > 64 or re.fullmatch(rb"[+-]?[0-9]+(?:\.[0-9]+)?", value) is None
+        ):
+            raise SdistNormalizationError("sdist contains malformed PAX metadata")
+        if key == "path":
+            try:
+                decoded_path = value.decode("utf-8", errors="strict")
+            except UnicodeError as error:
+                raise SdistNormalizationError("sdist contains malformed PAX metadata") from error
+            if not decoded_path or len(value) > _MAX_NAME_BYTES:
+                raise SdistNormalizationError("sdist contains malformed PAX metadata")
+        offset = record_end
 
 
 def _preflight_tar_stream(stream: BinaryIO, *, rewind: bool = True) -> None:
@@ -252,6 +338,7 @@ def _preflight_tar_stream(stream: BinaryIO, *, rewind: bool = True) -> None:
                 )
             size = _tar_header_size(header)
             member_type = header[156:157]
+            local_pax = False
             if member_type in _EXTENDED_HEADER_TYPES:
                 if size > _MAX_EXTENDED_HEADER_BYTES:
                     raise SdistNormalizationError(
@@ -266,6 +353,7 @@ def _preflight_tar_stream(stream: BinaryIO, *, rewind: bool = True) -> None:
                         "sdist contains consecutive local extended headers"
                     )
                 pending_extended_header = True
+                local_pax = member_type in {tarfile.XHDTYPE, tarfile.SOLARIS_XHDTYPE}
             else:
                 pending_extended_header = False
                 member_count += 1
@@ -283,7 +371,10 @@ def _preflight_tar_stream(stream: BinaryIO, *, rewind: bool = True) -> None:
                         raise SdistNormalizationError(
                             "sdist payload exceeds the supported total bound"
                         )
-            _validate_payload_and_padding(stream, size)
+            payload = _validate_payload_and_padding(stream, size, capture=local_pax)
+            if local_pax:
+                assert payload is not None
+                _validate_local_pax(payload)
     finally:
         if rewind:
             stream.seek(0)
@@ -658,12 +749,19 @@ def _sync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
+def _sha256(path: Path, *, expected_identity: _Identity | None = None) -> str:
+    """Hash one stable regular-file inode that remains bound to *path*."""
+    stream, observed_identity = _open_regular(path, expected_identity)
+    with stream:
+        if not _path_has_identity(path, observed_identity):
+            raise SdistNormalizationError("normalized sdist output changed while opening")
+        digest = hashlib.sha256()
         for chunk in iter(lambda: stream.read(_COPY_CHUNK), b""):
             digest.update(chunk)
-    return digest.hexdigest()
+        _require_open_identity(stream, observed_identity)
+        if not _path_has_identity(path, observed_identity):
+            raise SdistNormalizationError("normalized sdist output changed while hashing")
+        return digest.hexdigest()
 
 
 def normalize_sdist(archive: Path, *, epoch: int) -> str:
@@ -683,6 +781,7 @@ def normalize_sdist(archive: Path, *, epoch: int) -> str:
         dir=archive.parent,
     )
     temp_path = Path(temp_name)
+    output_identity: _Identity | None = None
     try:
         with os.fdopen(descriptor, "wb") as destination:
             descriptor = -1
@@ -690,9 +789,13 @@ def normalize_sdist(archive: Path, *, epoch: int) -> str:
             if fchmod is not None:
                 fchmod(destination.fileno(), 0o600)
             _write_normalized(archive, source_identity, destination, normalized_epoch)
+            output_identity = _identity(os.fstat(destination.fileno()))
+        if output_identity is None:
+            raise SdistNormalizationError("normalized sdist output was not created")
         _, normalized_manifest = _scan_archive(
             temp_path,
             expected_root,
+            expected_identity=output_identity,
             normalized_epoch=normalized_epoch,
         )
         if normalized_manifest != source_manifest:
@@ -706,9 +809,41 @@ def normalize_sdist(archive: Path, *, epoch: int) -> str:
             raise SdistNormalizationError("sdist changed before atomic replacement") from None
         if stat.S_ISLNK(current.st_mode) or _identity(current) != source_identity:
             raise SdistNormalizationError("sdist changed before atomic replacement")
-        digest = _sha256(temp_path)
+        digest = _sha256(temp_path, expected_identity=output_identity)
+        if not _path_has_identity(temp_path, output_identity):
+            raise SdistNormalizationError("normalized sdist output changed before installation")
+        try:
+            current = archive.lstat()
+        except OSError:
+            raise SdistNormalizationError("sdist changed before atomic replacement") from None
+        if stat.S_ISLNK(current.st_mode) or _identity(current) != source_identity:
+            raise SdistNormalizationError("sdist changed before atomic replacement")
         os.replace(temp_path, archive)
+        try:
+            installed_metadata = archive.lstat()
+        except OSError:
+            raise SdistNormalizationError(
+                "normalized sdist output changed during installation"
+            ) from None
+        installed_identity = _identity(installed_metadata)
+        if (
+            stat.S_ISLNK(installed_metadata.st_mode)
+            or not stat.S_ISREG(installed_metadata.st_mode)
+            or not _same_renamed_identity(installed_identity, output_identity)
+        ):
+            raise SdistNormalizationError(
+                "normalized sdist output changed during installation"
+            )
+        installed_digest = _sha256(archive, expected_identity=installed_identity)
+        if installed_digest != digest:
+            raise SdistNormalizationError(
+                "normalized sdist output changed during installation"
+            )
         _sync_directory(archive.parent)
+        if not _path_has_identity(archive, installed_identity):
+            raise SdistNormalizationError(
+                "normalized sdist output changed during installation"
+            )
         return digest
     finally:
         if descriptor >= 0:

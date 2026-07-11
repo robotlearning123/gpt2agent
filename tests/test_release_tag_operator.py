@@ -52,6 +52,9 @@ def _create_real_checkout(tmp_path: Path) -> tuple[Path, str, str]:
     checkout = tmp_path / "real-checkout"
     checkout.mkdir()
     _real_git(checkout, "init", "--quiet")
+    # The coordinator intentionally rejects group-writable Git administration.
+    # Make the fixture independent of the developer or runner's ambient umask.
+    (checkout / ".git").chmod(0o700)
     _real_git(checkout, "config", "user.name", "Release Tests")
     _real_git(checkout, "config", "user.email", "release-tests@example.invalid")
     (checkout / ".gitignore").write_text("dist/\n", encoding="utf-8")
@@ -89,9 +92,23 @@ def _run_real_checkout_probe(
         pytest.skip("release coordinator requires GNU stat")
 
     support = tmp_path / f"shell-probe-{checkout.name}"
-    support.mkdir()
+    support.mkdir(mode=0o700)
+    support.chmod(0o700)
     if state_parent_mode is not None:
         support.chmod(state_parent_mode)
+    marker = checkout / ".git"
+    if marker.is_dir() and not marker.is_symlink():
+        marker.chmod(0o700)
+    elif marker.is_file() and not marker.is_symlink():
+        marker.chmod(0o600)
+        binding = marker.read_text(encoding="utf-8").strip()
+        if binding.startswith("gitdir: "):
+            git_directory = Path(binding.removeprefix("gitdir: "))
+            if git_directory.is_dir() and not git_directory.is_symlink():
+                git_directory.chmod(0o700)
+                backlink = git_directory / "gitdir"
+                if backlink.is_file() and not backlink.is_symlink():
+                    backlink.chmod(0o600)
     fake_python = support / "python"
     fake_gh = support / "gh"
     _write_executable(fake_python, "#!/bin/sh\nexit 97\n")
@@ -179,6 +196,8 @@ def _run_real_checkout_probe(
 
 
 def _make_harness(tmp_path: Path) -> tuple[list[str], dict[str, str], list[str]]:
+    # Tests must not inherit a collaborative 0002 umask into security fixtures.
+    tmp_path.chmod(0o700)
     trusted_bin = tmp_path / "trusted-bin"
     poison_bin = tmp_path / "poison-bin"
     trusted_bin.mkdir()
@@ -397,7 +416,8 @@ esac
     checkout = tmp_path / "checkout"
     dist = tmp_path / "dist"
     checkout.mkdir()
-    (checkout / ".git").mkdir()
+    (checkout / ".git").mkdir(mode=0o700)
+    (checkout / ".git").chmod(0o700)
     dist.mkdir()
     receipt = tmp_path / "receipt.json"
     receipt.write_text("{}\n", encoding="utf-8")
