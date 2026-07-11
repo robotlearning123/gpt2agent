@@ -162,6 +162,180 @@ def test_normalization_rejects_concatenated_gzip_members(tmp_path: Path) -> None
         raise AssertionError("a concatenated gzip member was accepted")
 
 
+def test_normalization_rejects_hidden_bytes_after_tar_end(tmp_path: Path) -> None:
+    module = _load_module()
+    sdist = tmp_path / f"{ROOT}.tar.gz"
+    _write_sdist(
+        sdist,
+        gzip_mtime=1_700_000_001,
+        member_mtime=1_700_000_003,
+        reverse=False,
+    )
+    expanded = gzip.decompress(sdist.read_bytes())
+    sdist.write_bytes(gzip.compress(expanded + b"hidden after tar end", mtime=0))
+    original = sdist.read_bytes()
+
+    with pytest.raises(module.SdistNormalizationError, match="tar framing"):
+        module.normalize_sdist(sdist, epoch=1_700_000_000)
+
+    assert sdist.read_bytes() == original
+
+
+def test_normalization_rejects_partial_zero_padding_after_tar_end(tmp_path: Path) -> None:
+    module = _load_module()
+    sdist = tmp_path / f"{ROOT}.tar.gz"
+    _write_sdist(
+        sdist,
+        gzip_mtime=1_700_000_001,
+        member_mtime=1_700_000_003,
+        reverse=False,
+    )
+    expanded = gzip.decompress(sdist.read_bytes())
+    sdist.write_bytes(gzip.compress(expanded + b"\0", mtime=0))
+
+    with pytest.raises(module.SdistNormalizationError, match="partial trailing padding"):
+        module.normalize_sdist(sdist, epoch=1_700_000_000)
+
+
+@pytest.mark.parametrize("terminator_blocks", [0, 1])
+def test_normalization_requires_two_tar_terminator_blocks(
+    tmp_path: Path,
+    terminator_blocks: int,
+) -> None:
+    module = _load_module()
+    sdist = tmp_path / f"{ROOT}.tar.gz"
+    _write_sdist(
+        sdist,
+        gzip_mtime=1_700_000_001,
+        member_mtime=1_700_000_003,
+        reverse=False,
+    )
+    expanded = gzip.decompress(sdist.read_bytes()).rstrip(b"\0")
+    expanded += b"\0" * (-len(expanded) % tarfile.BLOCKSIZE)
+    expanded += b"\0" * (terminator_blocks * tarfile.BLOCKSIZE)
+    sdist.write_bytes(gzip.compress(expanded, mtime=0))
+
+    with pytest.raises(module.SdistNormalizationError, match="tar framing"):
+        module.normalize_sdist(sdist, epoch=1_700_000_000)
+
+
+@pytest.mark.parametrize(
+    "metadata_type",
+    [
+        tarfile.XHDTYPE,
+        tarfile.XGLTYPE,
+        tarfile.SOLARIS_XHDTYPE,
+        tarfile.GNUTYPE_LONGNAME,
+        tarfile.GNUTYPE_LONGLINK,
+    ],
+)
+def test_tar_preflight_rejects_oversized_extended_metadata_before_payload_read(
+    metadata_type: bytes,
+) -> None:
+    module = _load_module()
+    validator = getattr(module, "_validate_tar_payload", None)
+    assert validator is not None, "raw tar preflight is missing"
+    member = tarfile.TarInfo("././@ExtendedHeader")
+    member.type = metadata_type
+    member.size = module.MAX_EXTENDED_HEADER_BYTES + 1
+    header = member.tobuf(format=tarfile.PAX_FORMAT)
+
+    class HeaderOnlyStream(io.BytesIO):
+        def read(self, size: int = -1) -> bytes:
+            if self.tell() >= tarfile.BLOCKSIZE:
+                raise AssertionError("oversized metadata payload must not be read")
+            return super().read(size)
+
+    with pytest.raises(module.SdistNormalizationError, match="extended metadata"):
+        validator(HeaderOnlyStream(header))
+
+
+def test_tar_preflight_rejects_base_256_size_fields() -> None:
+    module = _load_module()
+    binary_size = bytes([0x80]) + b"\0" * 11
+
+    with pytest.raises(module.SdistNormalizationError, match="noncanonical size"):
+        module._tar_size(binary_size)
+
+
+def test_tar_preflight_bounds_total_declared_member_bytes_before_payload_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    member = tarfile.TarInfo(f"{ROOT}/oversized-total")
+    member.size = 2
+    header = member.tobuf(format=tarfile.PAX_FORMAT)
+    monkeypatch.setattr(module, "MAX_TOTAL_BYTES", 1)
+
+    class HeaderOnlyStream(io.BytesIO):
+        def read(self, size: int = -1) -> bytes:
+            if self.tell() >= tarfile.BLOCKSIZE:
+                raise AssertionError("over-budget member payload must not be read")
+            return super().read(size)
+
+    with pytest.raises(module.SdistNormalizationError, match="expanded size"):
+        module._validate_tar_payload(HeaderOnlyStream(header))
+
+
+def test_tar_preflight_enforces_its_own_physical_output_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    monkeypatch.setattr(module, "MAX_TAR_BYTES", tarfile.BLOCKSIZE * 2)
+    oversized_zero_padding = b"\0" * (tarfile.BLOCKSIZE * 3)
+
+    with pytest.raises(module.SdistNormalizationError, match="expanded archive"):
+        module._validate_tar_payload(io.BytesIO(oversized_zero_padding))
+
+
+def test_tar_preflight_rejects_consecutive_local_extended_headers() -> None:
+    module = _load_module()
+    metadata = tarfile.TarInfo("././@ExtendedHeader")
+    metadata.type = tarfile.XHDTYPE
+    header = metadata.tobuf(format=tarfile.PAX_FORMAT)
+    payload = header + header + b"\0" * (tarfile.BLOCKSIZE * 2)
+
+    with pytest.raises(module.SdistNormalizationError, match="consecutive"):
+        module._validate_tar_payload(io.BytesIO(payload))
+
+
+def test_tar_preflight_requires_local_extended_header_to_have_a_member() -> None:
+    module = _load_module()
+    metadata = tarfile.TarInfo("././@ExtendedHeader")
+    metadata.type = tarfile.XHDTYPE
+    header = metadata.tobuf(format=tarfile.PAX_FORMAT)
+    payload = header + b"\0" * (tarfile.BLOCKSIZE * 2)
+
+    with pytest.raises(module.SdistNormalizationError, match="followed by a member"):
+        module._validate_tar_payload(io.BytesIO(payload))
+
+
+@pytest.mark.parametrize(
+    ("metadata_type", "message"),
+    [
+        (tarfile.XGLTYPE, "global PAX"),
+        (tarfile.GNUTYPE_LONGLINK, "link"),
+    ],
+)
+def test_tar_preflight_rejects_out_of_contract_extended_headers_before_next_read(
+    metadata_type: bytes,
+    message: str,
+) -> None:
+    module = _load_module()
+    metadata = tarfile.TarInfo("././@ExtendedHeader")
+    metadata.type = metadata_type
+    header = metadata.tobuf(format=tarfile.PAX_FORMAT)
+
+    class HeaderOnlyStream(io.BytesIO):
+        def read(self, size: int = -1) -> bytes:
+            if self.tell() >= tarfile.BLOCKSIZE:
+                raise AssertionError("out-of-contract metadata must not recurse")
+            return super().read(size)
+
+    with pytest.raises(module.SdistNormalizationError, match=message):
+        module._validate_tar_payload(HeaderOnlyStream(header))
+
+
 @pytest.mark.parametrize(
     "unsafe_name",
     [
@@ -320,6 +494,33 @@ def test_normalization_rejects_same_size_source_mutation(
 
     assert mutated
     assert sdist.stat().st_size == original_size
+    assert not list(tmp_path.glob(f".{sdist.name}.*.tmp"))
+
+
+def test_tarfile_reads_the_validated_snapshot_when_source_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    sdist = tmp_path / f"{ROOT}.tar.gz"
+    _write_custom_sdist(sdist, _required_entries())
+    original_tar_open = module.tarfile.open
+    mutated = False
+
+    def mutate_before_incoming_open(*args: object, **kwargs: object) -> tarfile.TarFile:
+        nonlocal mutated
+        if kwargs.get("mode") in {"r:", "r:gz"} and not mutated:
+            sdist.write_bytes(b"rewritten after tar preflight")
+            mutated = True
+        return original_tar_open(*args, **kwargs)
+
+    monkeypatch.setattr(module.tarfile, "open", mutate_before_incoming_open)
+
+    with pytest.raises(module.SdistNormalizationError, match="changed"):
+        module.normalize_sdist(sdist, epoch=1_700_000_000)
+
+    assert mutated
+    assert sdist.read_bytes() == b"rewritten after tar preflight"
     assert not list(tmp_path.glob(f".{sdist.name}.*.tmp"))
 
 

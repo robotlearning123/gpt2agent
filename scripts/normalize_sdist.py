@@ -24,10 +24,22 @@ MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 MAX_MEMBERS = 65_536
 MAX_TAR_BYTES = MAX_TOTAL_BYTES + MAX_MEMBERS * 1024
 MAX_NAME_BYTES = 4_096
+MAX_EXTENDED_HEADER_BYTES = 64 * 1024
+MAX_TAR_HEADERS = MAX_MEMBERS * 3
 MAX_DECOMPRESS_BYTES = 1024 * 1024
 MAX_GZIP_EPOCH = (1 << 32) - 1
 _ARCHIVE_ROOT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}\Z")
 _ALLOWED_PAX_HEADERS = frozenset({"mtime", "path"})
+_EXTENDED_HEADER_TYPES = frozenset(
+    {
+        tarfile.XHDTYPE,
+        tarfile.XGLTYPE,
+        tarfile.SOLARIS_XHDTYPE,
+        tarfile.GNUTYPE_LONGNAME,
+        tarfile.GNUTYPE_LONGLINK,
+    }
+)
+_MEMBER_HEADER_TYPES = frozenset({tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE})
 
 
 class SdistNormalizationError(ValueError):
@@ -219,6 +231,166 @@ def _validate_complete_gzip(stream: BinaryIO) -> None:
         stream.seek(0)
 
 
+def _tar_size(field: bytes) -> int:
+    """Parse the canonical octal size field emitted by Python/setuptools."""
+    if re.fullmatch(rb"[0-7]{11}\0", field) is None:
+        raise SdistNormalizationError("sdist tar framing has a noncanonical size field")
+    return int(field[:-1], 8)
+
+
+def _read_exact(stream: BinaryIO, size: int) -> bytes:
+    result = bytearray()
+    while len(result) < size:
+        chunk = stream.read(size - len(result))
+        if not chunk:
+            raise SdistNormalizationError("sdist tar framing is truncated")
+        result.extend(chunk)
+    return bytes(result)
+
+
+def _discard_exact(stream: BinaryIO, size: int) -> None:
+    remaining = size
+    while remaining:
+        chunk = stream.read(min(remaining, 64 * 1024))
+        if not chunk:
+            raise SdistNormalizationError("sdist tar framing is truncated")
+        remaining -= len(chunk)
+
+
+class _TeeReader:
+    def __init__(self, source: BinaryIO, destination: BinaryIO) -> None:
+        self.source = source
+        self.destination = destination
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self.source.read(size)
+        self.destination.write(chunk)
+        return chunk
+
+
+def _validate_tar_padding(stream: BinaryIO, *, remaining_bytes: int) -> None:
+    padding_size = 0
+    while chunk := stream.read(min(64 * 1024, remaining_bytes - padding_size + 1)):
+        padding_size += len(chunk)
+        if padding_size > remaining_bytes:
+            raise SdistNormalizationError(
+                "sdist expanded archive is outside the reviewed bound"
+            )
+        if chunk.strip(b"\0"):
+            raise SdistNormalizationError(
+                "sdist tar framing contains data after its end marker"
+            )
+    if padding_size % tarfile.BLOCKSIZE:
+        raise SdistNormalizationError("sdist tar framing has partial trailing padding")
+
+
+def _validate_tar_payload(stream: BinaryIO) -> None:
+    """Validate bounded physical tar framing before ``tarfile`` parses metadata."""
+    raw_headers = 0
+    member_headers = 0
+    member_bytes = 0
+    physical_bytes = 0
+    pending_extended_header = False
+    while True:
+        if physical_bytes + tarfile.BLOCKSIZE > MAX_TAR_BYTES:
+            raise SdistNormalizationError(
+                "sdist expanded archive is outside the reviewed bound"
+            )
+        header = _read_exact(stream, tarfile.BLOCKSIZE)
+        physical_bytes += tarfile.BLOCKSIZE
+        if header == tarfile.NUL * tarfile.BLOCKSIZE:
+            if pending_extended_header:
+                raise SdistNormalizationError(
+                    "sdist local extended header is not followed by a member"
+                )
+            if physical_bytes + tarfile.BLOCKSIZE > MAX_TAR_BYTES:
+                raise SdistNormalizationError(
+                    "sdist expanded archive is outside the reviewed bound"
+                )
+            second = _read_exact(stream, tarfile.BLOCKSIZE)
+            physical_bytes += tarfile.BLOCKSIZE
+            if second != tarfile.NUL * tarfile.BLOCKSIZE:
+                raise SdistNormalizationError(
+                    "sdist tar framing requires two consecutive end-marker blocks"
+                )
+            _validate_tar_padding(stream, remaining_bytes=MAX_TAR_BYTES - physical_bytes)
+            return
+
+        raw_headers += 1
+        if raw_headers > MAX_TAR_HEADERS:
+            raise SdistNormalizationError("sdist tar header count is outside the reviewed bound")
+        size = _tar_size(header[124:136])
+        try:
+            parsed = tarfile.TarInfo.frombuf(header, "utf-8", "strict")
+        except (tarfile.HeaderError, UnicodeError, ValueError) as exc:
+            raise SdistNormalizationError("sdist tar framing has a malformed header") from exc
+
+        if parsed.type in _EXTENDED_HEADER_TYPES:
+            if size > MAX_EXTENDED_HEADER_BYTES:
+                raise SdistNormalizationError(
+                    "sdist extended metadata is outside the reviewed bound"
+                )
+            if parsed.type == tarfile.XGLTYPE:
+                raise SdistNormalizationError("sdist global PAX headers are not supported")
+            if parsed.type == tarfile.GNUTYPE_LONGLINK:
+                raise SdistNormalizationError("sdist contains unsupported link metadata")
+            if pending_extended_header:
+                raise SdistNormalizationError(
+                    "sdist contains consecutive local extended headers"
+                )
+            pending_extended_header = True
+        elif parsed.type in _MEMBER_HEADER_TYPES:
+            pending_extended_header = False
+            member_headers += 1
+            if member_headers > MAX_MEMBERS:
+                raise SdistNormalizationError(
+                    "sdist member count is outside the reviewed bound"
+                )
+            if parsed.type == tarfile.DIRTYPE and size:
+                raise SdistNormalizationError("sdist directory has a nonzero size")
+            if parsed.type in {tarfile.REGTYPE, tarfile.AREGTYPE} and size > MAX_MEMBER_BYTES:
+                raise SdistNormalizationError(
+                    "sdist member size is outside the reviewed bound"
+                )
+            if parsed.type in {tarfile.REGTYPE, tarfile.AREGTYPE}:
+                member_bytes += size
+                if member_bytes > MAX_TOTAL_BYTES:
+                    raise SdistNormalizationError(
+                        "sdist expanded size is outside the reviewed bound"
+                    )
+        else:
+            raise SdistNormalizationError("sdist contains a link or special file")
+
+        padded_size = (size + tarfile.BLOCKSIZE - 1) // tarfile.BLOCKSIZE
+        padded_bytes = padded_size * tarfile.BLOCKSIZE
+        if physical_bytes + padded_bytes > MAX_TAR_BYTES:
+            raise SdistNormalizationError(
+                "sdist expanded archive is outside the reviewed bound"
+            )
+        _discard_exact(stream, padded_bytes)
+        physical_bytes += padded_bytes
+
+
+def _validate_tar_framing(stream: BinaryIO) -> BinaryIO:
+    """Return a rewound anonymous snapshot of the exact validated tar payload."""
+    snapshot = tempfile.TemporaryFile(mode="w+b")
+    try:
+        stream.seek(0)
+        with gzip.GzipFile(fileobj=stream, mode="rb") as expanded:
+            _validate_tar_payload(_TeeReader(expanded, snapshot))
+        snapshot.flush()
+        snapshot.seek(0)
+        return snapshot
+    except SdistNormalizationError:
+        snapshot.close()
+        raise
+    except (EOFError, gzip.BadGzipFile, OSError) as exc:
+        snapshot.close()
+        raise SdistNormalizationError("sdist tar framing is malformed") from exc
+    finally:
+        stream.seek(0)
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -239,8 +411,12 @@ def normalize_sdist(path: Path, *, epoch: int) -> str:
             if not _same_metadata(opened_metadata, source_metadata):
                 raise SdistNormalizationError("sdist changed while it was opened")
             _validate_complete_gzip(source_stream)
+            tar_snapshot = _validate_tar_framing(source_stream)
+            if not _same_metadata(os.fstat(source_stream.fileno()), opened_metadata):
+                tar_snapshot.close()
+                raise SdistNormalizationError("sdist changed during normalization")
             try:
-                with tarfile.open(fileobj=source_stream, mode="r:gz") as incoming:
+                with tarfile.open(fileobj=tar_snapshot, mode="r:") as incoming:
                     members = _validated_members(incoming, root)
                     descriptor, temporary_name = tempfile.mkstemp(
                         prefix=f".{source.name}.",
@@ -277,6 +453,8 @@ def normalize_sdist(path: Path, *, epoch: int) -> str:
                         os.fsync(raw_output.fileno())
             except (EOFError, gzip.BadGzipFile, tarfile.TarError, OSError) as exc:
                 raise SdistNormalizationError("sdist archive is malformed") from exc
+            finally:
+                tar_snapshot.close()
             if not _same_metadata(os.fstat(source_stream.fileno()), opened_metadata):
                 raise SdistNormalizationError("sdist changed during normalization")
 
