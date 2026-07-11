@@ -339,6 +339,9 @@ they are not an authorization boundary.
   - The tool shares one auth snapshot and a 90-second total budget across an
     explicit GET-only route table. It never probes Voice/realtime, transcripts,
     conversation bodies, writes, unknown routes, or off-host redirects.
+  - Conversation summaries, memories, and custom instructions stay
+    `unverified` because probing their routes would read private account
+    content. Use their explicit tools only when the caller wants that content.
   - `officially_supported=False` describes this project's private adapter path;
     an underlying ChatGPT product may still be officially documented.
 

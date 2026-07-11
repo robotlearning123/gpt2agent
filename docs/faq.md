@@ -52,7 +52,9 @@ Plugin is a distribution bundle for the MCP server plus Skills.
 `chatgpt://feature-coverage` and `chatgpt://update-evidence` are packaged,
 deterministic JSON snapshots. Reading them never contacts ChatGPT. Use the
 `account_capabilities` tool for live account reachability; its boolean fields
-can be `null` when entitlement or reachability cannot be proven safely.
+can be `null` when entitlement or reachability cannot be proven safely. It does
+not fetch conversation summaries, memories, or custom instructions; use those
+explicit tools only when you intend to read that private content.
 
 ### Where does my token go?
 

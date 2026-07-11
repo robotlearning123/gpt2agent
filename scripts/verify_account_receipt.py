@@ -74,10 +74,7 @@ _RUNTIME_ADAPTER_CATEGORIES = (
     "scheduled_automations",
     "sites_access",
     "site_catalog",
-    "conversations",
     "custom_gpts",
-    "memory",
-    "custom_instructions",
     "codex",
 )
 
@@ -105,7 +102,7 @@ class RuntimeAdapterChecks:
         self._exercised.add(category)
         try:
             normalized = validator(value)
-            if category in {"sites_access", "custom_instructions"}:
+            if category == "sites_access":
                 if not isinstance(normalized, dict):
                     raise TypeError("object adapter returned a non-object")
                 result = _ShapeCheck(
@@ -196,14 +193,7 @@ PROBES = (
     ),
     ProbeSpec("sites_access", "/backend-api/websites/access"),
     ProbeSpec("site_catalog", "/backend-api/websites", (("limit", "1"),)),
-    ProbeSpec(
-        "conversations",
-        "/backend-api/conversations",
-        (("limit", "1"), ("offset", "0"), ("order", "updated")),
-    ),
     ProbeSpec("custom_gpts", "/backend-api/gizmos/snorlax/sidebar"),
-    ProbeSpec("memory", "/backend-api/memories"),
-    ProbeSpec("custom_instructions", "/backend-api/user_system_messages"),
     ProbeSpec("codex", "/backend-api/codex/environments"),
     ProbeSpec("projects_candidate", "/backend-api/projects"),
 )
@@ -430,12 +420,6 @@ def _custom_gpts_shape(data: Any) -> _ShapeCheck:
     return _items_shape(data.get("items"), valid)
 
 
-def _custom_instructions_shape(data: Any) -> _ShapeCheck:
-    if not isinstance(data, dict):
-        raise ReceiptError("account response minimum shape is malformed")
-    return _ShapeCheck("valid_object", None)
-
-
 def _codex_shape(data: Any) -> _ShapeCheck:
     if isinstance(data, list):
         items = data
@@ -456,10 +440,7 @@ _SHAPE_VALIDATORS: dict[str, Callable[[Any], _ShapeCheck]] = {
     "scheduled_automations": _scheduled_shape,
     "sites_access": _sites_access_shape,
     "site_catalog": _site_catalog_shape,
-    "conversations": lambda data: _collection_shape(data, "items", "id"),
     "custom_gpts": _custom_gpts_shape,
-    "memory": lambda data: _collection_shape(data, "memories", "id"),
-    "custom_instructions": _custom_instructions_shape,
     "codex": _codex_shape,
 }
 
@@ -474,13 +455,8 @@ def installed_runtime_adapter_checks() -> RuntimeAdapterChecks:
         from gpt2agent.tools.apps import normalize_apps
         from gpt2agent.tools.automations import normalize_scheduled_page
         from gpt2agent.tools.codex import normalize_codex_environments
-        from gpt2agent.tools.conversations import (
-            normalize_background_tasks,
-            normalize_conversation_summaries,
-        )
+        from gpt2agent.tools.conversations import normalize_background_tasks
         from gpt2agent.tools.gpts import normalize_custom_gpts
-        from gpt2agent.tools.instructions import normalize_custom_instructions
-        from gpt2agent.tools.memory import normalize_memories
         from gpt2agent.tools.plugins import (
             normalize_installed_plugins,
             normalize_plugin_catalog,
@@ -501,9 +477,6 @@ def installed_runtime_adapter_checks() -> RuntimeAdapterChecks:
     def background_jobs(data: Any) -> Any:
         return normalize_background_tasks(data, limit=1)
 
-    def conversations(data: Any) -> Any:
-        return normalize_conversation_summaries(data, limit=1)
-
     def site_catalog(data: Any) -> Any:
         page = normalize_sites_page(data)
         if len(page["items"]) > 1:
@@ -521,10 +494,7 @@ def installed_runtime_adapter_checks() -> RuntimeAdapterChecks:
             "scheduled_automations": normalize_scheduled_page,
             "sites_access": normalize_sites_access,
             "site_catalog": site_catalog,
-            "conversations": conversations,
             "custom_gpts": normalize_custom_gpts,
-            "memory": normalize_memories,
-            "custom_instructions": normalize_custom_instructions,
             "codex": normalize_codex_environments,
         }
     )
@@ -874,7 +844,7 @@ def _validate_shape_results(value: Any) -> list[dict[str, Any]]:
             expected = ("4xx", "not_applicable", None, "unsupported")
         elif category == "site_catalog" and result["status"] == "not_requested":
             expected = ("not_requested", "not_requested", None, "not_requested")
-        elif category in {"sites_access", "custom_instructions"}:
+        elif category == "sites_access":
             allowed_statuses = {"ok"}
             if category == "sites_access":
                 allowed_statuses.add("unavailable")
@@ -944,7 +914,7 @@ def _validate_public_shape_results(value: Any) -> list[dict[str, Any]]:
             expected = ("4xx", "not_applicable", "unsupported")
         elif category == "site_catalog" and result["status"] == "not_requested":
             expected = ("not_requested", "not_requested", "not_requested")
-        elif category in {"sites_access", "custom_instructions"}:
+        elif category == "sites_access":
             allowed_statuses = {"ok"}
             if category == "sites_access":
                 allowed_statuses.add("unavailable")

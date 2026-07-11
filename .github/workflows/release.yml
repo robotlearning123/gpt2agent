@@ -67,9 +67,10 @@ jobs:
             exit 1
           fi
           TAG_MESSAGE="$(git for-each-ref --format="%(contents)" "$VERIFY_REF")"
-          mapfile -t RECEIPT_LINES < <(
-            printf '%s\n' "$TAG_MESSAGE" | grep '^account-receipt-sha256:' || true
-          )
+          RECEIPT_LINES=()
+          while IFS= read -r receipt_line; do
+            RECEIPT_LINES+=("$receipt_line")
+          done < <(printf '%s\n' "$TAG_MESSAGE" | grep '^account-receipt-sha256:' || true)
           if [ "${#RECEIPT_LINES[@]}" -ne 1 ]; then
             echo "::error::Annotated release tag must contain exactly one account receipt SHA-256"
             exit 1

@@ -35,7 +35,14 @@ def test_request_policy_accepts_only_the_normative_get_allowlist() -> None:
         ("GET", "/backend-api/webrtc", {}),
         ("GET", "/backend-api/transcript/abc", {}),
         ("GET", "/backend-api/conversation/secret-id", {}),
+        (
+            "GET",
+            "/backend-api/conversations",
+            {"limit": "1", "offset": "0", "order": "updated"},
+        ),
         ("GET", "/backend-api/conversations/secret-id", {}),
+        ("GET", "/backend-api/memories", {}),
+        ("GET", "/backend-api/user_system_messages", {}),
     )
     for method, path, query in rejected:
         with pytest.raises(ReceiptError, match="not permitted"):
@@ -55,10 +62,7 @@ def test_probe_definitions_are_complete_unique_and_voice_free() -> None:
         "scheduled_automations",
         "sites_access",
         "site_catalog",
-        "conversations",
         "custom_gpts",
-        "memory",
-        "custom_instructions",
         "codex",
         "projects_candidate",
     }
@@ -68,6 +72,18 @@ def test_probe_definitions_are_complete_unique_and_voice_free() -> None:
     serialized = repr(PROBES).lower()
     for denied in ("voice", "realtime", "call", "session", "webrtc", "transcript"):
         assert denied not in serialized
+
+
+def test_live_receipt_does_not_probe_private_content_routes() -> None:
+    from scripts.verify_account_receipt import PROBES
+
+    assert {probe.path for probe in PROBES}.isdisjoint(
+        {
+            "/backend-api/conversations",
+            "/backend-api/memories",
+            "/backend-api/user_system_messages",
+        }
+    )
 
 
 def _response_for(category: str, url: str, secret: str, *, sites_enabled=True):
@@ -90,10 +106,7 @@ def _response_for(category: str, url: str, secret: str, *, sites_enabled=True):
             "workspace_slug": secret,
         },
         "site_catalog": {"items": [{"id": secret, "title": secret}], "cursor": None},
-        "conversations": {"items": [{"id": secret, "title": secret}]},
         "custom_gpts": {"items": [{"gizmo": {"short_url": secret, "name": secret}}]},
-        "memory": {"memories": [{"id": secret, "content": secret}]},
-        "custom_instructions": {"about_user_message": secret, "enabled": True},
         "codex": {"environments": [{"id": secret, "label": secret}]},
     }
     if category == "projects_candidate":
@@ -118,16 +131,16 @@ def test_probe_response_records_only_fixed_shape_and_count(capsys) -> None:
     secret = "SYNTHETIC-ACCOUNT-CONTENT-7f3b"
 
     def requester(**request):
-        return _response_for("conversations", request["url"], secret)
+        return _response_for("apps", request["url"], secret)
 
     outcome = execute_probe(
-        expected_probe("conversations"),
+        expected_probe("apps"),
         requester=requester,
         auth_headers={"Authorization": f"Bearer {secret}"},
     )
 
     assert outcome.receipt_record() == {
-        "route_category": "conversations",
+        "route_category": "apps",
         "status_class": "2xx",
         "shape": "valid_nonempty",
         "item_count": 1,
@@ -343,7 +356,6 @@ def test_runtime_adapter_uses_normalized_app_count() -> None:
 @pytest.mark.parametrize(
     ("category", "payload"),
     (
-        ("custom_instructions", {"enabled": "true"}),
         ("background_jobs", {"tasks": [{"id": "legacy-only-id"}]}),
     ),
 )
@@ -407,9 +419,9 @@ def test_runtime_adapter_evidence_is_fixed_count_only_and_handles_sites_skip() -
     evidence = checks.evidence(records)
 
     assert evidence == {
-        "adapters_declared": 14,
-        "adapters_exercised": 13,
-        "adapters_passed": 13,
+        "adapters_declared": 11,
+        "adapters_exercised": 10,
+        "adapters_passed": 10,
         "adapters_not_requested": 1,
     }
     assert secret not in json.dumps(evidence, sort_keys=True)
@@ -536,9 +548,9 @@ def test_installed_probe_payload_requires_coherent_adapter_evidence() -> None:
         "completed_at": "2026-07-10T13:17:42Z",
         "adapter_status": "passed",
         "adapter_counts": {
-            "adapters_declared": 14,
-            "adapters_exercised": 14,
-            "adapters_passed": 14,
+            "adapters_declared": 11,
+            "adapters_exercised": 11,
+            "adapters_passed": 11,
             "adapters_not_requested": 0,
         },
         "shape_results": _all_valid_records("SYNTHETIC-ACCOUNT-CONTENT"),
@@ -550,9 +562,9 @@ def test_installed_probe_payload_requires_coherent_adapter_evidence() -> None:
         (
             "adapter_counts",
             {
-                "adapters_declared": 14,
-                "adapters_exercised": 13,
-                "adapters_passed": 13,
+                "adapters_declared": 11,
+                "adapters_exercised": 10,
+                "adapters_passed": 10,
                 "adapters_not_requested": 1,
             },
         ),
@@ -620,9 +632,9 @@ def _all_valid_records(secret: str, *, sites_enabled: bool = True) -> list[dict]
 
 def _all_adapter_counts() -> dict[str, int]:
     return {
-        "adapters_declared": 14,
-        "adapters_exercised": 14,
-        "adapters_passed": 14,
+        "adapters_declared": 11,
+        "adapters_exercised": 11,
+        "adapters_passed": 11,
         "adapters_not_requested": 0,
     }
 
@@ -904,7 +916,7 @@ def test_create_gate_builds_and_installs_both_artifacts_before_probe(tmp_path: P
     assert output.read_bytes() == canonical_json(receipt)
     assert len(digest) == 64
     assert validate_receipt(receipt) is None
-    assert receipt["counts"]["adapters_passed"] == 14
+    assert receipt["counts"]["adapters_passed"] == 11
     assert "SYNTHETIC-SECRET-IN-PROBE" not in output.read_text(encoding="utf-8")
 
 

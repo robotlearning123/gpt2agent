@@ -16,15 +16,18 @@ if [ ! -d "$DIST_DIR" ]; then
 fi
 
 DIST_DIR=$(cd "$DIST_DIR" && pwd)
-mapfile -d '' -t DIST_ENTRIES < <(
-  find "$DIST_DIR" -mindepth 1 -maxdepth 1 -print0
-)
-mapfile -d '' -t WHEELS < <(
-  find "$DIST_DIR" -maxdepth 1 -type f -name '*.whl' -print0
-)
-mapfile -d '' -t SDISTS < <(
-  find "$DIST_DIR" -maxdepth 1 -type f -name '*.tar.gz' -print0
-)
+DIST_ENTRIES=()
+while IFS= read -r -d '' entry; do
+  DIST_ENTRIES+=("$entry")
+done < <(find "$DIST_DIR" -mindepth 1 -maxdepth 1 -print0)
+WHEELS=()
+while IFS= read -r -d '' entry; do
+  WHEELS+=("$entry")
+done < <(find "$DIST_DIR" -maxdepth 1 -type f -name '*.whl' -print0)
+SDISTS=()
+while IFS= read -r -d '' entry; do
+  SDISTS+=("$entry")
+done < <(find "$DIST_DIR" -maxdepth 1 -type f -name '*.tar.gz' -print0)
 if [ "${#DIST_ENTRIES[@]}" -ne 2 ] \
   || [ "${#WHEELS[@]}" -ne 1 ] \
   || [ "${#SDISTS[@]}" -ne 1 ]; then
@@ -122,7 +125,10 @@ fi
 
 mkdir -p "$TMP_ROOT/sdist"
 tar -xzf "$SDIST" -C "$TMP_ROOT/sdist"
-mapfile -t SDIST_ROOTS < <(find "$TMP_ROOT/sdist" -mindepth 1 -maxdepth 1 -type d -print)
+SDIST_ROOTS=()
+while IFS= read -r -d '' entry; do
+  SDIST_ROOTS+=("$entry")
+done < <(find "$TMP_ROOT/sdist" -mindepth 1 -maxdepth 1 -type d -print0)
 if [ "${#SDIST_ROOTS[@]}" -ne 1 ]; then
   echo "expected the sdist to contain exactly one top-level directory" >&2
   exit 1

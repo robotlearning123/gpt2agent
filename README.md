@@ -260,9 +260,12 @@ the account or network when read:
 Use `account_capabilities` for current account truth. Its `entitled` and
 `reachable_now` fields are tri-state (`true`, `false`, or unknown), and its
 status distinguishes unavailability, contract drift, temporary failure,
-indeterminate access, and unverified features. Apps/connectors, Plugins, and
-Skills remain separate concepts: tools act, resources provide stable context,
-Skills guide clients, and a Claude Code Plugin bundles distribution.
+indeterminate access, and unverified features. To avoid incidental private-data
+reads, the inventory leaves conversations, memory, and custom instructions
+unverified; call their explicit tools only when that content is wanted.
+Apps/connectors, Plugins, and Skills remain separate concepts: tools act,
+resources provide stable context, Skills guide clients, and a Claude Code
+Plugin bundles distribution.
 
 ---
 

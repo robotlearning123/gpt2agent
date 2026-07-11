@@ -819,6 +819,18 @@ def test_package_smoke_is_reused_in_ci_and_release() -> None:
     assert "TMP_ROOT=$(mktemp -d)" not in release
 
 
+def test_release_shell_paths_support_macos_system_bash() -> None:
+    package_smoke = (PROJECT_ROOT / "scripts" / "package_smoke.sh").read_text(
+        encoding="utf-8"
+    )
+    release = (PROJECT_ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "mapfile" not in package_smoke
+    assert "mapfile" not in release
+
+
 def test_package_smoke_rejects_unexpected_dist_entries_before_install(
     tmp_path: Path,
 ) -> None:

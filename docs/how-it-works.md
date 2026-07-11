@@ -93,7 +93,10 @@ snapshot and a 90-second total budget. It returns shape-only records: entitlemen
 and current reachability are independent tri-state fields, while status and item
 contract state distinguish live proof, public-bundle-only schemas, unverified
 state, and contract drift. Voice/realtime, transcripts, conversation bodies,
-writes, unknown routes, and off-host redirects are not probed.
+writes, unknown routes, and off-host redirects are not probed. Conversation
+summaries, memories, and custom instructions are also omitted from automatic
+capability and release-receipt probes because those responses contain private
+account content; their explicit tools still work when intentionally called.
 
 ## Transports
 

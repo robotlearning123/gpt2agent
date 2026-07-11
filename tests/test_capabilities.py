@@ -91,6 +91,27 @@ def test_capabilities_are_serial_single_snapshot_and_voice_is_never_called() -> 
     )
 
 
+def test_capabilities_do_not_probe_private_content_routes() -> None:
+    client = CapabilityClient(_valid_routes())
+    result = _run(build_account_capabilities(client))
+    paths = {path for path, _, _ in client.calls}
+
+    assert paths.isdisjoint(
+        {
+            "/backend-api/conversations",
+            "/backend-api/memories",
+            "/backend-api/user_system_messages",
+        }
+    )
+    records = {record["id"]: record for record in result["capabilities"]}
+    for capability_id in ("conversations", "memory", "custom_instructions"):
+        assert records[capability_id]["entitled"] is None
+        assert records[capability_id]["reachable_now"] is None
+        assert records[capability_id]["reachability_scope"] == "none"
+        assert records[capability_id]["status"] == "unverified"
+        assert records[capability_id]["evidence_source"] == ["packaged_contract"]
+
+
 def test_model_predicates_are_exact_and_absence_never_means_false() -> None:
     result = _run(build_account_capabilities(CapabilityClient(_valid_routes())))
     records = {record["id"]: record for record in result["capabilities"]}
@@ -287,13 +308,11 @@ def test_capability_cancellation_is_not_converted_to_partial_evidence() -> None:
             {"items": [{"id": None}], "cursor": None},
             "scheduled_automations",
         ),
-        ("/backend-api/conversations", {"items": [None]}, "conversations"),
         (
             "/backend-api/gizmos/snorlax/sidebar",
             {"items": [None]},
             "custom_gpts",
         ),
-        ("/backend-api/memories", {"memories": [None]}, "memory"),
         (
             "/backend-api/codex/environments",
             {"environments": [None]},
@@ -327,34 +346,3 @@ def test_apps_capability_counts_only_entries_accepted_by_list_apps() -> None:
     assert apps_record["reachable_now"] is True
     assert apps_record["entitled"] is None
     assert apps_record["item_contract_status"] == "public_bundle_only"
-
-
-def test_custom_instructions_capability_uses_the_runtime_normalizer() -> None:
-    routes = _valid_routes()
-    routes["/backend-api/user_system_messages"] = {
-        "enabled": "yes",
-        "about_user_message": ["private", "payload"],
-    }
-
-    result = _run(build_account_capabilities(CapabilityClient(routes)))
-    record = next(
-        item for item in result["capabilities"] if item["id"] == "custom_instructions"
-    )
-
-    assert record["status"] == "contract_changed"
-    assert record["reachable_now"] is None
-    assert record["entitled"] is None
-
-
-def test_custom_instructions_capability_matches_blank_2xx_tool_compatibility() -> None:
-    routes = _valid_routes()
-    routes["/backend-api/user_system_messages"] = None
-
-    result = _run(build_account_capabilities(CapabilityClient(routes)))
-    record = next(
-        item for item in result["capabilities"] if item["id"] == "custom_instructions"
-    )
-
-    assert record["status"] == "ok"
-    assert record["reachable_now"] is True
-    assert record["entitled"] is True

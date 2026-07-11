@@ -13,13 +13,8 @@ from gpt2agent.tool_manifest import exposes
 from gpt2agent.tools.apps import normalize_apps
 from gpt2agent.tools.automations import normalize_scheduled_page
 from gpt2agent.tools.codex import normalize_codex_environments
-from gpt2agent.tools.conversations import (
-    normalize_background_tasks,
-    normalize_conversation_summaries,
-)
+from gpt2agent.tools.conversations import normalize_background_tasks
 from gpt2agent.tools.gpts import normalize_custom_gpts
-from gpt2agent.tools.instructions import normalize_custom_instructions
-from gpt2agent.tools.memory import normalize_memories
 from gpt2agent.tools.plugins import normalize_installed_plugins, normalize_plugin_catalog
 from gpt2agent.tools.sites import normalize_sites_access, normalize_sites_page
 
@@ -66,10 +61,10 @@ _META = {
     "voice_catalog": ("voice", "none", None, False),
     "voice_transcript": ("voice", "none", None, False),
     "gpt_live": ("voice", "none", None, False),
-    "conversations": ("account", "route", "list_conversations", True),
+    "conversations": ("account", "none", "list_conversations", True),
     "custom_gpts": ("account", "route", "list_custom_gpts", True),
-    "memory": ("account", "route", "memory_list", True),
-    "custom_instructions": ("account", "route", "custom_instructions_get", False),
+    "memory": ("account", "none", "memory_list", True),
+    "custom_instructions": ("account", "none", "custom_instructions_get", False),
     "codex": ("codex", "route", "list_codex_envs", True),
     "projects": ("account", "route", None, False),
 }
@@ -417,45 +412,22 @@ async def build_account_capabilities(
             reason="no permitted Voice probe in 0.0.12",
         )
 
-    await simple_collection(
-        "conversations",
-        "/backend-api/conversations",
-        params={"offset": 0, "limit": 1, "order": "updated"},
-        extract=lambda data: normalize_conversation_summaries(data, limit=1),
-        entitlement="always",
-    )
+    for capability_id in ("conversations", "memory", "custom_instructions"):
+        records[capability_id] = _record(
+            capability_id,
+            observed_at,
+            entitled=None,
+            reachable_now=None,
+            status="unverified",
+            reason="automatic probe omitted to avoid reading private account content",
+        )
+
     await simple_collection(
         "custom_gpts",
         "/backend-api/gizmos/snorlax/sidebar",
         params=None,
         extract=normalize_custom_gpts,
     )
-
-    memory_items = await simple_collection(
-        "memory",
-        "/backend-api/memories",
-        params=None,
-        extract=normalize_memories,
-    )
-    if memory_items is not None and not memory_items:
-        records["memory"]["entitled"] = None
-
-    if not within_budget():
-        records["custom_instructions"] = _budget_record("custom_instructions", observed_at)
-    else:
-        try:
-            data = await get("/backend-api/user_system_messages")
-            normalize_custom_instructions({} if data is None else data)
-            records["custom_instructions"] = _record(
-                "custom_instructions",
-                observed_at,
-                entitled=True,
-                reachable_now=True,
-                status="ok",
-                reason="custom instructions contract response is valid",
-            )
-        except Exception as exc:
-            records["custom_instructions"] = probe_failure("custom_instructions", exc)
 
     await simple_collection(
         "codex",

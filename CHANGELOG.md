@@ -78,8 +78,11 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
   fails before account access and writes no file.
 - Capability probes share one auth snapshot, a 90-second budget enforced by
   each request's remaining timeout, strict known GET routes, and shape-only
-  results. Voice, realtime, transcript, conversation body, write, unknown, and
-  off-host routes are outside the probe contract.
+  results. Automatic capability and release-receipt probes do not request
+  conversation summaries, memories, or custom instructions; those private
+  surfaces remain available only through their explicitly invoked MCP tools.
+  Voice, realtime, transcript, conversation body, write, unknown, and off-host
+  routes are outside the probe contract.
 - Visually hidden ChatGPT messages are excluded from streaming, async polling,
   conversation detail, tool-call, and Deep Research transcript output. Chat,
   Agent, and Custom GPT replies always end with one authoritative server receipt,
