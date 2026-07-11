@@ -55,23 +55,30 @@ function startAudio(OPUS_PT) {
 }
 
 const dc = pc.createDataChannel("", { negotiated: true, id: 0 });
-// The inbound events use a {type:"data_message", data:"<inner json>"} envelope,
-// so mirror it on the way out. NEGATIVE RESULT (2026-07-11): sending a wrapped
-// session.update on open did NOT hold the session — it still closes ~1s after
-// "listening", identically to no-audio and unwrapped runs. So the ~1s close is
-// not determinable by guessing from the Node side; the real client's outbound
-// datachannel traffic must be observed (CDP on an authenticated session).
+// Outbound protocol captured from the real authenticated web client (2026-07-11,
+// CDP observation): messages are wrapped as {type:"data_message", data:"<inner>"},
+// and to HOLD the session the client sends a `track_state` (microphone live) on
+// open, then periodic `client_metrics` keepalives. My Node client sent neither,
+// which is why the server closed it ~1s after "listening".
 function sendWrapped(inner) {
   try { dc.send(JSON.stringify({ type: "data_message", data: JSON.stringify(inner) })); }
   catch (e) { console.log("[send-err]", e.message); }
 }
+let keepalive = null;
 dc.stateChanged.subscribe((s) => {
   console.log("[dc]", s);
   if (s === "open") {
-    sendWrapped({ type: "session.update", session: { modalities: ["audio", "text"], turn_detection: { type: "server_vad" } } });
-    console.log("[sent] wrapped session.update");
+    // 1) declare the mic track live (the init that holds the session)
+    sendWrapped({ type: "track_state", payload: { type: "track_state", track_id: "microphone", media_type: "audio", media_source: "microphone", state: "live" } });
+    console.log("[sent] track_state microphone=live");
+    // 2) client_metrics: the real client sends these frequently (~5-7/sec) and
+    //    the session dropped before our old 1s interval even fired. Fire now + fast.
+    const metric = () => sendWrapped({ type: "client_metrics", payload: { type: "client_metrics", service_rtt_ms: 20, output_audio_first_chunk_received_ts: null, output_audio_playout_start_ts: null, output_audio_buffer_depth_ms: null, output_audio_bytes_received: 0, output_audio_packets_received: 0, output_audio_packets_lost: 0, output_audio_silent_gap_ms: null } });
+    metric();
+    keepalive = setInterval(metric, 250);
     startAudio(globalThis.__OPUS_PT || "111");
   }
+  if (s === "closed" && keepalive) { clearInterval(keepalive); keepalive = null; }
 });
 dc.onMessage.subscribe((msg) => {
   const raw = msg && msg.toString ? msg.toString() : String(msg);
