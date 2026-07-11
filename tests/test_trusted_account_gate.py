@@ -621,6 +621,8 @@ def test_trusted_runtime_rejects_writable_ancestor_above_private_base() -> None:
 
         unsafe = root / "unsafe"
         unsafe.mkdir(mode=0o770)
+        unsafe.chmod(0o770)
+        assert unsafe.stat().st_mode & 0o777 == 0o770
         private_child = unsafe / "private-child"
         private_child.mkdir(mode=0o700)
         assert _path_has_secure_ancestors(private_child, current_uid=os.getuid()) is False

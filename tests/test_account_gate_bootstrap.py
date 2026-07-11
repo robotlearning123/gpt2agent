@@ -479,6 +479,8 @@ def test_bootstrap_rejects_group_writable_user_installation(
 def test_bootstrap_rejects_python_below_writable_ancestor(tmp_path: Path) -> None:
     unsafe_ancestor = tmp_path / "unsafe-ancestor"
     unsafe_ancestor.mkdir(mode=0o770)
+    unsafe_ancestor.chmod(0o770)
+    assert unsafe_ancestor.stat().st_mode & 0o777 == 0o770
     private_child = unsafe_ancestor / "private-child"
     private_child.mkdir(mode=0o700)
     python, _log = _pretrusted_interpreter_double(private_child)
@@ -496,6 +498,8 @@ def test_bootstrap_rejects_venv_below_writable_ancestor(tmp_path: Path) -> None:
     python, _log = _pretrusted_interpreter_double(tmp_path)
     unsafe_ancestor = tmp_path / "unsafe-venv-ancestor"
     unsafe_ancestor.mkdir(mode=0o770)
+    unsafe_ancestor.chmod(0o770)
+    assert unsafe_ancestor.stat().st_mode & 0o777 == 0o770
     parent = _private_parent(unsafe_ancestor)
     venv = parent / "venv"
 
