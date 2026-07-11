@@ -24,7 +24,6 @@ h1()   { printf "\n${BOLD}%s${RESET}\n" "$*"; }
 
 CLIENT="all"
 TRANSPORT="stdio"
-PORT="9000"
 SKILL_FLAG=""
 REGISTER=1
 SOURCE="gpt2agent"  # default: PyPI
@@ -34,7 +33,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --client)       CLIENT="$2"; shift 2 ;;
     --transport)    TRANSPORT="$2"; shift 2 ;;
-    --port)         PORT="$2"; shift 2 ;;
     --no-skill)     SKILL_FLAG="--no-skill"; shift ;;
     --no-register)  REGISTER=0; shift ;;
     --source)       SOURCE="$2"; SOURCE_EXPLICIT=1; shift 2 ;;

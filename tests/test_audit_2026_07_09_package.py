@@ -153,6 +153,23 @@ def test_checkout_installer_defaults_to_named_pypi_package(tmp_path: Path) -> No
     ]
 
 
+def test_installer_rejects_removed_port_option_before_install(tmp_path: Path) -> None:
+    env, log = _recording_installer_env(tmp_path)
+
+    result = subprocess.run(
+        [str(INSTALLER), "--port", "9001"],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "Unknown option: --port" in result.stderr
+    assert not log.exists()
+
+
 def test_installer_replaces_existing_pipx_environment_before_install(
     tmp_path: Path,
 ) -> None:
