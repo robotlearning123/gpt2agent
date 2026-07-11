@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
-"""Full authenticated GPT-Live SDP exchange (handshake completion experiment).
+"""Full authenticated GPT-Live SDP exchange — the real handshake experiment.
 
-The bare `application/sdp` + Bearer POST returns a lenient 201 but an ephemeral
-session the server drops ~1s after `listening`. The real web client posts
-FormData(sdp + session JSON) with the account's oai-* headers AND the Sentinel
-proof tokens. This helper reconstructs that using gpt2agent's own machinery:
+Reconstructs `ML.startTransceiverSession` from the web bundle: POST
+FormData(sdp + session JSON) to /realtime/{mode} with the account bearer AND the
+Sentinel headers (Chat-Requirements / Proof / Turnstile), matching UA + device
+id. Reuses gpt2agent's BackendClient + SentinelGate so the Sentinel proof-of-work
+is solved the same way the chat endpoint does it.
 
-  - `BackendClient._session` supplies the authenticated curl_cffi session with
-    the full oai-device-id / oai-session-id / oai-client-version header set.
-  - `SentinelGate.get_tokens()` solves the POW (+ turnstile) and yields the
-    chat-requirements + proof tokens the client sends as `Openai-Sentinel-*`.
+Reads the SDP offer on stdin, writes the SDP answer to stdout. Tokens are never
+printed.
 
-Reads offer on stdin, writes answer SDP on stdout. Tokens are never printed.
+  SDP_PY=<venv-python> node ... (spawns) python sdp_exchange_full.py [vp|vps|wm]
 
-  SDP_PY=<venv> node ... (spawns) python sdp_exchange_full.py [vp|vps|wm]
+Findings (2026-07-11): the POW proof solves, but the Cloudflare Turnstile
+challenge does NOT solve headlessly (gpt2agent's own solver fails here). With
+proof-only the POST returns HTTP 201 but the browser peer goes connecting->failed
+(the un-Turnstiled session is torn down at ICE). The autonomous no-login path is
+blocked by Turnstile by design; a logged-in real browser (browser/sidecar.mjs)
+solves it natively. Env knobs below are for continued disambiguation.
 
-Env knobs for iterating on the still-uncertain `session` object:
-  SESSION_JSON='{"...":...}'   # override the whole session object
+Env knobs:
+  SESSION_JSON='{"...":...}'   # override the whole session object to iterate
   NO_SENTINEL=1                # omit sentinel headers (A/B the proof's effect)
 """
 
@@ -27,82 +31,101 @@ import sys
 import uuid
 
 from curl_cffi import CurlMime
+from curl_cffi import requests as _rq
 
 from gpt2agent.backend import BackendClient
 from gpt2agent.sentinel import SentinelGate
 
-mode = sys.argv[1] if len(sys.argv) > 1 else "vp"
+MODE = sys.argv[1] if len(sys.argv) > 1 else "vp"
+VOICE_MODE = {"vp": "advanced", "vps": "standard", "wm": "wingman"}.get(MODE, "advanced")
 offer = sys.stdin.read()
-url = f"https://chatgpt.com/realtime/{mode}?dcid=0"
+url = f"https://chatgpt.com/realtime/{MODE}?dcid=0"
 
 backend = BackendClient()
-sess = backend._session  # authenticated curl_cffi session (oai-* + Authorization)
+sess_headers = dict(backend._session.headers)
+access = json.load(open(os.path.expanduser("~/.codex/auth.json")))["tokens"]["access_token"]
+ua = sess_headers.get("User-Agent") or sess_headers.get("user-agent") or ""
+device = sess_headers.get("OAI-Device-Id") or sess_headers.get("oai-device-id") or str(uuid.uuid4())
 
-# The session object the voice client posts alongside the SDP. Fields are the
-# best reconstruction from the web bundle; override via SESSION_JSON to iterate.
+
+async def get_tokens_best_effort() -> dict:
+    """SentinelGate.get_tokens with turnstile tolerated (it is probabilistic and
+    the vendored solver fails headlessly). Falls back to chat-requirements+proof."""
+    last = None
+    for _ in range(4):
+        try:
+            return await SentinelGate(backend).get_tokens()
+        except RuntimeError as e:
+            last = e
+            if "Turnstile" not in str(e):
+                raise
+    sys.stderr.write(f"[full] turnstile unsolved after retries ({last}); proof-only\n")
+    from curl_cffi.requests import AsyncSession
+
+    from gpt2agent._vendored import pow as _pow
+
+    hdrs = dict(backend._session.headers)
+    hdrs["Content-Type"] = "application/json"
+    hdrs["Accept"] = "*/*"
+    p = _pow.get_requirements_token(ua)
+    async with AsyncSession(impersonate="chrome131", verify=True) as s:
+        r = await s.post(
+            "https://chatgpt.com/backend-api/sentinel/chat-requirements",
+            headers=hdrs,
+            json={"p": p},
+            timeout=20,
+        )
+    resp = r.json()
+    out = {"chat-requirements": resp.get("token", ""), "proof": ""}
+    powb = resp.get("proofofwork") or {}
+    if powb.get("required"):
+        out["proof"] = (
+            await asyncio.to_thread(_pow.solve_pow, powb["seed"], powb["difficulty"], ua) or ""
+        )
+    return out
+
+
+headers = {
+    "Authorization": f"Bearer {access}",
+    "User-Agent": ua,
+    "OAI-Device-Id": device,
+    "Origin": "https://chatgpt.com",
+    "Referer": "https://chatgpt.com/",
+    "Accept": "*/*",
+}
+
+if os.environ.get("NO_SENTINEL") != "1":
+    toks = asyncio.run(get_tokens_best_effort())
+    sys.stderr.write(
+        f"[full] sentinel: chat-req={bool(toks.get('chat-requirements'))} "
+        f"proof={bool(toks.get('proof'))} turnstile={bool(toks.get('turnstile'))}\n"
+    )
+    headers["Openai-Sentinel-Chat-Requirements-Token"] = toks.get("chat-requirements", "")
+    if toks.get("proof"):
+        headers["Openai-Sentinel-Proof-Token"] = toks["proof"]
+    if toks.get("turnstile"):
+        headers["Openai-Sentinel-Turnstile-Token"] = toks["turnstile"]
+
 if os.environ.get("SESSION_JSON"):
     session_obj = json.loads(os.environ["SESSION_JSON"])
 else:
     session_obj = {
         "voice_session_id": str(uuid.uuid4()),
+        "voice_mode": VOICE_MODE,
         "protocol": "transceiver",
-        "integrated_mode": False,
     }
-
-headers = dict(sess.headers)
-headers.pop("Content-Type", None)
-headers.pop("content-type", None)  # let CurlMime set the multipart boundary
-headers["Accept"] = "*/*"
-
-if os.environ.get("NO_SENTINEL") != "1":
-    # get_tokens() hard-fails if a Turnstile challenge is required but the
-    # vendored solver can't produce it. The realtime handshake may only need
-    # chat-requirements + POW proof, so tolerate turnstile failure (BEST_EFFORT)
-    # and send whatever we could solve.
-    try:
-        tokens = asyncio.run(SentinelGate(backend).get_tokens())
-    except RuntimeError as exc:
-        if "Turnstile" not in str(exc) or os.environ.get("BEST_EFFORT") != "1":
-            raise
-        # Re-run the requirements call directly, keeping chat-requirements + proof.
-        import gpt2agent._vendored.pow as _pow
-        from curl_cffi.requests import Session as _S
-
-        h = dict(sess.headers)
-        h["Content-Type"] = "application/json"
-        h["Accept"] = "*/*"
-        ua = h.get("user-agent") or h.get("User-Agent") or ""
-        p = _pow.get_requirements_token(ua)
-        with _S(impersonate="chrome131") as s2:
-            rr = s2.post(
-                "https://chatgpt.com/backend-api/sentinel/chat-requirements",
-                headers=h,
-                json={"p": p},
-                timeout=20,
-            )
-        rj = rr.json()
-        tokens = {"chat-requirements": rj.get("token", ""), "proof": ""}
-        pw = rj.get("proofofwork") or {}
-        if pw.get("required"):
-            tokens["proof"] = _pow.solve_pow(pw.get("seed"), pw.get("difficulty"), ua) or ""
-        sys.stderr.write("[sdp_full] turnstile unsolved; proceeding with chat-requirements+proof\n")
-    headers["Openai-Sentinel-Chat-Requirements-Token"] = tokens["chat-requirements"]
-    if tokens.get("proof"):
-        headers["Openai-Sentinel-Proof-Token"] = tokens["proof"]
-    if tokens.get("turnstile"):
-        headers["Openai-Sentinel-Turnstile-Token"] = tokens["turnstile"]
 
 mp = CurlMime()
 mp.addpart(name="sdp", data=offer.encode())
 mp.addpart(name="session", data=json.dumps(session_obj).encode())
 
-r = sess.post(url, multipart=mp, headers=headers, timeout=30)
+r = _rq.post(url, multipart=mp, headers=headers, impersonate="chrome131", timeout=30)
 sys.stderr.write(
-    f"[sdp_full] HTTP {r.status_code} len={len(r.text)} "
-    f"ct={r.headers.get('content-type', '')} sentinel={'off' if os.environ.get('NO_SENTINEL') == '1' else 'on'}\n"
+    f"[full] HTTP {r.status_code} len={len(r.text)} ct={r.headers.get('content-type', '')} "
+    f"sentinel={'off' if os.environ.get('NO_SENTINEL') == '1' else 'on'}\n"
 )
 if r.status_code not in (200, 201):
-    sys.stderr.write(r.text[:400] + "\n")
+    sys.stderr.write(r.text[:500] + "\n")
     sys.exit(2)
 
 body = r.text

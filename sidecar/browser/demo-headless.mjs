@@ -19,7 +19,9 @@ const CHROME = process.env.CHROME_BIN || (process.platform === "darwin"
   ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
   : "/usr/bin/google-chrome");
 const PY = process.env.SDP_PY || "/home/robot/workspace/47-chatgpt2agent/gpt2agent/.venv/bin/python";
-const HELPER = fileURLToPath(new URL(`../experiments/${process.env.SDP_HELPER || "sdp_exchange.py"}`, import.meta.url));
+// Helper selection: SDP_HELPER=<file> wins; else FULL=1 picks the full handshake.
+const HELPER_FILE = process.env.SDP_HELPER || (process.env.FULL === "1" ? "sdp_exchange_full.py" : "sdp_exchange.py");
+const HELPER = fileURLToPath(new URL(`../experiments/${HELPER_FILE}`, import.meta.url));
 
 function exchange(offerSdp) {
   return new Promise((resolve, reject) => {
