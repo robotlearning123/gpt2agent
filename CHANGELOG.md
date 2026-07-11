@@ -117,8 +117,11 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
 - The stable `Required checks` gate now includes the full OS/Python suite,
   Ruff, ShellCheck, both MCP v1 compatibility lanes, and a wheel/sdist dry-run
   installed into clean environments.
-- CI audits both resolved dependencies and the minimum supported `curl_cffi`
-  release for known vulnerabilities.
+- CI audits resolved application dependencies, the minimum supported
+  `curl_cffi` release, and the hash-locked account-gate runtime for known
+  vulnerabilities. A credential-free CI lane also bootstraps that runtime from
+  scratch and verifies its exact distribution, file, ownership, mode, import,
+  and isolated-CPython closure.
 - A separate daily no-secret public-surface radar checks bounded official/public
   sources, emits only redacted summaries, retains evidence for 30 days, and does
   not pretend to verify a private account adapter.
@@ -129,20 +132,28 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
   on that credential host. Main CI runs one closed synthetic adapter corpus
   against both package formats and requires identical output. The sanitized
   receipt keeps live shape classes separate from fixed offline adapter counts,
-  is freshness-bounded before tagging, and remains local.
+  is freshness-bounded before tagging, and remains local. The live transport is
+  loaded only from a new owner-private, hash-locked CPython 3.12 environment
+  under `-I -S -B`; the short-lived release App token never reaches Python or a
+  process argument.
 - The read-only governance audit binds the release-tag App, Required-checks App,
   and independent PyPI gate to an explicit reviewed policy. Tag creation and
   no-bypass tag immutability are audited as separate rules, and main-branch
   bypasses, stale approvals, unresolved threads, or non-strict checks fail the
   release gate.
-- An annotated release tag must contain exactly one
-  `account-receipt-sha256: <64 lowercase hex>` line. Release evidence binds that
-  digest to the tag object, source commit/tree, workflow identity, and exact
-  wheel/sdist hashes. The release workflow publishes the main-CI-tested bytes
-  without importing, installing, or rerunning package smoke, then verifies the
-  public filenames and hashes. The receipt is never attached; its digest is the
-  public commitment. Independent restricted tag creation and
-  protected-environment approval remain required release controls.
+- The release coordinator independently revalidates the pinned candidate and
+  receipt before creating a new annotated tag through the policy-bound App. Its
+  tag message is one exact canonical, duplicate-key-free, closed-schema JSON
+  envelope binding repository, tag, version, source commit/tree, receipt and
+  artifact-set digests, and complete candidate identity. Release evidence binds
+  that metadata to the tag object, workflow identity, and exact wheel/sdist
+  hashes. The receipt is never attached; its digest is the public commitment.
+- GitHub publication uses the exact numeric draft-release ID for every asset and
+  metadata operation, validates the complete release before and after making it
+  public, requires the immutable public readback, and permits an already-public
+  rerun only for an exact match. The publication action is pinned by its full
+  commit SHA. Independent restricted tag creation and protected-environment
+  approval remain required release controls.
 - GitHub Release notes are extracted by the same exact-version CHANGELOG parser
   used by release metadata verification, so regex-like version near-matches
   cannot select another section.

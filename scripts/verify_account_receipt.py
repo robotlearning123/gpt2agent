@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
+import importlib.metadata
 import importlib.util
 import json
 import os
@@ -13,7 +15,7 @@ import stat
 import subprocess
 import sys
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,7 +39,7 @@ _MAX_FUTURE_CLOCK_SKEW = timedelta(minutes=1)
 _PACKAGE_VERSION = "0.0.12"
 _SCHEMA_VERSION = "4"
 _VERIFIER_NAME = "gpt2agent-account-receipt"
-_VERIFIER_VERSION = "5"
+_VERIFIER_VERSION = "6"
 _MAX_TOKEN_BYTES = 16 * 1024
 _HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
@@ -54,6 +56,18 @@ _CHROME_131_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/131.0.0.0 Safari/537.36"
 )
+_TRUSTED_PYTHON_VERSION = (3, 12)
+_TRUSTED_DISTRIBUTIONS = {
+    "certifi": "2026.6.17",
+    "cffi": "2.1.0",
+    "curl-cffi": "0.15.0",
+    "markdown-it-py": "4.2.0",
+    "mdurl": "0.1.2",
+    "pip": "26.1.2",
+    "pycparser": "3.0",
+    "pygments": "2.20.0",
+    "rich": "15.0.0",
+}
 
 
 class ReceiptError(ValueError):
@@ -77,6 +91,16 @@ class RawResponse:
     headers: Mapping[str, str]
     body: bytes
     url: str
+
+
+@dataclass(frozen=True)
+class _TrustedTransportRuntime:
+    """Validated third-party runtime inserted into one isolated process."""
+
+    curl_opt: Any
+    requests: Any
+    original_sys_path: tuple[str, ...]
+    inserted_site: str | None
 
 
 @dataclass(frozen=True)
@@ -1329,6 +1353,138 @@ def verify_receipt_file(
     return digest
 
 
+def _release_tag_metadata_module() -> Any:
+    module_path = Path(__file__).resolve(strict=True).with_name("release_tag_metadata.py")
+    if module_path.is_symlink() or not module_path.is_file():
+        raise ReceiptError("release tag metadata verifier is unavailable")
+    try:
+        specification = importlib.util.spec_from_file_location(
+            "_gpt2agent_release_tag_metadata",
+            module_path,
+        )
+        if specification is None or specification.loader is None:
+            raise ReceiptError("release tag metadata verifier is unavailable")
+        module = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(module)
+    except ReceiptError:
+        raise
+    except Exception:
+        raise ReceiptError("release tag metadata verifier is unavailable") from None
+    return module
+
+
+def prepare_tag_request(
+    receipt_path: Path,
+    *,
+    checkout: Path,
+    dist: Path,
+    output: Path,
+    tag: str,
+    declared_commit: str,
+    declared_tree: str,
+    expected_sha256: str,
+    ci_repository: str,
+    ci_run_id: str,
+    ci_run_attempt: str,
+    ci_artifact_id: str,
+    ci_artifact_digest: str,
+    ci_artifact_size: str,
+    ci_artifact_expires_at: str,
+) -> None:
+    """Revalidate the closed receipt and atomically prepare one tag API request."""
+    checkout = Path(checkout)
+    dist = Path(dist)
+    output = Path(output)
+    if tag != f"v{_PACKAGE_VERSION}":
+        raise ReceiptError("release tag does not match the receipt version")
+    if (
+        not _outside_checkout(output, checkout)
+        or _inside_candidate_dist(output, dist)
+        or output.exists()
+        or output.is_symlink()
+    ):
+        raise ReceiptError("release tag request must be a new regular file")
+    parent = output.parent
+    try:
+        parent_metadata = parent.lstat()
+    except OSError:
+        raise ReceiptError("release tag request directory is invalid") from None
+    if (
+        not output.is_absolute()
+        or stat.S_ISLNK(parent_metadata.st_mode)
+        or not stat.S_ISDIR(parent_metadata.st_mode)
+        or parent_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(parent_metadata.st_mode) & 0o077
+    ):
+        raise ReceiptError("release tag request directory is invalid")
+
+    digest = verify_receipt_file(
+        receipt_path,
+        checkout=checkout,
+        dist=dist,
+        declared_commit=declared_commit,
+        declared_tree=declared_tree,
+        expected_sha256=expected_sha256,
+        ci_repository=ci_repository,
+        ci_run_id=ci_run_id,
+        ci_run_attempt=ci_run_attempt,
+        ci_artifact_id=ci_artifact_id,
+        ci_artifact_digest=ci_artifact_digest,
+        ci_artifact_size=ci_artifact_size,
+        ci_artifact_expires_at=ci_artifact_expires_at,
+    )
+    receipt, receipt_payload = _read_receipt(receipt_path)
+    if hashlib.sha256(receipt_payload).hexdigest() != digest:
+        raise ReceiptError("account receipt changed during tag preparation")
+    _validate_pretag_freshness(receipt)
+    artifacts = receipt["local_candidate_artifacts"]
+    workflow = artifacts["workflow"]
+    tag_metadata = _release_tag_metadata_module()
+    try:
+        metadata = tag_metadata.build_metadata(
+            repository=workflow["repository"],
+            tag=tag,
+            version=receipt["package_version"],
+            commit=receipt["source"]["commit"],
+            tree=receipt["source"]["tree"],
+            receipt_sha256=digest,
+            artifact_set_sha256=artifact_set_sha256(artifacts),
+            candidate_run_id=workflow["run_id"],
+            candidate_run_attempt=workflow["run_attempt"],
+            candidate_artifact_id=workflow["artifact_id"],
+            candidate_artifact_digest=workflow["artifact_digest"],
+            candidate_artifact_size=workflow["artifact_size"],
+            candidate_artifact_expires_at=workflow["artifact_expires_at"],
+        )
+        payload = tag_metadata.render_github_tag_request(metadata)
+    except Exception:
+        raise ReceiptError("release tag request metadata is invalid") from None
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = -1
+    created = False
+    try:
+        descriptor = os.open(output, flags, 0o600)
+        created = True
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except OSError:
+        if created:
+            try:
+                output.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise ReceiptError("release tag request could not be written") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def _account_token_from_file(path: Path, *, codex: bool) -> str | None:
     path = Path(path)
     descriptor = -1
@@ -1519,15 +1675,73 @@ class CurlCffiRequester:
                 pass
 
 
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _safe_lstat(path: Path, *, owner: int, directory: bool | None = None) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    if stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != owner:
+        return False
+    if metadata.st_mode & 0o022:
+        return False
+    if directory is True and not stat.S_ISDIR(metadata.st_mode):
+        return False
+    if directory is False and not stat.S_ISREG(metadata.st_mode):
+        return False
+    return True
+
+
+def _secure_path_chain(path: Path, root: Path, *, owner: int) -> bool:
+    if not path.is_absolute() or not root.is_absolute():
+        return False
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return False
+    current = root
+    if not _safe_lstat(current, owner=owner, directory=True):
+        return False
+    parts = relative.parts
+    for index, part in enumerate(parts):
+        current = current / part
+        is_last = index == len(parts) - 1
+        if not _safe_lstat(current, owner=owner, directory=None if is_last else True):
+            return False
+    return True
+
+
 def _dependency_origin_is_trusted(origin: Path, forbidden_roots: tuple[Path, ...]) -> bool:
     if not origin.is_absolute() or origin.is_symlink():
         return False
     try:
         resolved = origin.resolve(strict=True)
+        metadata = origin.lstat()
     except OSError:
         return False
-    if not resolved.is_file():
+    if (
+        resolved != origin
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or metadata.st_mode & 0o022
+    ):
         return False
+    current = origin.parent
+    while current != current.parent:
+        try:
+            parent_metadata = current.lstat()
+        except OSError:
+            return False
+        if stat.S_ISLNK(parent_metadata.st_mode) or parent_metadata.st_mode & 0o022:
+            return False
+        current = current.parent
     for root in forbidden_roots:
         try:
             resolved.relative_to(Path(root).resolve(strict=True))
@@ -1537,50 +1751,252 @@ def _dependency_origin_is_trusted(origin: Path, forbidden_roots: tuple[Path, ...
     return True
 
 
+def _normalized_distribution_name(value: str) -> str:
+    return re.sub(r"[-_.]+", "-", value).lower()
+
+
+def _require_isolated_runtime_site(
+    trusted_site_packages: Path,
+    forbidden_roots: tuple[Path, ...],
+) -> tuple[Path, Path]:
+    flags = sys.flags
+    if (
+        sys.implementation.name != "cpython"
+        or sys.version_info[:2] != _TRUSTED_PYTHON_VERSION
+        or flags.isolated != 1
+        or flags.no_site != 1
+        or flags.no_user_site != 1
+        or not flags.safe_path
+    ):
+        raise ReceiptError("trusted account runtime is not isolated")
+
+    executable = Path(sys.executable)
+    if not executable.is_absolute():
+        raise ReceiptError("trusted account runtime is invalid")
+    venv = executable.parent.parent
+    owner = os.getuid()
+    if not _safe_lstat(venv, owner=owner, directory=True):
+        raise ReceiptError("trusted account runtime is invalid")
+    try:
+        venv_mode = stat.S_IMODE(venv.lstat().st_mode)
+    except OSError:
+        raise ReceiptError("trusted account runtime is invalid") from None
+    if (
+        venv_mode & 0o077
+        or not _secure_path_chain(executable, venv, owner=owner)
+        or not _safe_lstat(executable, owner=owner, directory=False)
+    ):
+        raise ReceiptError("trusted account runtime is invalid")
+
+    configuration = venv / "pyvenv.cfg"
+    if not _secure_path_chain(configuration, venv, owner=owner) or not _safe_lstat(
+        configuration, owner=owner, directory=False
+    ):
+        raise ReceiptError("trusted account runtime is invalid")
+    try:
+        configuration_bytes = configuration.read_bytes()
+    except OSError:
+        raise ReceiptError("trusted account runtime is invalid") from None
+    if (
+        len(configuration_bytes) > 4096
+        or b"include-system-site-packages = false" not in configuration_bytes.lower()
+    ):
+        raise ReceiptError("trusted account runtime is invalid")
+
+    expected_site = venv / "lib" / "python3.12" / "site-packages"
+    supplied_site = Path(trusted_site_packages)
+    if not supplied_site.is_absolute() or supplied_site != expected_site:
+        raise ReceiptError("trusted account runtime site-packages is invalid")
+    if not _secure_path_chain(expected_site, venv, owner=owner) or not _safe_lstat(
+        expected_site, owner=owner, directory=True
+    ):
+        raise ReceiptError("trusted account runtime site-packages is invalid")
+
+    resolved_venv = venv.resolve(strict=True)
+    resolved_site = expected_site.resolve(strict=True)
+    for root in forbidden_roots:
+        try:
+            resolved_root = Path(root).resolve(strict=True)
+        except OSError:
+            raise ReceiptError("trusted account runtime boundary is invalid") from None
+        if _path_is_within(resolved_venv, resolved_root) or _path_is_within(
+            resolved_root, resolved_venv
+        ):
+            raise ReceiptError("trusted account runtime overlaps candidate data")
+
+    base = Path(sys.base_prefix)
+    if not base.is_absolute() or sys.prefix != sys.base_prefix:
+        raise ReceiptError("trusted account runtime base is invalid")
+    try:
+        base_metadata = base.lstat()
+    except OSError:
+        raise ReceiptError("trusted account runtime base is invalid") from None
+    if (
+        not stat.S_ISDIR(base_metadata.st_mode)
+        or stat.S_ISLNK(base_metadata.st_mode)
+        or base_metadata.st_uid != 0
+        or base_metadata.st_mode & 0o022
+    ):
+        raise ReceiptError("trusted account runtime base is invalid")
+    base_library = base / "lib" / "python3.12"
+    base_zip = base / "lib" / "python312.zip"
+    for entry in sys.path:
+        candidate = Path(entry)
+        if not candidate.is_absolute():
+            raise ReceiptError("trusted account runtime path is invalid")
+        if candidate == base_zip:
+            continue
+        try:
+            resolved_entry = candidate.resolve(strict=True)
+            resolved_library = base_library.resolve(strict=True)
+        except OSError:
+            raise ReceiptError("trusted account runtime path is invalid") from None
+        if not _path_is_within(resolved_entry, resolved_library):
+            raise ReceiptError("trusted account runtime path is invalid")
+        current = resolved_entry
+        while current != base:
+            try:
+                metadata = current.lstat()
+            except OSError:
+                raise ReceiptError("trusted account runtime path is invalid") from None
+            if stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_mode & 0o022:
+                raise ReceiptError("trusted account runtime path is invalid")
+            current = current.parent
+
+    return resolved_venv, resolved_site
+
+
+def _require_exact_distribution_closure(site: Path, venv: Path) -> None:
+    observed: dict[str, str] = {}
+    distributions: dict[str, importlib.metadata.Distribution] = {}
+    try:
+        candidates = list(importlib.metadata.distributions(path=[str(site)]))
+    except Exception:
+        raise ReceiptError("trusted account dependency metadata is invalid") from None
+    for distribution in candidates:
+        try:
+            raw_name = distribution.metadata["Name"]
+            version = distribution.version
+        except Exception:
+            raise ReceiptError("trusted account dependency metadata is invalid") from None
+        if not isinstance(raw_name, str) or not isinstance(version, str):
+            raise ReceiptError("trusted account dependency metadata is invalid")
+        name = _normalized_distribution_name(raw_name)
+        if name in observed:
+            raise ReceiptError("trusted account dependency closure is ambiguous")
+        observed[name] = version
+        distributions[name] = distribution
+    if observed != _TRUSTED_DISTRIBUTIONS:
+        raise ReceiptError("trusted account dependency closure is invalid")
+
+    owner = os.getuid()
+    for distribution in distributions.values():
+        files = distribution.files
+        if not files:
+            raise ReceiptError("trusted account dependency metadata is invalid")
+        for relative in files:
+            try:
+                installed = Path(distribution.locate_file(relative))
+            except Exception:
+                raise ReceiptError("trusted account dependency metadata is invalid") from None
+            if not _secure_path_chain(installed, venv, owner=owner) or not _safe_lstat(
+                installed, owner=owner, directory=False
+            ):
+                raise ReceiptError("trusted account dependency file is invalid")
+
+    for forbidden_name in ("sitecustomize.py", "usercustomize.py"):
+        if (site / forbidden_name).exists() or (site / forbidden_name).is_symlink():
+            raise ReceiptError("trusted account dependency startup hook is forbidden")
+    try:
+        forbidden_links = [*site.glob("*.pth"), *site.glob("*.egg-link")]
+    except OSError:
+        raise ReceiptError("trusted account dependency directory is invalid") from None
+    if forbidden_links:
+        raise ReceiptError("trusted account dependency startup hook is forbidden")
+
+
+def _load_trusted_curl_runtime(
+    *,
+    trusted_site_packages: Path,
+    forbidden_roots: tuple[Path, ...],
+) -> _TrustedTransportRuntime:
+    venv, site = _require_isolated_runtime_site(trusted_site_packages, forbidden_roots)
+    _require_exact_distribution_closure(site, venv)
+    if any(name == "curl_cffi" or name.startswith("curl_cffi.") for name in sys.modules):
+        raise ReceiptError("trusted account transport was loaded before validation")
+
+    original_sys_path = tuple(sys.path)
+    inserted_site = str(site)
+    sys.path.insert(0, inserted_site)
+    try:
+        curl_cffi_module = importlib.import_module("curl_cffi")
+        curl_requests = importlib.import_module("curl_cffi.requests")
+        curl_wrapper = importlib.import_module("curl_cffi._wrapper")
+        curl_const = importlib.import_module("curl_cffi.const")
+        if tuple(sys.path) != (inserted_site, *original_sys_path):
+            raise ReceiptError("trusted account transport changed the import path")
+        if getattr(curl_cffi_module, "__version__", None) != _TRUSTED_DISTRIBUTIONS["curl-cffi"]:
+            raise ReceiptError("trusted account transport version is invalid")
+        for module in (curl_cffi_module, curl_requests, curl_wrapper, curl_const):
+            module_origin = getattr(module, "__file__", None)
+            if module_origin is None:
+                raise ReceiptError("trusted account transport origin is invalid")
+            origin = Path(module_origin)
+            try:
+                resolved_origin = origin.resolve(strict=True)
+            except OSError:
+                raise ReceiptError("trusted account transport origin is invalid") from None
+            if (
+                not _path_is_within(resolved_origin, site)
+                or not _secure_path_chain(origin, venv, owner=os.getuid())
+                or not _safe_lstat(origin, owner=os.getuid(), directory=False)
+            ):
+                raise ReceiptError("trusted account transport origin is invalid")
+        return _TrustedTransportRuntime(
+            curl_opt=curl_const.CurlOpt,
+            requests=curl_requests,
+            original_sys_path=original_sys_path,
+            inserted_site=inserted_site,
+        )
+    except ReceiptError:
+        sys.path[:] = original_sys_path
+        raise
+    except Exception:
+        sys.path[:] = original_sys_path
+        raise ReceiptError("trusted account transport is unavailable") from None
+
+
 @contextmanager
 def trusted_curl_cffi_requester(
     *,
     forbidden_roots: tuple[Path, ...] = (),
+    trusted_site_packages: Path | None = None,
     session_factory: Callable[..., Any] | None = None,
+    runtime_loader: Callable[..., Any] = _load_trusted_curl_runtime,
 ) -> Iterator[CurlCffiRequester]:
-    """Create one verifier-owned session from a non-candidate dependency."""
-    spec = importlib.util.find_spec("curl_cffi")
-    if spec is None or spec.origin is None:
-        raise ReceiptError("trusted account transport is unavailable")
-    origin = Path(spec.origin)
-    if not _dependency_origin_is_trusted(origin, forbidden_roots):
-        raise ReceiptError("trusted account transport origin is invalid")
+    """Create one verifier-owned session from an exact isolated dependency set."""
+    if trusted_site_packages is None:
+        raise ReceiptError("trusted account runtime site-packages is required")
     try:
-        import curl_cffi as curl_cffi_module
-        from curl_cffi import CurlOpt, requests as curl_requests
+        runtime = runtime_loader(
+            trusted_site_packages=Path(trusted_site_packages),
+            forbidden_roots=forbidden_roots,
+        )
+    except ReceiptError:
+        raise
     except Exception:
-        raise ReceiptError("trusted account transport is unavailable") from None
-    module_origin = getattr(curl_cffi_module, "__file__", None)
-    if (
-        module_origin is None
-        or not _dependency_origin_is_trusted(Path(module_origin), forbidden_roots)
-        or Path(module_origin).resolve(strict=True) != origin.resolve(strict=True)
-    ):
-        raise ReceiptError("trusted account transport origin is invalid")
-    requests_origin = getattr(curl_requests, "__file__", None)
-    if requests_origin is None or not _dependency_origin_is_trusted(
-        Path(requests_origin), forbidden_roots
-    ):
-        raise ReceiptError("trusted account transport origin is invalid")
-    try:
-        Path(requests_origin).resolve(strict=True).relative_to(origin.resolve(strict=True).parent)
-    except (OSError, ValueError):
-        raise ReceiptError("trusted account transport origin is invalid") from None
+        raise ReceiptError("trusted account runtime is invalid") from None
 
-    factory = curl_requests.Session if session_factory is None else session_factory
+    factory = runtime.requests.Session if session_factory is None else session_factory
     session = None
+    path_drift = False
     try:
         session = factory(
             impersonate="chrome131",
             verify=True,
             trust_env=False,
             default_headers=False,
-            curl_options={CurlOpt.MAXFILESIZE_LARGE: MAX_RESPONSE_BYTES},
+            curl_options={runtime.curl_opt.MAXFILESIZE_LARGE: MAX_RESPONSE_BYTES},
         )
         if (
             getattr(session, "trust_env", None) is not False
@@ -1598,6 +2014,14 @@ def trusted_curl_cffi_requester(
                 session.close()
             except Exception:
                 pass
+        if runtime.inserted_site is not None:
+            path_drift = tuple(sys.path) != (
+                runtime.inserted_site,
+                *runtime.original_sys_path,
+            )
+            sys.path[:] = runtime.original_sys_path
+        if path_drift:
+            raise ReceiptError("trusted account transport changed the import path")
 
 
 def _trusted_headers(token: str) -> dict[str, str]:
@@ -1657,34 +2081,49 @@ def run_trusted_live_probe(
     token_loader: Callable[[], str] = _reviewed_account_access_token,
     requester_context: Callable[..., Any] = trusted_curl_cffi_requester,
     forbidden_roots: tuple[Path, ...] = (),
+    trusted_site_packages: Path | None = None,
 ) -> dict[str, Any]:
     """Run the verifier-owned live route checks without candidate code."""
     if expected_plan != "pro":
         raise ReceiptError("live gate requires the reviewed Pro plan class")
-    try:
-        token = token_loader()
-    except ReceiptError:
-        raise
-    except Exception:
-        raise ReceiptError("reviewed ChatGPT account auth material is unavailable") from None
-    auth_headers = _trusted_headers(token)
     started_at = _utc_now()
+    token = ""
+    auth_headers: dict[str, str] = {}
     try:
-        with requester_context(forbidden_roots=forbidden_roots) as requester:
-            observed_plan = execute_plan_probe(
-                requester=requester,
-                auth_headers=auth_headers,
-            )
-            if observed_plan != expected_plan:
-                raise ReceiptError("authenticated account plan does not match the release gate")
-            records = run_probe_sequence(
-                requester=requester,
-                auth_headers=auth_headers,
-            )
+        with requester_context(
+            forbidden_roots=forbidden_roots,
+            trusted_site_packages=trusted_site_packages,
+        ) as requester:
+            with Path(os.devnull).open("w", encoding="utf-8") as sink:
+                with redirect_stdout(sink), redirect_stderr(sink):
+                    try:
+                        token = token_loader()
+                    except ReceiptError:
+                        raise
+                    except Exception:
+                        raise ReceiptError(
+                            "reviewed ChatGPT account auth material is unavailable"
+                        ) from None
+                    auth_headers = _trusted_headers(token)
+                    observed_plan = execute_plan_probe(
+                        requester=requester,
+                        auth_headers=auth_headers,
+                    )
+                    if observed_plan != expected_plan:
+                        raise ReceiptError(
+                            "authenticated account plan does not match the release gate"
+                        )
+                    records = run_probe_sequence(
+                        requester=requester,
+                        auth_headers=auth_headers,
+                    )
     except ReceiptError:
         raise
     except Exception:
         raise ReceiptError("trusted account transport failed") from None
+    finally:
+        auth_headers.clear()
+        token = ""
     return _validate_live_probe_payload(
         {
             "schema_version": _SCHEMA_VERSION,
@@ -1732,6 +2171,7 @@ def run_create_gate(
     ci_artifact_digest: str,
     ci_artifact_size: str,
     ci_artifact_expires_at: str,
+    trusted_site_packages: Path | None = None,
     trusted_probe_runner: Callable[[str], dict[str, Any]] | None = None,
 ) -> str:
     """Probe with trusted code, then attest one inert main-CI artifact set."""
@@ -1769,6 +2209,7 @@ def run_create_gate(
         payload = run_trusted_live_probe(
             expected_plan,
             forbidden_roots=(checkout, dist),
+            trusted_site_packages=trusted_site_packages,
         )
     else:
         payload = trusted_probe_runner(expected_plan)
@@ -1823,6 +2264,7 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--ci-artifact-digest", required=True)
     create.add_argument("--ci-artifact-size", required=True)
     create.add_argument("--ci-artifact-expires-at", required=True)
+    create.add_argument("--trusted-site-packages", type=Path, required=True)
 
     verify = commands.add_parser("verify")
     verify.add_argument("--receipt", type=Path, required=True)
@@ -1838,6 +2280,26 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--ci-artifact-digest", required=True)
     verify.add_argument("--ci-artifact-size", required=True)
     verify.add_argument("--ci-artifact-expires-at", required=True)
+
+    prepare_tag = commands.add_parser("prepare-tag")
+    prepare_tag.add_argument("--receipt", type=Path, required=True)
+    prepare_tag.add_argument("--checkout", type=Path, required=True)
+    prepare_tag.add_argument("--dist", type=Path, required=True)
+    prepare_tag.add_argument("--output", type=Path, required=True)
+    prepare_tag.add_argument("--tag", required=True)
+    prepare_tag.add_argument("--commit", required=True)
+    prepare_tag.add_argument("--tree", required=True)
+    prepare_tag.add_argument("--sha256", required=True)
+    prepare_tag.add_argument("--repository", required=True)
+    prepare_tag.add_argument("--ci-run-id", required=True)
+    prepare_tag.add_argument("--ci-run-attempt", required=True)
+    prepare_tag.add_argument("--ci-artifact-id", required=True)
+    prepare_tag.add_argument("--ci-artifact-digest", required=True)
+    prepare_tag.add_argument("--ci-artifact-size", required=True)
+    prepare_tag.add_argument("--ci-artifact-expires-at", required=True)
+
+    check_runtime = commands.add_parser("check-runtime")
+    check_runtime.add_argument("--trusted-site-packages", type=Path, required=True)
 
     return parser
 
@@ -1860,6 +2322,7 @@ def main(argv: list[str] | None = None) -> int:
                 ci_artifact_digest=args.ci_artifact_digest,
                 ci_artifact_size=args.ci_artifact_size,
                 ci_artifact_expires_at=args.ci_artifact_expires_at,
+                trusted_site_packages=args.trusted_site_packages,
             )
             receipt, _payload = _read_receipt(args.output)
             print(f"account-receipt-sha256: {digest}")
@@ -1870,6 +2333,29 @@ def main(argv: list[str] | None = None) -> int:
             print(f"account-ci-artifact-digest: {args.ci_artifact_digest}")
             print(f"account-ci-artifact-size: {args.ci_artifact_size}")
             print(f"account-ci-artifact-expires-at: {args.ci_artifact_expires_at}")
+        elif args.command == "check-runtime":
+            with trusted_curl_cffi_requester(
+                trusted_site_packages=args.trusted_site_packages
+            ):
+                pass
+        elif args.command == "prepare-tag":
+            prepare_tag_request(
+                args.receipt,
+                checkout=args.checkout,
+                dist=args.dist,
+                output=args.output,
+                tag=args.tag,
+                declared_commit=args.commit,
+                declared_tree=args.tree,
+                expected_sha256=args.sha256,
+                ci_repository=args.repository,
+                ci_run_id=args.ci_run_id,
+                ci_run_attempt=args.ci_run_attempt,
+                ci_artifact_id=args.ci_artifact_id,
+                ci_artifact_digest=args.ci_artifact_digest,
+                ci_artifact_size=args.ci_artifact_size,
+                ci_artifact_expires_at=args.ci_artifact_expires_at,
+            )
         elif args.command == "verify":
             digest = verify_receipt_file(
                 args.receipt,

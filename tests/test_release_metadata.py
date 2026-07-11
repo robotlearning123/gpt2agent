@@ -11,6 +11,7 @@ import sys
 import urllib.error
 import urllib.request
 import urllib.response
+from collections.abc import Callable
 from datetime import datetime, timezone
 from email.message import Message
 from pathlib import Path
@@ -18,6 +19,7 @@ from pathlib import Path
 import pytest
 
 import scripts.verify_main_ci as verify_main_ci
+from scripts.release_tag_metadata import build_metadata, render_tag_message
 from scripts.verify_pypi_artifacts import artifact_hashes, compare_artifacts
 from scripts.verify_main_ci import select_exact_main_run
 from scripts.verify_release import changelog_section, distribution_version
@@ -93,16 +95,13 @@ def _release_source_guard() -> str:
     return "\n".join(script)
 
 
-VALID_TAG_EVIDENCE_LINES = (
-    "account-receipt-sha256: " + "a" * 64,
-    "account-artifact-set-sha256: " + "b" * 64,
-    "account-ci-run-id: 12345",
-    "account-ci-run-attempt: 2",
-    "account-ci-artifact-id: 67890",
-    "account-ci-artifact-digest: sha256:" + "c" * 64,
-    "account-ci-artifact-size: 31415",
-    "account-ci-artifact-expires-at: 2099-07-10T13:17:42Z",
-)
+def _workflow_job_text(workflow: str, name: str) -> str:
+    match = re.search(
+        rf"(?ms)^  {re.escape(name)}:\n(.*?)(?=^  [A-Za-z0-9_-]+:|\Z)",
+        workflow,
+    )
+    assert match is not None
+    return match.group(0)
 
 
 def _run_release_source_guard(
@@ -110,7 +109,7 @@ def _run_release_source_guard(
     tag_kind: str,
     *,
     mismatched_event: bool = False,
-    receipt_lines: tuple[str, ...] = VALID_TAG_EVIDENCE_LINES,
+    tag_message_mutator: Callable[[str], str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     remote = tmp_path / "origin.git"
     source = tmp_path / "source"
@@ -121,7 +120,11 @@ def _run_release_source_guard(
     _git(source, "config", "user.name", "Release Test")
     _git(source, "config", "user.email", "release-test@example.invalid")
     (source / "release.txt").write_text("main\n", encoding="utf-8")
-    _git(source, "add", "release.txt")
+    (source / "scripts").mkdir()
+    (source / "scripts" / "release_tag_metadata.py").write_bytes(
+        (PROJECT_ROOT / "scripts" / "release_tag_metadata.py").read_bytes()
+    )
+    _git(source, "add", "release.txt", "scripts/release_tag_metadata.py")
     _git(source, "commit", "-m", "main release")
     main_sha = _git(source, "rev-parse", "HEAD")
     _git(source, "remote", "add", "origin", str(remote))
@@ -138,10 +141,36 @@ def _run_release_source_guard(
     if tag_kind in {"lightweight", "lightweight-decoy"}:
         _git(source, "tag", "v1.2.3", tag_sha)
     else:
-        tag_command = ["tag", "-a", "v1.2.3", tag_sha, "-m", "v1.2.3"]
-        for receipt_line in receipt_lines:
-            tag_command.extend(["-m", receipt_line])
-        _git(source, *tag_command)
+        metadata = build_metadata(
+            repository="robotlearning123/gpt2agent",
+            tag="v1.2.3",
+            version="1.2.3",
+            commit=tag_sha,
+            tree=_git(source, "rev-parse", f"{tag_sha}^{{tree}}"),
+            receipt_sha256="a" * 64,
+            artifact_set_sha256="b" * 64,
+            candidate_run_id=12345,
+            candidate_run_attempt=2,
+            candidate_artifact_id=67890,
+            candidate_artifact_digest="sha256:" + "c" * 64,
+            candidate_artifact_size=31415,
+            candidate_artifact_expires_at="2099-07-10T13:17:42Z",
+        )
+        message = render_tag_message(metadata)
+        if tag_message_mutator is not None:
+            message = tag_message_mutator(message)
+        message_file = tmp_path / "tag-message"
+        message_file.write_text(message, encoding="ascii", newline="")
+        _git(
+            source,
+            "tag",
+            "-a",
+            "v1.2.3",
+            tag_sha,
+            "--cleanup=verbatim",
+            "-F",
+            str(message_file),
+        )
     _git(source, "push", "origin", "refs/tags/v1.2.3")
     if tag_kind == "lightweight-decoy":
         decoy = "0/refs/tags/v1.2.3"
@@ -158,8 +187,13 @@ def _run_release_source_guard(
         cwd=checkout,
         env=_git_env(
             GITHUB_REF="refs/tags/v1.2.3",
+            GITHUB_REF_NAME="v1.2.3",
+            GITHUB_REPOSITORY="robotlearning123/gpt2agent",
             GITHUB_SHA=event_sha,
             GITHUB_OUTPUT=str(tmp_path / "github-output"),
+            GITHUB_RUN_ID="123",
+            GITHUB_RUN_ATTEMPT="1",
+            RUNNER_TEMP=str(tmp_path),
         ),
         capture_output=True,
         text=True,
@@ -495,108 +529,15 @@ def test_release_source_guard_accepts_remote_annotated_tag_after_local_clobber(
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize(
-    ("receipt_lines", "expected_error"),
-    [
-        ((), "exactly one account-receipt-sha256 field"),
-        (
-            tuple(
-                "account-receipt-sha256: not-a-digest"
-                if line.startswith("account-receipt-sha256:")
-                else line
-                for line in VALID_TAG_EVIDENCE_LINES
-            ),
-            "must be 64 lowercase hex",
-        ),
-        (
-            (
-                "account-receipt-sha256: " + "a" * 64,
-                "account-receipt-sha256: " + "b" * 64,
-            ),
-            "exactly one account-receipt-sha256 field",
-        ),
-    ],
-)
-def test_release_source_guard_rejects_missing_or_malformed_receipt_digest(
-    tmp_path: Path,
-    receipt_lines: tuple[str, ...],
-    expected_error: str,
-) -> None:
+def test_release_source_guard_rejects_extra_tag_message_text(tmp_path: Path) -> None:
     result = _run_release_source_guard(
         tmp_path,
         "annotated",
-        receipt_lines=receipt_lines,
+        tag_message_mutator=lambda message: message + "unexpected-public-text\n",
     )
 
-    assert result.returncode == 1
-    assert expected_error in result.stdout + result.stderr
-
-
-@pytest.mark.parametrize(
-    "field",
-    [
-        "account-artifact-set-sha256",
-        "account-ci-run-id",
-        "account-ci-run-attempt",
-        "account-ci-artifact-id",
-        "account-ci-artifact-digest",
-        "account-ci-artifact-size",
-        "account-ci-artifact-expires-at",
-    ],
-)
-@pytest.mark.parametrize("mode", ["missing", "duplicate"])
-def test_release_source_guard_requires_each_candidate_field_exactly_once(
-    tmp_path: Path,
-    field: str,
-    mode: str,
-) -> None:
-    matching = next(line for line in VALID_TAG_EVIDENCE_LINES if line.startswith(f"{field}:"))
-    if mode == "missing":
-        lines = tuple(line for line in VALID_TAG_EVIDENCE_LINES if line != matching)
-    else:
-        lines = (*VALID_TAG_EVIDENCE_LINES, matching)
-
-    result = _run_release_source_guard(tmp_path, "annotated", receipt_lines=lines)
-
-    assert result.returncode == 1
-    assert f"exactly one {field} field" in result.stdout + result.stderr
-
-
-@pytest.mark.parametrize(
-    ("field", "malformed", "expected_error"),
-    [
-        ("account-ci-run-id", "0", "positive integers"),
-        ("account-ci-artifact-digest", "sha256:not-hex", "digest is malformed"),
-        ("account-ci-artifact-expires-at", "2099-07-10", "expiry is malformed"),
-    ],
-)
-def test_release_source_guard_rejects_malformed_candidate_identity(
-    tmp_path: Path,
-    field: str,
-    malformed: str,
-    expected_error: str,
-) -> None:
-    lines = tuple(
-        f"{field}: {malformed}" if line.startswith(f"{field}:") else line
-        for line in VALID_TAG_EVIDENCE_LINES
-    )
-
-    result = _run_release_source_guard(tmp_path, "annotated", receipt_lines=lines)
-
-    assert result.returncode == 1
-    assert expected_error in result.stdout + result.stderr
-
-
-def test_release_source_guard_does_not_prefix_match_candidate_fields(tmp_path: Path) -> None:
-    lines = tuple(
-        "account-ci-run-id-extra: 12345" if line.startswith("account-ci-run-id:") else line
-        for line in VALID_TAG_EVIDENCE_LINES
-    )
-
-    result = _run_release_source_guard(tmp_path, "annotated", receipt_lines=lines)
-
-    assert result.returncode == 1
-    assert "exactly one account-ci-run-id field" in result.stdout + result.stderr
+    assert result.returncode == 2
+    assert "release tag message envelope is invalid" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -654,7 +595,17 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert "PUBLIC_SURFACE" not in ci
     assert "workflow_dispatch:" not in release
     assert "  actions: read" in release
-    assert release.count("      actions: read") == 4
+    assert "      actions: read\n      id-token: write" in _workflow_job_text(
+        release, "pypi-publish"
+    )
+    for job_name in ("prepare-release-notes", "verify-github-release"):
+        assert "      actions: read\n      contents: read" in _workflow_job_text(
+            release, job_name
+        )
+    for job_name in ("github-release-draft", "github-release"):
+        assert "      actions: read\n      contents: write" in _workflow_job_text(
+            release, job_name
+        )
     assert "    timeout-minutes: 35" in release
     assert 'VERIFY_REF="refs/release-verification/tag"' in release
     assert 'git fetch --force --no-tags origin "$GITHUB_REF:$VERIFY_REF"' in release
@@ -663,15 +614,14 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert 'TAG_COMMIT="$(git rev-parse "$VERIFY_REF^{}")"' in release
     assert 'if [ "$TAG_COMMIT" != "$GITHUB_SHA" ]; then' in release
     assert 'git merge-base --is-ancestor "$TAG_COMMIT" origin/main' in release
-    assert 'git for-each-ref --format="%(contents)" "$VERIFY_REF"' in release
-    assert "account-receipt-sha256:" in release
-    assert "account-artifact-set-sha256:" in release
-    assert "account-ci-run-id:" in release
-    assert "account-ci-run-attempt:" in release
-    assert "account-ci-artifact-id:" in release
-    assert "account-ci-artifact-digest:" in release
-    assert "account-ci-artifact-size:" in release
-    assert "account-ci-artifact-expires-at:" in release
+    assert 'git cat-file tag "$VERIFY_REF" > "$TAG_OBJECT_FILE"' in release
+    assert "python -I -S -B scripts/release_tag_metadata.py verify-tag-object" in release
+    assert '--repository "$GITHUB_REPOSITORY"' in release
+    assert '--tag "$GITHUB_REF_NAME"' in release
+    assert '--commit "$TAG_COMMIT"' in release
+    assert '--tree "$TAG_TREE"' in release
+    assert "tag_field()" not in release
+    assert "account-receipt-sha256:" not in release
     assert "receipt_sha256:" in release
     assert 'git cat-file -t "$GITHUB_REF"' not in release
     assert "python scripts/verify_release.py --tag" in release
@@ -700,66 +650,96 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert "scripts/release_evidence.py verify" in release
     assert "release-workflow-artifacts.json" in release
     assert "python -m build" not in release
+    action_pin = re.search(
+        r"uses: robotlearning123/gpt2agent/\.github/actions/"
+        r"publish-exact-github-release@([0-9a-f]{40})",
+        release,
+    )
+    assert action_pin is not None
+    assert "release-id: ${{ needs.github-release-draft.outputs.release_id }}" in release
     assert 'gh pr view "$PR_NUMBER" --json mergeCommit,state' in readme
-    assert (
-        "```bash\nset -euo pipefail\ngit fetch --no-tags origin main:refs/remotes/origin/main"
-    ) in readme
+    assert "```bash\nset -euo pipefail\nset +x" in readme
+    assert "git fetch --no-tags origin +main:refs/remotes/origin/main" in readme
     assert "\ngit switch main\n" not in readme
     assert "git pull --ff-only origin main" not in readme
     assert 'git merge-base --is-ancestor "$RELEASE_SHA" origin/main' in readme
-    assert "python scripts/verify_main_ci.py" in readme
+    assert "scripts/bootstrap_account_gate.sh" in readme
+    assert "--python /usr/bin/python3.12" in readme
+    assert '"$VERIFIER_PYTHON" -I -S -B' in readme
+    assert "scripts/verify_main_ci.py" in readme
     assert '--commit "$RELEASE_SHA"' in readme
-    assert readme.index("python scripts/verify_main_ci.py") < readme.index(
-        '"repos/$REPOSITORY/git/tags"'
-    )
-    assert (
-        'test -z "$(git status --porcelain=v1 --untracked-files=all --ignored=matching)"' in readme
-    )
+    assert "--ignored=matching --ignore-submodules=none" in readme_flat
     assert 'git switch --detach "$RELEASE_SHA"' in readme
-    assert "trap 'git switch - >/dev/null || true' EXIT" in readme
-    assert "awk -v ref=\"refs/tags/$TAG\" '$2 == ref { print $1 }'" in readme
-    assert "GPT2AGENT_RELEASE_APP_TOKEN:?" in readme
-    assert 'GH_TOKEN="$GPT2AGENT_RELEASE_APP_TOKEN" gh api --method POST' in readme
-    assert '"repos/$REPOSITORY/git/tags"' in readme
-    assert '--raw-field object="$RELEASE_SHA"' in readme
-    assert '--raw-field type=commit' in readme
-    assert '"repos/$REPOSITORY/git/refs"' in readme
-    assert '--raw-field ref="refs/tags/$TAG"' in readme
-    assert '--raw-field sha="$TAG_OBJECT_SHA"' in readme
+    assert "trap cleanup_release_runtime EXIT" in readme
+    assert 'rm -rf -- "$RUNTIME_ROOT"' in readme
+    assert "scripts/verify_account_receipt.py create" in readme
+    assert '--trusted-site-packages "$SITE_PACKAGES"' in readme
+    assert "scripts/verify_account_receipt.py verify" in readme
+    assert "hashlib.sha256" in readme
+    assert "scripts/create_release_tag.sh" in readme
+    for expected in (
+        '--python "$VERIFIER_PYTHON"',
+        '--receipt-sha256 "$RECEIPT_SHA256"',
+        '--commit "$COMMIT"',
+        '--tree "$TREE"',
+        '--ci-run-id "$CI_RUN_ID"',
+        '--ci-run-attempt "$CI_RUN_ATTEMPT"',
+        '--ci-artifact-id "$CI_ARTIFACT_ID"',
+        '--ci-artifact-digest "$CI_ARTIFACT_DIGEST"',
+        '--ci-artifact-size "$CI_ARTIFACT_SIZE"',
+        '--ci-artifact-expires-at "$CI_ARTIFACT_EXPIRES_AT"',
+    ):
+        assert expected in readme
+    assert readme.index("scripts/bootstrap_account_gate.sh") < readme.index(
+        "scripts/verify_account_receipt.py create"
+    ) < readme.index("scripts/create_release_tag.sh")
+    assert "TAG_MESSAGE=" not in readme
+    assert "GPT2AGENT_RELEASE_APP_TOKEN:?" not in readme
+    assert 'GH_TOKEN="$GPT2AGENT_RELEASE_APP_TOKEN"' not in readme
     assert 'git tag -a "$TAG" "$RELEASE_SHA"' not in readme
     assert 'git push origin "refs/tags/$TAG"' not in readme
-    assert 'test "$(git cat-file -t "$TAG")" = tag' in readme
-    assert 'test "$(git rev-parse "$TAG")" = "$TAG_OBJECT_SHA"' in readme
-    assert 'test "$(git rev-parse "$TAG^{}")" = "$RELEASE_SHA"' in readme
-    assert "trap - EXIT" in readme
-    assert "\ngit switch -\n```" in readme
+    assert "release_tag_metadata.py" in readme
+    assert "verify-tag-object" in readme
+    assert 'git update-ref -d "$AUDIT_REF"' in readme
     assert "Re-run failed jobs" in readme_flat
     assert "Do not re-run the whole workflow" in readme_flat
     assert not re.search(r"python scripts/verify_release\.py --tag v\d+\.\d+\.\d+", readme)
 
 
 def test_release_operator_revalidates_pinned_candidate_immediately_before_tag() -> None:
-    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
-    receipt_verify = readme.index("VERIFY_OUTPUT=$(python scripts/verify_account_receipt.py verify")
-    remote_tag_check = readme.index('REMOTE_TAG_SHA="$(')
-    tag_create = readme.index("TAG_OBJECT_SHA=$(\n")
-    revalidation = readme.rfind("python scripts/verify_main_ci.py", 0, tag_create)
-    app_token_unset = readme.index("unset GPT2AGENT_RELEASE_APP_TOKEN")
-    app_token_acquisition = readme.index(
-        'read -r -s -p "Short-lived release App installation token: "'
+    operator = (PROJECT_ROOT / "scripts" / "create_release_tag.sh").read_text(
+        encoding="utf-8"
     )
-    app_token_requirement = readme.index(': "${GPT2AGENT_RELEASE_APP_TOKEN:?')
+    token_unset = operator.index(
+        "unset GH_TOKEN GITHUB_TOKEN GPT2AGENT_RELEASE_APP_TOKEN"
+    )
+    operator_token = operator.index("OPERATOR_TOKEN=$(gh auth token)")
+    app_token_acquisition = operator.index(
+        '-p "Short-lived release App installation token: " RELEASE_APP_TOKEN'
+    )
+    revalidation = operator.index('GH_TOKEN="$OPERATOR_TOKEN" "$VERIFIER_PYTHON"')
+    verify_main = operator.index('"$CHECKOUT/scripts/verify_main_ci.py"')
+    receipt_verify = operator.index(
+        '"$CHECKOUT/scripts/verify_account_receipt.py" prepare-tag'
+    )
+    app_remote_check = operator.index("MATCHING_REFS=")
+    remote_tag_check = operator.index("git/matching-refs/tags/$TAG")
+    tag_create = operator.index('"repos/$REPOSITORY/git/tags" --input "$TAG_REQUEST"')
+    ref_create = operator.index('"repos/$REPOSITORY/git/refs"')
 
     assert (
-        app_token_unset
-        < receipt_verify
-        < remote_tag_check
-        < revalidation
+        token_unset
+        < operator_token
         < app_token_acquisition
-        < app_token_requirement
+        < revalidation
+        < verify_main
+        < receipt_verify
+        < app_remote_check
+        < remote_tag_check
         < tag_create
+        < ref_create
     )
-    revalidation_command = readme[revalidation:tag_create]
+    revalidation_command = operator[revalidation:receipt_verify]
     for expected in (
         '--commit "$COMMIT"',
         '--expected-run-id "$CI_RUN_ID"',
@@ -771,6 +751,10 @@ def test_release_operator_revalidates_pinned_candidate_immediately_before_tag() 
         "--minimum-artifact-lifetime-hours 1",
     ):
         assert expected in revalidation_command
+    receipt_command = operator[receipt_verify:app_remote_check]
+    assert "env -u GH_TOKEN -u GITHUB_TOKEN -u GPT2AGENT_RELEASE_APP_TOKEN" in operator
+    assert "RELEASE_APP_TOKEN" not in receipt_command
+    assert 'GH_TOKEN="$OPERATOR_TOKEN"' in revalidation_command
 
 
 def test_exact_main_ci_selector_ignores_other_commits_branches_and_events() -> None:

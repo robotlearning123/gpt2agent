@@ -10,6 +10,7 @@ import subprocess
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -394,6 +395,58 @@ def test_trusted_live_probe_keeps_token_only_in_fake_transport_headers(
     )["status"] == "not_requested"
 
 
+def test_trusted_live_probe_constructs_transport_before_loading_token() -> None:
+    from scripts.verify_account_receipt import ReceiptError, run_trusted_live_probe
+
+    events: list[str] = []
+
+    @contextmanager
+    def requester_context(**_kwargs):
+        events.append("transport-enter")
+        try:
+            yield lambda **_request: None
+        finally:
+            events.append("transport-close")
+
+    def token_loader() -> str:
+        events.append("token-load")
+        raise ReceiptError("synthetic auth failure")
+
+    with pytest.raises(ReceiptError, match="synthetic auth failure"):
+        run_trusted_live_probe(
+            "pro",
+            token_loader=token_loader,
+            requester_context=requester_context,
+        )
+
+    assert events == ["transport-enter", "token-load", "transport-close"]
+
+
+def test_trusted_live_probe_never_loads_token_when_transport_setup_fails() -> None:
+    from scripts.verify_account_receipt import ReceiptError, run_trusted_live_probe
+
+    token_loads = 0
+
+    @contextmanager
+    def requester_context(**_kwargs):
+        raise ReceiptError("synthetic transport failure")
+        yield  # pragma: no cover
+
+    def token_loader() -> str:
+        nonlocal token_loads
+        token_loads += 1
+        return TOKEN_CANARY
+
+    with pytest.raises(ReceiptError, match="synthetic transport failure"):
+        run_trusted_live_probe(
+            "pro",
+            token_loader=token_loader,
+            requester_context=requester_context,
+        )
+
+    assert token_loads == 0
+
+
 def test_auth_file_requires_owned_regular_private_bounded_token_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -421,7 +474,9 @@ def test_auth_file_requires_owned_regular_private_bounded_token_file(
         assert _account_token_from_file(auth, codex=True) is None
 
 
-def test_trusted_transport_disables_environment_proxy_redirects_and_closes_session() -> None:
+def test_trusted_transport_disables_environment_proxy_redirects_and_closes_session(
+    tmp_path: Path,
+) -> None:
     from scripts.verify_account_receipt import trusted_curl_cffi_requester
 
     options: dict[str, object] = {}
@@ -440,34 +495,33 @@ def test_trusted_transport_disables_environment_proxy_redirects_and_closes_sessi
         options.update(kwargs)
         return session
 
-    with trusted_curl_cffi_requester(session_factory=factory) as requester:
+    runtime = SimpleNamespace(
+        curl_opt=SimpleNamespace(MAXFILESIZE_LARGE=123),
+        requests=SimpleNamespace(),
+        original_sys_path=tuple(receipt_path for receipt_path in __import__("sys").path),
+        inserted_site=None,
+    )
+
+    with trusted_curl_cffi_requester(
+        trusted_site_packages=tmp_path,
+        session_factory=factory,
+        runtime_loader=lambda **_kwargs: runtime,
+    ) as requester:
         assert callable(requester)
 
     assert options["trust_env"] is False
     assert options["impersonate"] == "chrome131"
     assert options["default_headers"] is False
+    assert options["curl_options"] == {123: 4 * 1024 * 1024}
     assert session.closed is True
 
 
-def test_trusted_transport_rejects_dependency_from_candidate_or_checkout(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import scripts.verify_account_receipt as receipt_module
+def test_trusted_transport_requires_an_explicit_isolated_site_packages() -> None:
+    from scripts.verify_account_receipt import ReceiptError, trusted_curl_cffi_requester
 
-    untrusted = tmp_path / "checkout" / "curl_cffi" / "__init__.py"
-    untrusted.parent.mkdir(parents=True)
-    untrusted.write_text("raise RuntimeError('must not import')\n", encoding="utf-8")
-
-    class Spec:
-        origin = str(untrusted)
-
-    monkeypatch.setattr(receipt_module.importlib.util, "find_spec", lambda _name: Spec())
-    with pytest.raises(receipt_module.ReceiptError, match="origin"):
-        with receipt_module.trusted_curl_cffi_requester(
-            forbidden_roots=(tmp_path / "checkout",)
-        ):
-            raise AssertionError("untrusted dependency context must not open")
+    with pytest.raises(ReceiptError, match="runtime"):
+        with trusted_curl_cffi_requester():
+            raise AssertionError("ambient dependency context must not open")
 
 
 def test_trusted_transport_rejects_symlinked_dependency_origin(tmp_path: Path) -> None:
@@ -481,6 +535,25 @@ def test_trusted_transport_rejects_symlinked_dependency_origin(tmp_path: Path) -
     link.symlink_to(target)
 
     assert _dependency_origin_is_trusted(link, ()) is False
+
+
+@pytest.mark.parametrize("unsafe", ("file-mode", "parent-mode"))
+def test_trusted_transport_rejects_group_or_world_writable_dependency_paths(
+    tmp_path: Path,
+    unsafe: str,
+) -> None:
+    from scripts.verify_account_receipt import _dependency_origin_is_trusted
+
+    package = tmp_path / "site-packages" / "curl_cffi"
+    package.mkdir(parents=True)
+    origin = package / "__init__.py"
+    origin.write_text("# synthetic dependency\n", encoding="utf-8")
+    if unsafe == "file-mode":
+        origin.chmod(0o666)
+    else:
+        package.chmod(0o777)
+
+    assert _dependency_origin_is_trusted(origin, ()) is False
 
 
 def test_trusted_live_probe_does_not_retry_a_context_factory_type_error() -> None:
@@ -633,7 +706,7 @@ def test_create_gate_rejects_live_runner_adapter_self_attestation(tmp_path: Path
     assert not output.exists()
 
 
-def test_verifier_version_five_and_fixed_offline_adapter_counts_when_sites_skip(
+def test_verifier_version_six_and_fixed_offline_adapter_counts_when_sites_skip(
     tmp_path: Path,
 ) -> None:
     from scripts.verify_account_receipt import run_create_gate
@@ -648,7 +721,7 @@ def test_verifier_version_five_and_fixed_offline_adapter_counts_when_sites_skip(
     assert receipt["schema_version"] == "4"
     assert receipt["verifier"] == {
         "name": "gpt2agent-account-receipt",
-        "version": "5",
+        "version": "6",
     }
     assert {
         key: receipt["counts"][key]

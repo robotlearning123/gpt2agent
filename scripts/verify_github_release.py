@@ -150,6 +150,8 @@ def verify_release_metadata(
     _require_positive_int(release.get("id"), "GitHub Release ID")
     if release.get("tag_name") != expected_tag:
         raise ValueError("GitHub Release tag does not match the expected tag")
+    if release.get("name") != expected_tag:
+        raise ValueError("GitHub Release name does not match the expected tag")
     if release.get("body") != expected_body:
         raise ValueError("GitHub Release body does not exactly match release notes")
     if release.get("draft") is not False:

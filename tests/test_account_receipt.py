@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import stat
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -368,6 +369,138 @@ def _create_receipt_fixture(tmp_path: Path, *, secret: str = "SYNTHETIC-SECRET")
     return checkout, dist, commit, tree, receipt, receipt_path, digest
 
 
+def _prepare_tag_kwargs(tmp_path: Path) -> tuple[dict[str, object], Path]:
+    checkout, dist, commit, tree, _receipt, receipt_path, digest = _create_receipt_fixture(
+        tmp_path
+    )
+    output = tmp_path / "tag-request.json"
+    return (
+        {
+            "receipt_path": receipt_path,
+            "checkout": checkout,
+            "dist": dist,
+            "output": output,
+            "tag": "v0.0.12",
+            "declared_commit": commit,
+            "declared_tree": tree,
+            "expected_sha256": digest,
+            "ci_repository": "robotlearning123/gpt2agent",
+            "ci_run_id": "12345",
+            "ci_run_attempt": "2",
+            "ci_artifact_id": "67890",
+            "ci_artifact_digest": "sha256:" + "a" * 64,
+            "ci_artifact_size": "31415",
+            "ci_artifact_expires_at": "2099-07-10T13:17:42Z",
+        },
+        output,
+    )
+
+
+def test_prepare_tag_writes_only_the_closed_canonical_request(tmp_path: Path) -> None:
+    from scripts.release_tag_metadata import parse_tag_message
+    from scripts.verify_account_receipt import prepare_tag_request
+
+    kwargs, output = _prepare_tag_kwargs(tmp_path)
+
+    prepare_tag_request(**kwargs)
+
+    request = json.loads(output.read_bytes())
+    assert set(request) == {"message", "object", "tag", "type"}
+    assert request["object"] == kwargs["declared_commit"]
+    assert request["tag"] == "v0.0.12"
+    assert request["type"] == "commit"
+    metadata = parse_tag_message(request["message"])
+    assert metadata["repository"] == "robotlearning123/gpt2agent"
+    assert metadata["source"] == {
+        "commit": kwargs["declared_commit"],
+        "tree": kwargs["declared_tree"],
+    }
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+
+
+def test_prepare_tag_refuses_existing_or_symlink_output(tmp_path: Path) -> None:
+    from scripts.verify_account_receipt import ReceiptError, prepare_tag_request
+
+    kwargs, output = _prepare_tag_kwargs(tmp_path)
+    target = tmp_path / "target"
+    target.write_text("do-not-overwrite", encoding="utf-8")
+    output.symlink_to(target)
+
+    with pytest.raises(ReceiptError, match="new regular file"):
+        prepare_tag_request(**kwargs)
+
+    assert target.read_text(encoding="utf-8") == "do-not-overwrite"
+
+
+def test_prepare_tag_rechecks_receipt_freshness_immediately_before_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.verify_account_receipt as receipt_module
+
+    kwargs, output = _prepare_tag_kwargs(tmp_path)
+    receipt, _payload = receipt_module._read_receipt(kwargs["receipt_path"])
+    completed = receipt_module._timestamp(receipt["completed_at"])
+    monkeypatch.setattr(
+        receipt_module,
+        "_utc_datetime_now",
+        lambda: completed + timedelta(minutes=31),
+    )
+
+    with pytest.raises(receipt_module.ReceiptError, match="freshness"):
+        receipt_module.prepare_tag_request(**kwargs)
+
+    assert not output.exists()
+
+
+def test_prepare_tag_cli_emits_no_tag_content_on_stdout(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scripts.verify_account_receipt import main
+
+    kwargs, output = _prepare_tag_kwargs(tmp_path)
+    result = main(
+        [
+            "prepare-tag",
+            "--receipt",
+            str(kwargs["receipt_path"]),
+            "--checkout",
+            str(kwargs["checkout"]),
+            "--dist",
+            str(kwargs["dist"]),
+            "--output",
+            str(output),
+            "--tag",
+            str(kwargs["tag"]),
+            "--commit",
+            str(kwargs["declared_commit"]),
+            "--tree",
+            str(kwargs["declared_tree"]),
+            "--sha256",
+            str(kwargs["expected_sha256"]),
+            "--repository",
+            str(kwargs["ci_repository"]),
+            "--ci-run-id",
+            str(kwargs["ci_run_id"]),
+            "--ci-run-attempt",
+            str(kwargs["ci_run_attempt"]),
+            "--ci-artifact-id",
+            str(kwargs["ci_artifact_id"]),
+            "--ci-artifact-digest",
+            str(kwargs["ci_artifact_digest"]),
+            "--ci-artifact-size",
+            str(kwargs["ci_artifact_size"]),
+            "--ci-artifact-expires-at",
+            str(kwargs["ci_artifact_expires_at"]),
+        ]
+    )
+
+    assert result == 0
+    assert capsys.readouterr() == ("", "")
+    assert output.is_file()
+
+
 def test_receipt_is_closed_canonical_secret_free_and_sha256_bound(tmp_path: Path, capsys) -> None:
     from scripts.verify_account_receipt import ReceiptError, canonical_json, validate_receipt
 
@@ -395,7 +528,7 @@ def test_receipt_is_closed_canonical_secret_free_and_sha256_bound(tmp_path: Path
     assert receipt["schema_version"] == "4"
     assert receipt["verifier"] == {
         "name": "gpt2agent-account-receipt",
-        "version": "5",
+        "version": "6",
     }
     assert receipt["adapter_status"] == "passed"
     assert {

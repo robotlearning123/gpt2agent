@@ -75,69 +75,26 @@ jobs:
             echo "::error::Release tag commit $TAG_COMMIT is not reachable from origin/main"
             exit 1
           fi
-          TAG_MESSAGE="$(git for-each-ref --format="%(contents)" "$VERIFY_REF")"
-          tag_field() {
-            LABEL="${1%:}"
-            MATCHES="$(printf '%s\n' "$TAG_MESSAGE" | grep "^${LABEL}:" || true)"
-            MATCH_COUNT="$(printf '%s\n' "$MATCHES" | grep -c . || true)"
-            if [ "$MATCH_COUNT" -ne 1 ] || [ "${MATCHES#"$LABEL: "}" = "$MATCHES" ]; then
-              echo "::error::Annotated release tag must contain exactly one $LABEL field"
-              exit 1
-            fi
-            TAG_VALUE="${MATCHES#"$LABEL: "}"
-          }
-          tag_field account-receipt-sha256:
-          RECEIPT_SHA256="$TAG_VALUE"
-          tag_field account-artifact-set-sha256:
-          ACCOUNT_ARTIFACT_SET_SHA256="$TAG_VALUE"
-          tag_field account-ci-run-id:
-          CANDIDATE_RUN_ID="$TAG_VALUE"
-          tag_field account-ci-run-attempt:
-          CANDIDATE_RUN_ATTEMPT="$TAG_VALUE"
-          tag_field account-ci-artifact-id:
-          CANDIDATE_ARTIFACT_ID="$TAG_VALUE"
-          tag_field account-ci-artifact-digest:
-          CANDIDATE_ARTIFACT_DIGEST="$TAG_VALUE"
-          tag_field account-ci-artifact-size:
-          CANDIDATE_ARTIFACT_SIZE="$TAG_VALUE"
-          tag_field account-ci-artifact-expires-at:
-          CANDIDATE_ARTIFACT_EXPIRES_AT="$TAG_VALUE"
-          if ! [[ "$RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
-            echo "::error::Account receipt SHA-256 must be 64 lowercase hex characters"
-            exit 1
-          fi
-          if ! [[ "$ACCOUNT_ARTIFACT_SET_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
-            echo "::error::Account artifact-set SHA-256 must be 64 lowercase hex characters"
-            exit 1
-          fi
-          if ! [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]] ||
-             ! [[ "$CANDIDATE_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] ||
-             ! [[ "$CANDIDATE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] ||
-             ! [[ "$CANDIDATE_ARTIFACT_SIZE" =~ ^[1-9][0-9]*$ ]]; then
-            echo "::error::Account CI numeric identity fields must be positive integers"
-            exit 1
-          fi
-          if ! [[ "$CANDIDATE_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::Account CI artifact digest is malformed"
-            exit 1
-          fi
-          if ! [[ "$CANDIDATE_ARTIFACT_EXPIRES_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,6})?Z$ ]]; then
-            echo "::error::Account CI artifact expiry is malformed"
-            exit 1
-          fi
+          TAG_TREE="$(git rev-parse "$TAG_COMMIT^{tree}")"
+          TAG_OBJECT_FILE="$RUNNER_TEMP/release-tag-object-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          trap 'rm -f -- "$TAG_OBJECT_FILE"' EXIT
+          umask 077
+          set -o noclobber
+          git cat-file tag "$VERIFY_REF" > "$TAG_OBJECT_FILE"
+          set +o noclobber
+          python -I -S -B scripts/release_tag_metadata.py verify-tag-object \
+            --tag-object-file "$TAG_OBJECT_FILE" \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "$GITHUB_REF_NAME" \
+            --commit "$TAG_COMMIT" \
+            --tree "$TAG_TREE"
           {
             echo "tag_object=$(git rev-parse "$VERIFY_REF")"
             echo "commit=$TAG_COMMIT"
-            echo "tree=$(git rev-parse "$TAG_COMMIT^{tree}")"
-            echo "receipt_sha256=$RECEIPT_SHA256"
-            echo "account_artifact_set_sha256=$ACCOUNT_ARTIFACT_SET_SHA256"
-            echo "candidate_run_id=$CANDIDATE_RUN_ID"
-            echo "candidate_run_attempt=$CANDIDATE_RUN_ATTEMPT"
-            echo "candidate_artifact_id=$CANDIDATE_ARTIFACT_ID"
-            echo "candidate_artifact_digest=$CANDIDATE_ARTIFACT_DIGEST"
-            echo "candidate_artifact_size=$CANDIDATE_ARTIFACT_SIZE"
-            echo "candidate_artifact_expires_at=$CANDIDATE_ARTIFACT_EXPIRES_AT"
+            echo "tree=$TAG_TREE"
           } >> "$GITHUB_OUTPUT"
+          rm -f -- "$TAG_OBJECT_FILE"
+          trap - EXIT
 
       - name: Verify tag, manifests, and changelog
         id: metadata
@@ -170,6 +127,8 @@ jobs:
     name: Tests must pass before publish
     needs: verify
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: true
       matrix:
@@ -404,6 +363,7 @@ jobs:
     name: Verify PyPI install in a clean environment
     needs: [verify-pypi, verify]
     runs-on: ubuntu-latest
+    permissions: {}
     steps:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
@@ -497,6 +457,8 @@ jobs:
     name: Create complete GitHub Release draft
     needs: [prepare-release-notes, verify]
     runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.release.outputs.id }}
     permissions:
       actions: read
       contents: write
@@ -514,6 +476,7 @@ jobs:
           name: release-notes-${{ github.run_id }}
           path: ${{ runner.temp }}/github-release-${{ github.run_id }}-${{ github.run_attempt }}/notes/
       - name: Create GitHub Release
+        id: release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ github.ref_name }}
@@ -523,6 +486,7 @@ jobs:
             ${{ runner.temp }}/github-release-${{ github.run_id }}-${{ github.run_attempt }}/dist/gpt2agent-${{ needs.verify.outputs.distribution_version }}.tar.gz
             ${{ runner.temp }}/github-release-${{ github.run_id }}-${{ github.run_attempt }}/release-evidence/release-workflow-artifacts.json
           fail_on_unmatched_files: true
+          overwrite_files: false
           draft: true
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}
 
@@ -531,12 +495,33 @@ jobs:
     needs: [github-release-draft, verify]
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: write
     steps:
-      - name: Publish the complete draft
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          tag_name: ${{ github.ref_name }}
+          name: dist
+          path: ${{ runner.temp }}/github-release-publish-${{ github.run_id }}-${{ github.run_attempt }}/dist/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-evidence
+          path: ${{ runner.temp }}/github-release-publish-${{ github.run_id }}-${{ github.run_attempt }}/release-evidence/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-notes-${{ github.run_id }}
+          path: ${{ runner.temp }}/github-release-publish-${{ github.run_id }}-${{ github.run_attempt }}/notes/
+      - name: Validate and publish the exact draft
+        uses: robotlearning123/gpt2agent/.github/actions/publish-exact-github-release@5f0f75f691ad20513cb8409b6f292bdea79de81e
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          release-id: ${{ needs.github-release-draft.outputs.release_id }}
+          tag: ${{ github.ref_name }}
+          version: ${{ needs.verify.outputs.distribution_version }}
+          expected-prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}
+          notes: ${{ runner.temp }}/github-release-publish-${{ github.run_id }}-${{ github.run_attempt }}/notes/release_notes.md
+          dist: ${{ runner.temp }}/github-release-publish-${{ github.run_id }}-${{ github.run_attempt }}/dist/
+          evidence: ${{ runner.temp }}/github-release-publish-${{ github.run_id }}-${{ github.run_attempt }}/release-evidence/release-workflow-artifacts.json
 
   verify-github-release:
     name: Verify public GitHub Release bytes

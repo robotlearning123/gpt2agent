@@ -27,6 +27,10 @@ CHECKOUT = "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5"
 DOWNLOAD = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
 UPLOAD = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
 SOFTPROPS_RELEASE = "softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65"
+EXACT_RELEASE_ACTION = (
+    "robotlearning123/gpt2agent/.github/actions/publish-exact-github-release@"
+    "5f0f75f691ad20513cb8409b6f292bdea79de81e"
+)
 
 
 def _workflow_job(name: str) -> list[str]:
@@ -110,6 +114,7 @@ def _release(
     return {
         "id": 42,
         "tag_name": "v1.2.3",
+        "name": "v1.2.3",
         "body": body,
         "draft": draft,
         "prerelease": prerelease,
@@ -159,6 +164,8 @@ def test_github_release_draft_writer_is_action_only_and_closed_to_approved_pins(
     actions = _job_actions(job)
 
     assert _job_permissions(job) == {"actions": "read", "contents": "write"}
+    assert "    outputs:" in job
+    assert "      release_id: ${{ steps.release.outputs.id }}" in job
     assert not any(re.match(r"^\s+(?:- )?run:", line) for line in job)
     assert not any(action.startswith("actions/checkout@") for action in actions)
     assert actions == [DOWNLOAD, DOWNLOAD, DOWNLOAD, SOFTPROPS_RELEASE]
@@ -181,20 +188,29 @@ def test_github_release_draft_writer_is_action_only_and_closed_to_approved_pins(
     ]
     assert all("*" not in path for path in files)
     assert "          fail_on_unmatched_files: true" in job
+    assert "          overwrite_files: false" in job
     assert "          draft: true" in job
+    assert "        id: release" in job
 
 
-def test_github_release_publisher_is_action_only_and_publishes_existing_draft() -> None:
+def test_github_release_publisher_is_action_only_and_binds_exact_draft_id() -> None:
     job = _workflow_job("github-release")
     text = "\n".join(job)
 
-    assert _job_permissions(job) == {"contents": "write"}
+    assert _job_permissions(job) == {"actions": "read", "contents": "write"}
     assert "    needs: [github-release-draft, verify]" in job
     assert not any(re.match(r"^\s+(?:- )?run:", line) for line in job)
-    assert _job_actions(job) == [SOFTPROPS_RELEASE]
-    assert "          tag_name: ${{ github.ref_name }}" in job
-    assert "          draft:" not in text
+    assert not any(action.startswith("actions/checkout@") for action in _job_actions(job))
+    assert _job_actions(job) == [DOWNLOAD, DOWNLOAD, DOWNLOAD, EXACT_RELEASE_ACTION]
+    assert all(re.search(r"@[0-9a-f]{40}\Z", action) for action in _job_actions(job))
+    assert "          name: release-notes-${{ github.run_id }}" in job
+    assert "          release-id: ${{ needs.github-release-draft.outputs.release_id }}" in job
+    assert "          tag: ${{ github.ref_name }}" in job
+    assert "          version: ${{ needs.verify.outputs.distribution_version }}" in job
+    assert "          expected-prerelease: ${{ contains(github.ref_name, '-rc') ||" in text
+    assert "          github-token: ${{ github.token }}" in job
     assert "          files:" not in text
+    assert SOFTPROPS_RELEASE not in _job_actions(job)
 
 
 def test_github_release_readback_job_is_read_only_and_closes_public_bytes() -> None:
@@ -213,6 +229,14 @@ def test_github_release_readback_job_is_read_only_and_closes_public_bytes() -> N
     assert "contents: write" not in text
     assert "GH_TOKEN" not in text
     assert "github.token" not in text
+
+
+def test_candidate_executing_release_jobs_do_not_inherit_actions_read() -> None:
+    test_job = _workflow_job("test")
+    canary_job = _workflow_job("pypi-canary")
+
+    assert _job_permissions(test_job) == {"contents": "read"}
+    assert "    permissions: {}" in canary_job
 
 
 def test_expected_release_assets_are_exact_regular_files(tmp_path: Path) -> None:
@@ -384,6 +408,22 @@ def test_release_metadata_rejects_wrong_body_including_newline_drift(tmp_path: P
     with pytest.raises(ValueError, match="body does not exactly match"):
         verify_release_metadata(
             _release(body="release notes"),
+            _api_assets(expected),
+            tag="v1.2.3",
+            expected_body="release notes\n",
+            expected_prerelease=False,
+            expected_assets=expected,
+        )
+
+
+def test_release_metadata_rejects_wrong_release_name(tmp_path: Path) -> None:
+    _, _, expected = _closed_local_assets(tmp_path)
+    release = _release()
+    release["name"] = "unreviewed title"
+
+    with pytest.raises(ValueError, match="name does not match"):
+        verify_release_metadata(
+            release,
             _api_assets(expected),
             tag="v1.2.3",
             expected_body="release notes\n",

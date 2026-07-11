@@ -145,11 +145,18 @@ they are not presented as a supported MCP audio capability.
 
 The account gate must run on a trusted local machine from the clean repository
 root at the exact candidate commit. Follow the complete build-once operator
-procedure in the README: query the successful main `ci.yml` push run with at
-least 72 hours of artifact lifetime, download its attempt-specific artifact,
-and pass the returned run ID, producing attempt, artifact ID, REST digest, size,
-and expiry to both account-receipt commands. Give the downloaded distribution
-and receipt new sibling paths outside the checkout.
+procedure in the README. First create a new owner-private CPython 3.12
+environment with `scripts/bootstrap_account_gate.sh`. Its reviewed hash lock
+allows only the exact nine-distribution account-gate closure, binary wheels, and
+the official PyPI index; the verifier then checks every installed distribution,
+file, owner/mode, import origin, and runtime path under `python -I -S -B`.
+
+Query the successful main `ci.yml` push run with at least 72 hours of artifact
+lifetime, download its attempt-specific artifact, and pass the returned run ID,
+producing attempt, numeric artifact ID, REST digest, size, and expiry to both
+account-receipt commands. Give the downloaded distribution, receipt, and trusted
+runtime new paths outside the checkout. The runtime is temporary; retain the
+mode-0600 receipt and inert candidate only under the reviewed evidence policy.
 
 Main CI's credential-free package job installs both exact distributions and
 runs the same closed synthetic adapter corpus against each, requiring identical
@@ -161,8 +168,13 @@ mode-0600 canonical receipt. Redacted live evidence records empty/nonempty
 classes without exact account collection counts; fixed adapter counts represent
 the separate main-CI corpus. Never upload a browser cookie, bearer token, raw
 response, unsanitized account payload, or the receipt itself to GitHub Actions.
-Put the exact eight lines emitted by the create command in the annotated tag
-message:
+Do not copy verifier stdout into a tag. Compute the receipt SHA-256 independently
+and pass it with the exact candidate identity to
+`scripts/create_release_tag.sh`. The coordinator prompts for the short-lived,
+repository-scoped release App token only after receipt creation; keeps it out of
+Python, environment inheritance, and process arguments; re-fetches the pinned CI
+candidate; re-verifies the receipt; and creates a new tag through the GitHub API
+without any update, deletion, `git tag`, or `git push` fallback.
 
 The trusted transport disables environment proxy discovery and automatic
 redirects, uses fixed timeouts and TLS verification, and caps response bodies at
@@ -173,24 +185,28 @@ verify the receipt immediately: either command rejects evidence older than
 30 minutes, a live probe lasting over 10 minutes, or a completion timestamp more
 than one minute in the future.
 
-```text
-account-receipt-sha256: <64 lowercase hex>
-account-artifact-set-sha256: <64 lowercase hex>
-account-ci-run-id: <positive integer>
-account-ci-run-attempt: <positive integer>
-account-ci-artifact-id: <positive integer>
-account-ci-artifact-digest: sha256:<64 lowercase hex>
-account-ci-artifact-size: <positive integer>
-account-ci-artifact-expires-at: <UTC timestamp>
-```
+The annotated tag has one exact canonical envelope: `gpt2agent <version>`, one
+blank line, and one ASCII, duplicate-key-free, closed-schema JSON object. Its
+repository, tag, version, source commit/tree, receipt and artifact-set digests,
+and complete candidate identity are generated and validated by
+`release_tag_metadata.py`; extra text, extra keys, alternate spellings, and
+noncanonical JSON fail closed. Keep the release branch and the exact full-SHA
+publication-action commit pushed and resolvable through the first release so
+hosted Actions can fetch that immutable action revision.
 
 The hosted release workflow validates the pinned run and candidate live with a
 small execution headroom, downloads by immutable artifact ID, reconstructs the
-account artifact-set digest, and never rebuilds. It publishes those same bytes
-through PyPI trusted publishing and verifies published hashes without importing,
-installing, or rerunning package smoke in the release job. Required main CI is
-the sole packaged-artifact execution gate. The release evidence asset carries
-the full pinned candidate identity and artifact-set digest.
+account artifact-set digest, and never rebuilds. Before publication it verifies
+and promotes those inert bytes without importing, installing, or rerunning
+package smoke; required main CI is the sole pre-publication packaged-artifact
+execution gate. After PyPI publication, a credential-free canary installs the
+public version and checks its CLIs, resources, and import surface. The release
+evidence asset carries the full pinned candidate identity and artifact-set
+digest. GitHub publication resolves or creates the exact-tag draft, captures its
+numeric release ID, and targets every asset operation and publication update by
+that ID. Exact metadata and assets are checked before and after publication, the
+public readback must be immutable, and an already-public rerun succeeds only for
+an exact immutable match.
 
 Before tagging, an expired, deleted, replaced, or near-expiry candidate requires
 a full main-CI rerun and a new account gate. Immediately before tag creation,
@@ -225,9 +241,10 @@ snapshot being audited. The command emits deterministic JSON and exits nonzero
 if the policy is missing or invalid, any required control is absent, or the
 live snapshot cannot be validated.
 
-After the workflow is green, verify the retained mode-0600 local receipt's
-SHA-256 against the annotated-tag line and keep it only in the approved local
-evidence store. Do not upload the account receipt to Actions or the public
-GitHub Release. The public tag and release-evidence asset carry only its digest
-and exact artifact handoff; they do not expose the shape-only account probe
-records.
+After the workflow is green, verify the raw annotated tag object with the
+tagged `release_tag_metadata.py`, compare its canonical `receipt_sha256` output
+with a fresh hash of the retained mode-0600 local receipt, and keep the receipt
+only in the approved local evidence store. Do not upload it to Actions or the
+public GitHub Release. The public tag and release-evidence asset carry only its
+digest and exact artifact handoff; they do not expose the shape-only account
+probe records.
