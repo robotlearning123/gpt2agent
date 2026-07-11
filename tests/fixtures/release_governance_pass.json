@@ -3,6 +3,61 @@
     "enabled": true,
     "enforced_by_owner": false
   },
+  "release_settings_app": {
+    "client_id": "Iv1.1234567890abcdef",
+    "events": [],
+    "id": 303,
+    "permissions": {
+      "administration": "read",
+      "metadata": "read"
+    },
+    "slug": "release-settings-reader"
+  },
+  "release_settings_deployment_branch_policies": {
+    "branch_policies": [
+      {
+        "id": 601,
+        "name": "v*",
+        "type": "tag"
+      }
+    ],
+    "total_count": 1
+  },
+  "release_settings_custom_deployment_protection_rules": {
+    "custom_deployment_protection_rules": [],
+    "total_count": 0
+  },
+  "release_settings_environment": {
+    "can_admins_bypass": false,
+    "deployment_branch_policy": {
+      "custom_branch_policies": true,
+      "protected_branches": false
+    },
+    "name": "release-settings-read",
+    "protection_rules": [
+      {
+        "id": 602,
+        "type": "branch_policy"
+      }
+    ]
+  },
+  "release_settings_environment_secrets": {
+    "secrets": [
+      {
+        "name": "GPT2AGENT_RELEASE_SETTINGS_APP_PRIVATE_KEY"
+      }
+    ],
+    "total_count": 1
+  },
+  "release_settings_environment_variables": {
+    "total_count": 1,
+    "variables": [
+      {
+        "name": "GPT2AGENT_RELEASE_SETTINGS_APP_CLIENT_ID",
+        "value": "Iv1.1234567890abcdef"
+      }
+    ]
+  },
   "custom_deployment_protection_rules": {
     "custom_deployment_protection_rules": [],
     "total_count": 0
@@ -53,11 +108,16 @@
     "release_tag_app": {
       "id": 101
     },
+    "release_settings_app": {
+      "client_id": "Iv1.1234567890abcdef",
+      "id": 303,
+      "slug": "release-settings-reader"
+    },
     "required_check_app": {
       "id": 15368
     },
     "repository": "example/gpt2agent",
-    "schema_version": 1
+    "schema_version": 2
   },
   "repository": {
     "default_branch": "main",
@@ -151,5 +211,5 @@
       "target": "branch"
     }
   ],
-  "schema_version": 1
+  "schema_version": 2
 }

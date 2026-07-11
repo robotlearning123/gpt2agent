@@ -39,7 +39,7 @@ def test_complete_fixture_passes_every_governance_check() -> None:
 
     report = audit_snapshot(_snapshot(), _policy())
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["status"] == "pass"
     assert _checks(report) == {
         "policy_identity_bound": "pass",
@@ -47,6 +47,13 @@ def test_complete_fixture_passes_every_governance_check() -> None:
         "tag_immutable": "pass",
         "tag_bypass_actor_narrow": "pass",
         "release_immutability_enabled": "pass",
+        "release_settings_app_identity": "pass",
+        "release_settings_app_least_privilege": "pass",
+        "release_settings_environment_nonblocking": "pass",
+        "release_settings_admin_bypass_disabled": "pass",
+        "release_settings_v_tags_only": "pass",
+        "release_settings_client_id_bound": "pass",
+        "release_settings_private_key_scoped": "pass",
         "pypi_independent_gate": "pass",
         "pypi_prevent_self_review": "pass",
         "pypi_admin_bypass_disabled": "pass",
@@ -176,6 +183,102 @@ def test_release_app_bypass_cannot_also_bypass_tag_immutability() -> None:
     assert _checks(report)["tag_immutable"] == "fail"
 
 
+@pytest.mark.parametrize(
+    ("mutation", "failed_check"),
+    (
+        ("wrong_app_id", "release_settings_app_identity"),
+        ("wrong_app_slug", "release_settings_app_identity"),
+        ("wrong_app_client_id", "release_settings_app_identity"),
+        ("add_contents_permission", "release_settings_app_least_privilege"),
+        ("add_app_event", "release_settings_app_least_privilege"),
+        ("rename_environment", "release_settings_environment_nonblocking"),
+        ("add_required_reviewer", "release_settings_environment_nonblocking"),
+        ("add_custom_gate", "release_settings_environment_nonblocking"),
+        ("allow_settings_admin_bypass", "release_settings_admin_bypass_disabled"),
+        ("broaden_settings_policy", "release_settings_v_tags_only"),
+        ("missing_client_id_variable", "release_settings_client_id_bound"),
+        ("wrong_client_id_variable", "release_settings_client_id_bound"),
+        ("extra_environment_variable", "release_settings_client_id_bound"),
+        ("missing_private_key_secret", "release_settings_private_key_scoped"),
+        ("extra_environment_secret", "release_settings_private_key_scoped"),
+    ),
+)
+def test_release_settings_reader_controls_fail_closed(
+    mutation: str,
+    failed_check: str,
+) -> None:
+    from scripts.audit_release_governance import audit_snapshot
+
+    snapshot = copy.deepcopy(_snapshot())
+    app = snapshot["release_settings_app"]
+    environment = snapshot["release_settings_environment"]
+    policies = snapshot["release_settings_deployment_branch_policies"]
+    variables = snapshot["release_settings_environment_variables"]
+    secrets = snapshot["release_settings_environment_secrets"]
+    custom_gates = snapshot["release_settings_custom_deployment_protection_rules"]
+
+    if mutation == "wrong_app_id":
+        app["id"] = 999
+    elif mutation == "wrong_app_slug":
+        app["slug"] = "different-reader"
+    elif mutation == "wrong_app_client_id":
+        app["client_id"] = "Iv1.ffffffffffffffff"
+    elif mutation == "add_contents_permission":
+        app["permissions"]["contents"] = "read"
+    elif mutation == "add_app_event":
+        app["events"] = ["release"]
+    elif mutation == "rename_environment":
+        environment["name"] = "release-settings-broad"
+    elif mutation == "add_required_reviewer":
+        environment["protection_rules"].append(
+            {"id": 603, "type": "required_reviewers", "reviewers": []}
+        )
+    elif mutation == "add_custom_gate":
+        custom_gates["custom_deployment_protection_rules"] = [
+            {"id": 605, "enabled": True, "app": {"id": 606, "slug": "late-gate"}}
+        ]
+        custom_gates["total_count"] = 1
+    elif mutation == "allow_settings_admin_bypass":
+        environment["can_admins_bypass"] = True
+    elif mutation == "broaden_settings_policy":
+        policies["branch_policies"].append(
+            {"id": 604, "name": "release/*", "type": "branch"}
+        )
+        policies["total_count"] = 2
+    elif mutation == "missing_client_id_variable":
+        variables["variables"] = []
+        variables["total_count"] = 0
+    elif mutation == "wrong_client_id_variable":
+        variables["variables"][0]["value"] = "Iv1.ffffffffffffffff"
+    elif mutation == "extra_environment_variable":
+        variables["variables"].append({"name": "EXTRA", "value": "unsafe"})
+        variables["total_count"] = 2
+    elif mutation == "missing_private_key_secret":
+        secrets["secrets"] = []
+        secrets["total_count"] = 0
+    elif mutation == "extra_environment_secret":
+        secrets["secrets"].append({"name": "EXTRA_SECRET"})
+        secrets["total_count"] = 2
+
+    report = audit_snapshot(snapshot, _policy())
+
+    assert report["status"] == "fail"
+    assert _checks(report)[failed_check] == "fail"
+
+
+@pytest.mark.parametrize("collision", ("release_tag_app", "required_check_app"))
+def test_release_settings_app_identity_cannot_be_reused(collision: str) -> None:
+    from scripts.audit_release_governance import audit_snapshot
+
+    policy = _policy()
+    policy["release_settings_app"]["id"] = policy[collision]["id"]
+
+    report = audit_snapshot(_snapshot(), policy)
+
+    assert report["status"] == "fail"
+    assert _checks(report)["policy_identity_bound"] == "fail"
+
+
 def test_expected_custom_protection_app_is_an_independent_gate() -> None:
     from scripts.audit_release_governance import audit_snapshot
 
@@ -215,6 +318,35 @@ def test_release_app_cannot_also_be_the_pypi_protection_gate() -> None:
         "total_count": 1,
         "custom_deployment_protection_rules": [
             {"id": 401, "enabled": True, "app": {"id": 101, "slug": "release-gate"}}
+        ],
+    }
+
+    report = audit_snapshot(snapshot, policy)
+
+    assert report["status"] == "fail"
+    assert _checks(report)["policy_identity_bound"] == "fail"
+    assert _checks(report)["pypi_independent_gate"] == "fail"
+
+
+def test_release_settings_app_cannot_also_be_the_pypi_protection_gate() -> None:
+    from scripts.audit_release_governance import audit_snapshot
+
+    snapshot = _snapshot()
+    policy = _policy()
+    policy["pypi_gate"] = {
+        "id": policy["release_settings_app"]["id"],
+        "kind": "protection_app",
+        "slug": "release-settings-reader",
+    }
+    snapshot["environment"]["protection_rules"] = [{"id": 202, "type": "branch_policy"}]
+    snapshot["custom_deployment_protection_rules"] = {
+        "total_count": 1,
+        "custom_deployment_protection_rules": [
+            {
+                "id": 401,
+                "enabled": True,
+                "app": {"id": 303, "slug": "release-settings-reader"},
+            }
         ],
     }
 
@@ -276,6 +408,7 @@ def test_wrong_release_integration_id_cannot_satisfy_reviewed_policy() -> None:
     "mutation",
     (
         "missing_release_app",
+        "missing_release_settings_app",
         "missing_required_check_app",
         "missing_reviewer",
         "repository_mismatch",
@@ -287,6 +420,8 @@ def test_incomplete_or_mismatched_policy_fails_closed(mutation: str) -> None:
     policy = _policy()
     if mutation == "missing_release_app":
         policy["release_tag_app"] = {}
+    elif mutation == "missing_release_settings_app":
+        policy["release_settings_app"] = {}
     elif mutation == "missing_required_check_app":
         policy["required_check_app"] = {}
     elif mutation == "missing_reviewer":
@@ -385,8 +520,10 @@ def test_cli_rejects_duplicate_keys_in_reviewed_policy(
 
     policy_path = tmp_path / "policy.json"
     policy_path.write_text(
-        '{"schema_version":1,"repository":"example/gpt2agent",'
+        '{"schema_version":2,"repository":"example/gpt2agent",'
         '"release_tag_app":{"id":101},"release_tag_app":{"id":999},'
+        '"release_settings_app":{"id":303,"slug":"release-settings-reader",'
+        '"client_id":"Iv1.1234567890abcdef"},'
         '"required_check_app":{"id":202},'
         '"pypi_gate":{"kind":"reviewer","login":"release-reviewer"}}',
         encoding="utf-8",
@@ -448,6 +585,32 @@ def test_live_snapshot_fetches_only_reviewed_read_endpoints() -> None:
             "total_count": 0,
             "custom_deployment_protection_rules": [],
         },
+        "apps/release-settings-reader": {
+            "id": 303,
+            "slug": "release-settings-reader",
+            "client_id": "Iv1.1234567890abcdef",
+            "permissions": {"administration": "read", "metadata": "read"},
+            "events": [],
+        },
+        "repos/example/gpt2agent/environments/release-settings-read": {
+            "name": "release-settings-read"
+        },
+        "repos/example/gpt2agent/environments/release-settings-read/deployment-branch-policies?per_page=100": {
+            "total_count": 0,
+            "branch_policies": [],
+        },
+        "repos/example/gpt2agent/environments/release-settings-read/deployment_protection_rules?per_page=100": {
+            "total_count": 0,
+            "custom_deployment_protection_rules": [],
+        },
+        "repos/example/gpt2agent/environments/release-settings-read/secrets?per_page=100": {
+            "total_count": 0,
+            "secrets": [],
+        },
+        "repos/example/gpt2agent/environments/release-settings-read/variables?per_page=100": {
+            "total_count": 0,
+            "variables": [],
+        },
     }
     calls: list[str] = []
 
@@ -455,7 +618,11 @@ def test_live_snapshot_fetches_only_reviewed_read_endpoints() -> None:
         calls.append(endpoint)
         return responses[endpoint]
 
-    snapshot = fetch_live_snapshot("example/gpt2agent", requester=requester)
+    snapshot = fetch_live_snapshot(
+        "example/gpt2agent",
+        release_settings_app_slug="release-settings-reader",
+        requester=requester,
+    )
 
     assert calls == list(responses)
     assert snapshot["repository"] == responses["repos/example/gpt2agent"]
@@ -476,6 +643,10 @@ def test_live_snapshot_rejects_malformed_ruleset_ids_without_echoing_values() ->
         return [{"id": {"secret": secret}}]
 
     with pytest.raises(GovernanceError) as caught:
-        fetch_live_snapshot("example/gpt2agent", requester=requester)
+        fetch_live_snapshot(
+            "example/gpt2agent",
+            release_settings_app_slug="release-settings-reader",
+            requester=requester,
+        )
 
     assert secret not in str(caught.value)

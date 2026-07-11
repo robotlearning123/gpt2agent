@@ -16,8 +16,12 @@ _MAX_JSON_BYTES = 4 * 1024 * 1024
 _REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 _LOGIN_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?\Z")
 _APP_SLUG_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?\Z")
+_APP_CLIENT_ID_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,253}[A-Za-z0-9])?\Z")
 _REQUIRED_TAG_IMMUTABILITY_RULES = frozenset({"deletion", "non_fast_forward", "update"})
 _REQUIRED_CHECK_CONTEXT = "Required checks"
+_RELEASE_SETTINGS_ENVIRONMENT = "release-settings-read"
+_RELEASE_SETTINGS_CLIENT_ID_VARIABLE = "GPT2AGENT_RELEASE_SETTINGS_APP_CLIENT_ID"
+_RELEASE_SETTINGS_PRIVATE_KEY_SECRET = "GPT2AGENT_RELEASE_SETTINGS_APP_PRIVATE_KEY"
 
 
 class GovernanceError(ValueError):
@@ -68,25 +72,44 @@ def _validated_policy(value: Any) -> dict[str, Any] | None:
             "schema_version",
             "repository",
             "release_tag_app",
+            "release_settings_app",
             "required_check_app",
             "pypi_gate",
         },
     ):
         return None
-    if policy.get("schema_version") != 1 or isinstance(policy.get("schema_version"), bool):
+    if policy.get("schema_version") != 2 or isinstance(policy.get("schema_version"), bool):
         return None
 
     repository = policy.get("repository")
     release_tag_app = _object(policy.get("release_tag_app"))
+    release_settings_app = _object(policy.get("release_settings_app"))
     required_check_app = _object(policy.get("required_check_app"))
     gate = _object(policy.get("pypi_gate"))
+    settings_id = release_settings_app.get("id")
+    settings_slug = release_settings_app.get("slug")
+    settings_client_id = release_settings_app.get("client_id")
     if (
         not isinstance(repository, str)
         or not _REPOSITORY_RE.fullmatch(repository)
         or not _exact_keys(release_tag_app, {"id"})
         or not _positive_int(release_tag_app.get("id"))
+        or not _exact_keys(release_settings_app, {"id", "slug", "client_id"})
+        or not _positive_int(settings_id)
+        or not isinstance(settings_slug, str)
+        or not _APP_SLUG_RE.fullmatch(settings_slug)
+        or not isinstance(settings_client_id, str)
+        or not _APP_CLIENT_ID_RE.fullmatch(settings_client_id)
         or not _exact_keys(required_check_app, {"id"})
         or not _positive_int(required_check_app.get("id"))
+        or len(
+            {
+                release_tag_app.get("id"),
+                settings_id,
+                required_check_app.get("id"),
+            }
+        )
+        != 3
     ):
         return None
 
@@ -107,7 +130,7 @@ def _validated_policy(value: Any) -> dict[str, Any] | None:
         if (
             not _exact_keys(gate, {"kind", "id", "slug"})
             or not _positive_int(app_id)
-            or app_id == release_tag_app["id"]
+            or app_id in {release_tag_app["id"], settings_id, required_check_app["id"]}
             or not isinstance(slug, str)
             or not _APP_SLUG_RE.fullmatch(slug)
         ):
@@ -119,6 +142,11 @@ def _validated_policy(value: Any) -> dict[str, Any] | None:
     return {
         "repository": repository.lower(),
         "release_tag_app_id": release_tag_app["id"],
+        "release_settings_app": {
+            "id": settings_id,
+            "slug": settings_slug,
+            "client_id": settings_client_id,
+        },
         "required_check_app_id": required_check_app["id"],
         "pypi_gate": normalized_gate,
     }
@@ -257,6 +285,93 @@ def _pypi_v_tags_only(snapshot: dict[str, Any]) -> bool:
     )
 
 
+def _release_settings_app_identity(
+    snapshot: dict[str, Any],
+    expected: dict[str, Any] | None,
+) -> bool:
+    app = _object(snapshot.get("release_settings_app"))
+    return expected is not None and all(
+        app.get(field) == expected[field] for field in ("id", "slug", "client_id")
+    )
+
+
+def _release_settings_app_is_least_privilege(snapshot: dict[str, Any]) -> bool:
+    app = _object(snapshot.get("release_settings_app"))
+    return app.get("permissions") == {
+        "administration": "read",
+        "metadata": "read",
+    } and app.get("events") == []
+
+
+def _release_settings_environment_is_nonblocking(snapshot: dict[str, Any]) -> bool:
+    environment = _object(snapshot.get("release_settings_environment"))
+    rules = _array(environment.get("protection_rules"))
+    custom_payload = _object(
+        snapshot.get("release_settings_custom_deployment_protection_rules")
+    )
+    custom_rules = _array(custom_payload.get("custom_deployment_protection_rules"))
+    custom_count = custom_payload.get("total_count")
+    return (
+        environment.get("name") == _RELEASE_SETTINGS_ENVIRONMENT
+        and len(rules) == 1
+        and isinstance(rules[0], dict)
+        and rules[0].get("type") == "branch_policy"
+        and isinstance(custom_count, int)
+        and not isinstance(custom_count, bool)
+        and custom_count == len(custom_rules) == 0
+    )
+
+
+def _release_settings_v_tags_only(snapshot: dict[str, Any]) -> bool:
+    environment = _object(snapshot.get("release_settings_environment"))
+    deployment_policy = _object(environment.get("deployment_branch_policy"))
+    policies_payload = _object(snapshot.get("release_settings_deployment_branch_policies"))
+    policies = _array(policies_payload.get("branch_policies"))
+    count = policies_payload.get("total_count")
+    return (
+        environment.get("name") == _RELEASE_SETTINGS_ENVIRONMENT
+        and deployment_policy.get("protected_branches") is False
+        and deployment_policy.get("custom_branch_policies") is True
+        and isinstance(count, int)
+        and not isinstance(count, bool)
+        and count == len(policies) == 1
+        and isinstance(policies[0], dict)
+        and policies[0].get("type") == "tag"
+        and policies[0].get("name") == "v*"
+    )
+
+
+def _release_settings_client_id_is_bound(
+    snapshot: dict[str, Any],
+    expected_client_id: str | None,
+) -> bool:
+    payload = _object(snapshot.get("release_settings_environment_variables"))
+    variables = _array(payload.get("variables"))
+    count = payload.get("total_count")
+    return (
+        expected_client_id is not None
+        and isinstance(count, int)
+        and not isinstance(count, bool)
+        and count == len(variables) == 1
+        and isinstance(variables[0], dict)
+        and variables[0].get("name") == _RELEASE_SETTINGS_CLIENT_ID_VARIABLE
+        and variables[0].get("value") == expected_client_id
+    )
+
+
+def _release_settings_private_key_is_scoped(snapshot: dict[str, Any]) -> bool:
+    payload = _object(snapshot.get("release_settings_environment_secrets"))
+    secrets = _array(payload.get("secrets"))
+    count = payload.get("total_count")
+    return (
+        isinstance(count, int)
+        and not isinstance(count, bool)
+        and count == len(secrets) == 1
+        and isinstance(secrets[0], dict)
+        and secrets[0].get("name") == _RELEASE_SETTINGS_PRIVATE_KEY_SECRET
+    )
+
+
 def _main_rulesets(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     repository = _object(snapshot.get("repository"))
     if repository.get("default_branch") != "main":
@@ -326,6 +441,34 @@ _CHECK_DETAILS = {
     "release_immutability_enabled": (
         "repository release immutability is enabled",
         "repository release immutability is not enabled",
+    ),
+    "release_settings_app_identity": (
+        "the immutable-release reader matches the policy-bound GitHub App",
+        "the immutable-release reader does not match the policy-bound GitHub App",
+    ),
+    "release_settings_app_least_privilege": (
+        "the immutable-release reader has only Administration read and Metadata read",
+        "the immutable-release reader has unexpected permissions or subscribed events",
+    ),
+    "release_settings_environment_nonblocking": (
+        "the release-settings-read environment has no late approval or wait gate",
+        "the release-settings-read environment is missing or has an unexpected protection gate",
+    ),
+    "release_settings_admin_bypass_disabled": (
+        "release-settings-read administrator bypass is disabled",
+        "release-settings-read administrator bypass is not explicitly disabled",
+    ),
+    "release_settings_v_tags_only": (
+        "release-settings-read accepts only v* tags",
+        "release-settings-read is not limited to exactly the v* tag policy",
+    ),
+    "release_settings_client_id_bound": (
+        "release-settings-read exposes only the policy-bound App client ID variable",
+        "release-settings-read does not expose exactly the policy-bound App client ID variable",
+    ),
+    "release_settings_private_key_scoped": (
+        "release-settings-read contains only the expected App private-key secret",
+        "release-settings-read does not contain exactly the expected App private-key secret",
     ),
     "pypi_independent_gate": (
         "PyPI deployment matches the policy-bound independent gate identity",
@@ -399,6 +542,16 @@ def audit_snapshot(snapshot: Any, policy: Any = None) -> dict[str, Any]:
     main_bypass_disabled = bool(main_rulesets) and all(
         ruleset.get("bypass_actors") == [] for ruleset in main_rulesets
     )
+    expected_settings_app = (
+        reviewed_policy["release_settings_app"]
+        if policy_bound and reviewed_policy is not None
+        else None
+    )
+    settings_app_identity = _release_settings_app_identity(root, expected_settings_app)
+    settings_environment = _object(root.get("release_settings_environment"))
+    expected_settings_client_id = (
+        expected_settings_app["client_id"] if expected_settings_app is not None else None
+    )
     results = (
         ("policy_identity_bound", policy_bound),
         (
@@ -419,6 +572,32 @@ def audit_snapshot(snapshot: Any, policy: Any = None) -> dict[str, Any]:
         (
             "release_immutability_enabled",
             _object(root.get("immutable_releases")).get("enabled") is True,
+        ),
+        ("release_settings_app_identity", settings_app_identity),
+        (
+            "release_settings_app_least_privilege",
+            settings_app_identity and _release_settings_app_is_least_privilege(root),
+        ),
+        (
+            "release_settings_environment_nonblocking",
+            policy_bound and _release_settings_environment_is_nonblocking(root),
+        ),
+        (
+            "release_settings_admin_bypass_disabled",
+            policy_bound and settings_environment.get("can_admins_bypass") is False,
+        ),
+        (
+            "release_settings_v_tags_only",
+            policy_bound and _release_settings_v_tags_only(root),
+        ),
+        (
+            "release_settings_client_id_bound",
+            policy_bound
+            and _release_settings_client_id_is_bound(root, expected_settings_client_id),
+        ),
+        (
+            "release_settings_private_key_scoped",
+            policy_bound and _release_settings_private_key_is_scoped(root),
         ),
         ("pypi_independent_gate", reviewer_rule is not None or protection_app),
         (
@@ -462,7 +641,7 @@ def audit_snapshot(snapshot: Any, policy: Any = None) -> dict[str, Any]:
         for check_id, passed in results
     ]
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "pass" if all(passed for _, passed in results) else "fail",
         "checks": checks,
     }
@@ -497,11 +676,17 @@ def _gh_json(endpoint: str) -> Any:
 def fetch_live_snapshot(
     repository: str,
     *,
+    release_settings_app_slug: str,
     requester: Callable[[str], Any] = _gh_json,
 ) -> dict[str, Any]:
     """Fetch only the reviewed GitHub GET endpoints needed by the audit."""
     if not isinstance(repository, str) or not _REPOSITORY_RE.fullmatch(repository):
         raise GovernanceError("repository must be an owner/name pair")
+    if (
+        not isinstance(release_settings_app_slug, str)
+        or not _APP_SLUG_RE.fullmatch(release_settings_app_slug)
+    ):
+        raise GovernanceError("release settings App slug is invalid")
     prefix = f"repos/{repository}"
     repository_payload = requester(prefix)
     immutable_releases = requester(f"{prefix}/immutable-releases")
@@ -521,14 +706,40 @@ def fetch_live_snapshot(
     protection_apps = requester(
         f"{prefix}/environments/pypi/deployment_protection_rules?per_page=100"
     )
+    release_settings_app = requester(f"apps/{release_settings_app_slug}")
+    release_settings_environment = requester(
+        f"{prefix}/environments/{_RELEASE_SETTINGS_ENVIRONMENT}"
+    )
+    release_settings_policies = requester(
+        f"{prefix}/environments/{_RELEASE_SETTINGS_ENVIRONMENT}"
+        "/deployment-branch-policies?per_page=100"
+    )
+    release_settings_protection_rules = requester(
+        f"{prefix}/environments/{_RELEASE_SETTINGS_ENVIRONMENT}"
+        "/deployment_protection_rules?per_page=100"
+    )
+    release_settings_secrets = requester(
+        f"{prefix}/environments/{_RELEASE_SETTINGS_ENVIRONMENT}/secrets?per_page=100"
+    )
+    release_settings_variables = requester(
+        f"{prefix}/environments/{_RELEASE_SETTINGS_ENVIRONMENT}/variables?per_page=100"
+    )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "repository": repository_payload,
         "immutable_releases": immutable_releases,
         "rulesets": rulesets,
         "environment": environment,
         "deployment_branch_policies": policies,
         "custom_deployment_protection_rules": protection_apps,
+        "release_settings_app": release_settings_app,
+        "release_settings_environment": release_settings_environment,
+        "release_settings_deployment_branch_policies": release_settings_policies,
+        "release_settings_custom_deployment_protection_rules": (
+            release_settings_protection_rules
+        ),
+        "release_settings_environment_secrets": release_settings_secrets,
+        "release_settings_environment_variables": release_settings_variables,
     }
 
 
@@ -572,7 +783,10 @@ def main(argv: list[str] | None = None) -> int:
                 raise GovernanceError("governance policy is invalid")
             if args.live.lower() != reviewed_policy["repository"]:
                 raise GovernanceError("governance policy repository does not match --live target")
-            snapshot = fetch_live_snapshot(args.live)
+            snapshot = fetch_live_snapshot(
+                args.live,
+                release_settings_app_slug=reviewed_policy["release_settings_app"]["slug"],
+            )
         else:
             snapshot = _load_snapshot(args.snapshot)
             policy = (
