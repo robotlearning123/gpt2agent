@@ -55,7 +55,24 @@ function startAudio(OPUS_PT) {
 }
 
 const dc = pc.createDataChannel("", { negotiated: true, id: 0 });
-dc.stateChanged.subscribe((s) => { console.log("[dc]", s); if (s === "open") startAudio(globalThis.__OPUS_PT || "111"); });
+// The inbound events use a {type:"data_message", data:"<inner json>"} envelope,
+// so mirror it on the way out. NEGATIVE RESULT (2026-07-11): sending a wrapped
+// session.update on open did NOT hold the session — it still closes ~1s after
+// "listening", identically to no-audio and unwrapped runs. So the ~1s close is
+// not determinable by guessing from the Node side; the real client's outbound
+// datachannel traffic must be observed (CDP on an authenticated session).
+function sendWrapped(inner) {
+  try { dc.send(JSON.stringify({ type: "data_message", data: JSON.stringify(inner) })); }
+  catch (e) { console.log("[send-err]", e.message); }
+}
+dc.stateChanged.subscribe((s) => {
+  console.log("[dc]", s);
+  if (s === "open") {
+    sendWrapped({ type: "session.update", session: { modalities: ["audio", "text"], turn_detection: { type: "server_vad" } } });
+    console.log("[sent] wrapped session.update");
+    startAudio(globalThis.__OPUS_PT || "111");
+  }
+});
 dc.onMessage.subscribe((msg) => {
   const raw = msg && msg.toString ? msg.toString() : String(msg);
   let inner = raw;
