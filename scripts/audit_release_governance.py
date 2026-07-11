@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -647,10 +648,21 @@ def audit_snapshot(snapshot: Any, policy: Any = None) -> dict[str, Any]:
     }
 
 
-def _gh_json(endpoint: str) -> Any:
+def _gh_json(endpoint: str, *, gh_path: Path) -> Any:
+    token = os.environ.get("GH_TOKEN")
+    if (
+        not gh_path.is_absolute()
+        or not isinstance(token, str)
+        or not token
+        or len(token) > 4096
+        or any(character.isspace() for character in token)
+    ):
+        raise GovernanceError("GitHub governance snapshot is unavailable")
     command = [
-        "gh",
+        str(gh_path),
         "api",
+        "--hostname",
+        "github.com",
         "--method",
         "GET",
         "-H",
@@ -662,6 +674,14 @@ def _gh_json(endpoint: str) -> Any:
     try:
         result = subprocess.run(
             command,
+            env={
+                "GH_TOKEN": token,
+                "GH_CONFIG_DIR": "/nonexistent",
+                "GH_PROMPT_DISABLED": "1",
+                "HOME": "/nonexistent",
+                "LC_ALL": "C",
+                "PATH": "/usr/bin:/bin",
+            },
             capture_output=True,
             check=False,
             timeout=30,
@@ -677,7 +697,8 @@ def fetch_live_snapshot(
     repository: str,
     *,
     release_settings_app_slug: str,
-    requester: Callable[[str], Any] = _gh_json,
+    requester: Callable[[str], Any] | None = None,
+    gh_path: Path | None = None,
 ) -> dict[str, Any]:
     """Fetch only the reviewed GitHub GET endpoints needed by the audit."""
     if not isinstance(repository, str) or not _REPOSITORY_RE.fullmatch(repository):
@@ -687,6 +708,13 @@ def fetch_live_snapshot(
         or not _APP_SLUG_RE.fullmatch(release_settings_app_slug)
     ):
         raise GovernanceError("release settings App slug is invalid")
+    if requester is None:
+        if gh_path is None:
+            raise GovernanceError("an exact gh path is required")
+
+        def requester(endpoint: str) -> Any:
+            return _gh_json(endpoint, gh_path=gh_path)
+
     prefix = f"repos/{repository}"
     repository_payload = requester(prefix)
     immutable_releases = requester(f"{prefix}/immutable-releases")
@@ -771,12 +799,19 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="read reviewed repository and release-principal identities from JSON",
     )
+    parser.add_argument(
+        "--gh",
+        type=Path,
+        help="exact trusted gh executable (required with --live)",
+    )
     args = parser.parse_args(argv)
 
     try:
         if args.live is not None:
             if args.policy is None:
                 raise GovernanceError("live audit requires an explicit reviewed --policy file")
+            if args.gh is None or not args.gh.is_absolute():
+                raise GovernanceError("live audit requires an exact absolute --gh path")
             policy = _load_policy(args.policy)
             reviewed_policy = _validated_policy(policy)
             if reviewed_policy is None:
@@ -786,6 +821,7 @@ def main(argv: list[str] | None = None) -> int:
             snapshot = fetch_live_snapshot(
                 args.live,
                 release_settings_app_slug=reviewed_policy["release_settings_app"]["slug"],
+                gh_path=args.gh,
             )
         else:
             snapshot = _load_snapshot(args.snapshot)

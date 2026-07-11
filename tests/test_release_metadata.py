@@ -710,36 +710,41 @@ def test_release_operator_revalidates_pinned_candidate_immediately_before_tag() 
     operator = (PROJECT_ROOT / "scripts" / "create_release_tag.sh").read_text(
         encoding="utf-8"
     )
-    token_unset = operator.index(
-        "unset GH_TOKEN GITHUB_TOKEN GPT2AGENT_RELEASE_APP_TOKEN"
-    )
-    operator_token = operator.index("OPERATOR_TOKEN=$(gh auth token)")
+    operator_token = operator.index('"$GH_BIN" auth token --hostname github.com')
+    action_pin = operator.index('"$CHECKOUT/scripts/verify_remote_action_pin.py"')
     app_token_acquisition = operator.index(
         '-p "Short-lived release App installation token: " RELEASE_APP_TOKEN'
     )
-    revalidation = operator.index('GH_TOKEN="$OPERATOR_TOKEN" "$VERIFIER_PYTHON"')
+    revalidation = operator.index('run_python_operator "$CHECKOUT/scripts/verify_main_ci.py"')
     verify_main = operator.index('"$CHECKOUT/scripts/verify_main_ci.py"')
+    governance = operator.index('"$CHECKOUT/scripts/audit_release_governance.py"')
     receipt_verify = operator.index(
         '"$CHECKOUT/scripts/verify_account_receipt.py" prepare-tag'
     )
+    receipt_verify_end = operator.index("if [[ ! -s $TAG_REQUEST", receipt_verify)
     app_remote_check = operator.index("MATCHING_REFS=")
     remote_tag_check = operator.index("git/matching-refs/tags/$TAG")
     tag_create = operator.index('"repos/$REPOSITORY/git/tags" --input "$TAG_REQUEST"')
     ref_create = operator.index('"repos/$REPOSITORY/git/refs"')
+    independent_get = operator.index("INDEPENDENT_GET_OK=0")
+    independent_fetch = operator.index("fetch --no-tags --no-write-fetch-head")
 
     assert (
-        token_unset
-        < operator_token
+        operator_token
+        < action_pin
         < app_token_acquisition
         < revalidation
         < verify_main
+        < governance
         < receipt_verify
         < app_remote_check
         < remote_tag_check
         < tag_create
         < ref_create
+        < independent_get
+        < independent_fetch
     )
-    revalidation_command = operator[revalidation:receipt_verify]
+    revalidation_command = operator[revalidation:governance]
     for expected in (
         '--commit "$COMMIT"',
         '--expected-run-id "$CI_RUN_ID"',
@@ -751,10 +756,12 @@ def test_release_operator_revalidates_pinned_candidate_immediately_before_tag() 
         "--minimum-artifact-lifetime-hours 1",
     ):
         assert expected in revalidation_command
-    receipt_command = operator[receipt_verify:app_remote_check]
-    assert "env -u GH_TOKEN -u GITHUB_TOKEN -u GPT2AGENT_RELEASE_APP_TOKEN" in operator
+    receipt_command = operator[receipt_verify:receipt_verify_end]
+    assert "/usr/bin/env -i" in operator
     assert "RELEASE_APP_TOKEN" not in receipt_command
-    assert 'GH_TOKEN="$OPERATOR_TOKEN"' in revalidation_command
+    assert 'GH_TOKEN="$OPERATOR_TOKEN"' in operator
+    assert 'GH_TOKEN="$RELEASE_APP_TOKEN"' in operator
+    assert operator.count('"repos/$REPOSITORY/git/refs"') == 1
 
 
 def test_exact_main_ci_selector_ignores_other_commits_branches_and_events() -> None:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -476,7 +478,7 @@ def test_live_cli_requires_reviewed_policy_before_fetching(
 ) -> None:
     import scripts.audit_release_governance as governance
 
-    def unexpected_fetch(_repository: str) -> dict:
+    def unexpected_fetch(_repository: str, **_kwargs) -> dict:
         pytest.fail("live snapshot was fetched before policy validation")
 
     monkeypatch.setattr(governance, "fetch_live_snapshot", unexpected_fetch)
@@ -499,12 +501,21 @@ def test_live_cli_rejects_policy_for_another_repository_before_fetching(
     policy_path = tmp_path / "policy.json"
     policy_path.write_text(json.dumps(_policy()), encoding="utf-8")
 
-    def unexpected_fetch(_repository: str) -> dict:
+    def unexpected_fetch(_repository: str, **_kwargs) -> dict:
         pytest.fail("live snapshot was fetched with a mismatched policy")
 
     monkeypatch.setattr(governance, "fetch_live_snapshot", unexpected_fetch)
 
-    result = governance.main(["--live", "different/gpt2agent", "--policy", str(policy_path)])
+    result = governance.main(
+        [
+            "--live",
+            "different/gpt2agent",
+            "--policy",
+            str(policy_path),
+            "--gh",
+            "/usr/bin/gh",
+        ]
+    )
 
     captured = capsys.readouterr()
     assert result == 2
@@ -650,3 +661,42 @@ def test_live_snapshot_rejects_malformed_ruleset_ids_without_echoing_values() ->
         )
 
     assert secret not in str(caught.value)
+
+
+def test_exact_gh_request_scrubs_ambient_host_config_debug_and_path(tmp_path: Path) -> None:
+    from scripts.audit_release_governance import _gh_json
+
+    event_log = tmp_path / "events"
+    fake_gh = tmp_path / "gh"
+    fake_gh.write_text(
+        "#!/bin/bash\n"
+        "set -euo pipefail\n"
+        f"printf '%s\\n' \"host=${{GH_HOST-unset}} config=${{GH_CONFIG_DIR-unset}} "
+        f'debug=${{GH_DEBUG-unset}} path=${{PATH-unset}} token=${{GH_TOKEN-unset}}" '
+        f">> {event_log}\n"
+        "printf '%s\\n' '{\"full_name\":\"example/gpt2agent\"}'\n",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(fake_gh.stat().st_mode | stat.S_IXUSR)
+    monkeypatch_values = {
+        "GH_TOKEN": "operator-token",
+        "GH_HOST": "attacker.invalid",
+        "GH_CONFIG_DIR": str(tmp_path / "attacker-config"),
+        "GH_DEBUG": "api",
+        "PATH": str(tmp_path),
+    }
+    previous = {key: os.environ.get(key) for key in monkeypatch_values}
+    os.environ.update(monkeypatch_values)
+    try:
+        payload = _gh_json("repos/example/gpt2agent", gh_path=fake_gh)
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    assert payload == {"full_name": "example/gpt2agent"}
+    assert event_log.read_text(encoding="utf-8").strip() == (
+        "host=unset config=/nonexistent debug=unset path=/usr/bin:/bin token=operator-token"
+    )
