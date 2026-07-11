@@ -23,6 +23,7 @@ _MAX_GENERATED_IMAGE_ASSETS = 100
 _DOWNLOAD_HOST_LABEL_RE = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z"
 )
+_DOWNLOAD_NUMERIC_HOST_LABEL_RE = re.compile(r"(?:0[xX][0-9A-Fa-f]+|[0-9]+)\Z")
 _INTERNAL_DOWNLOAD_SUFFIXES = frozenset(
     {"corp", "home", "home.arpa", "internal", "lan", "local", "localdomain", "localhost"}
 )
@@ -107,7 +108,7 @@ def _project_download_url(value: Any) -> str:
     if (
         len(normalized_host) > 253
         or len(labels) < 2
-        or all(label.isdigit() for label in labels)
+        or all(_DOWNLOAD_NUMERIC_HOST_LABEL_RE.fullmatch(label) for label in labels)
         or any(_DOWNLOAD_HOST_LABEL_RE.fullmatch(label) is None for label in labels)
         or any(
             normalized_host == suffix or normalized_host.endswith(f".{suffix}")

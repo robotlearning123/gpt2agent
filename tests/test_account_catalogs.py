@@ -319,6 +319,14 @@ def test_list_scheduled_tasks_returns_one_validated_page() -> None:
     assert client.fixed_probe is False
 
 
+def test_automations_register_accepts_unused_conversation() -> None:
+    mcp = FakeMCP()
+
+    automations.register(mcp, FakeClient(), conv=object())
+
+    assert set(mcp.tools) == {"list_scheduled_tasks"}
+
+
 @pytest.mark.parametrize(
     "payload",
     [

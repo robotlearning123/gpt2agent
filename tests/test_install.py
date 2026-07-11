@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import gpt2agent.install as install_module
 from gpt2agent.install import (
     SUPPORTED_CLIENTS,
     _remove_toml_section,
@@ -699,6 +700,65 @@ def test_supported_clients_lists_all_hosts() -> None:
 
 
 # ── top-level HTTP install contract ────────────────────────────────────────
+
+
+@pytest.mark.parametrize("client", ["codex", "all"])
+def test_install_rejects_unknown_transport_before_any_mutation(
+    client: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    claude_dir = home / ".claude"
+    claude_dir.mkdir(parents=True)
+    claude_config = home / ".claude.json"
+    claude_config.write_text('{"marker": "keep-claude"}\n')
+    codex_home = home / ".codex"
+    codex_home.mkdir()
+    codex_config = codex_home / "config.toml"
+    codex_config.write_text('model = "keep-codex"\n')
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+
+    installer_calls: list[str] = []
+
+    def record_installer(name, installer):
+        def wrapped(*args, **kwargs):
+            installer_calls.append(name)
+            return installer(*args, **kwargs)
+
+        return wrapped
+
+    for name in ("install_claude_code", "install_codex", "install_claude_skill"):
+        monkeypatch.setattr(
+            install_module,
+            name,
+            record_installer(name, getattr(install_module, name)),
+        )
+
+    before = {
+        path.relative_to(home): path.read_bytes()
+        for path in home.rglob("*")
+        if path.is_file()
+    }
+
+    status = run_install(
+        client=client,
+        transport="websocket",
+        install_skill=True,
+    )
+
+    captured = capsys.readouterr()
+    after = {
+        path.relative_to(home): path.read_bytes()
+        for path in home.rglob("*")
+        if path.is_file()
+    }
+    assert status == 1
+    assert "transport must be 'stdio' or 'http'" in captured.err
+    assert installer_calls == []
+    assert after == before
 
 
 def test_http_install_rejects_codex_before_writing_config(

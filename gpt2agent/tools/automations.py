@@ -78,7 +78,7 @@ def normalize_scheduled_page(data: Any) -> dict:
     return {"items": items, "cursor": cursor}
 
 
-def register(mcp, client: BackendClient) -> None:
+def register(mcp, client: BackendClient, conv=None) -> None:
     @mcp.tool(annotations=tool_annotations("list_scheduled_tasks"))
     async def list_scheduled_tasks(cursor: str | None = None) -> dict:
         """Return one page of scheduled ChatGPT automations."""

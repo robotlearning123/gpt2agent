@@ -698,6 +698,11 @@ def run_install(
     dry_run: bool = False,
 ) -> int:
     """Run the install flow for the chosen client(s)."""
+    if transport not in {"stdio", "http"}:
+        _err("transport must be 'stdio' or 'http'")
+        _info("No configuration files were changed.")
+        return 1
+
     _h1("gpt2agent install")
 
     if client == "all":

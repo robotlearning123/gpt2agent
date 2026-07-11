@@ -41,7 +41,12 @@ def test_download_projection_preserves_valid_signed_https_url_exactly() -> None:
         "https://intranet/file",
         "https://127.0.0.1/file",
         "https://10.0.0.8/file",
+        "https://8.8.8.8/file",
         "https://[::1]/file",
+        "https://[2606:4700:4700::1111]/file",
+        "https://0x7f.0.0.1/file",
+        "https://0177.0.0.1/file",
+        "https://127.1/file",
         "https://2130706433/file",
     ),
 )

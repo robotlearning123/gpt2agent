@@ -18,6 +18,14 @@ def _tools(client: FakeClient):
     return mcp.tools
 
 
+def test_sites_register_accepts_unused_conversation() -> None:
+    mcp = FakeMCP()
+
+    sites.register(mcp, FakeClient(), conv=object())
+
+    assert set(mcp.tools) == {"sites_access", "list_sites"}
+
+
 def test_sites_access_exposes_only_allowlisted_nullable_booleans() -> None:
     payload = {
         "enabled": True,

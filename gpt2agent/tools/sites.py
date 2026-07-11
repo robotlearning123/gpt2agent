@@ -94,7 +94,7 @@ def normalize_sites_page(data: Any) -> dict:
     }
 
 
-def register(mcp, client: BackendClient) -> None:
+def register(mcp, client: BackendClient, conv=None) -> None:
     @mcp.tool(annotations=tool_annotations("sites_access"))
     async def sites_access() -> dict:
         """Return the non-identifying Sites access booleans for this account."""
