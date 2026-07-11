@@ -337,3 +337,39 @@ def test_normalization_rejects_a_regular_file_used_as_a_parent(tmp_path: Path) -
 
     with pytest.raises(module.SdistNormalizationError, match="parent"):
         module.normalize_sdist(sdist, epoch=1_700_000_000)
+
+
+def test_member_count_bound_is_enforced_while_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    monkeypatch.setattr(module, "MAX_MEMBERS", 3)
+    members = []
+    for name, payload, member_type in [
+        *_required_entries(),
+        (f"{ROOT}/extra", b"extra", tarfile.REGTYPE),
+    ]:
+        member = tarfile.TarInfo(name)
+        member.type = member_type
+        member.size = len(payload) if payload is not None else 0
+        members.append(member)
+
+    class StreamingArchive:
+        pax_headers: dict[str, str] = {}
+
+        def __init__(self) -> None:
+            self.consumed = 0
+
+        def __iter__(self):
+            for member in members:
+                self.consumed += 1
+                yield member
+
+        def getmembers(self):
+            raise AssertionError("member validation must not pre-load the whole archive")
+
+    archive = StreamingArchive()
+    with pytest.raises(module.SdistNormalizationError, match="member count"):
+        module._validated_members(archive, ROOT)
+
+    assert archive.consumed == 4

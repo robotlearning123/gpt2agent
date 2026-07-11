@@ -88,8 +88,14 @@ def _safe_member_name(name: str, root: str) -> str:
 def _validated_members(archive: tarfile.TarFile, root: str) -> list[tarfile.TarInfo]:
     if archive.pax_headers:
         raise SdistNormalizationError("sdist global PAX headers are not supported")
-    members = archive.getmembers()
-    if not 1 <= len(members) <= MAX_MEMBERS:
+    members: list[tarfile.TarInfo] = []
+    for member in archive:
+        if len(members) >= MAX_MEMBERS:
+            raise SdistNormalizationError(
+                "sdist member count is outside the reviewed bound"
+            )
+        members.append(member)
+    if not members:
         raise SdistNormalizationError("sdist member count is outside the reviewed bound")
 
     seen: set[str] = set()
