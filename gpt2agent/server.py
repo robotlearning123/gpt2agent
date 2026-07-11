@@ -333,7 +333,7 @@ def _transport_security_settings() -> TransportSecuritySettings:
     allowed_hosts = [value for host in host_names for value in (host, f"{host}:*")]
     allowed_origins = [
         value
-        for scheme in ("http", "https")
+        for scheme in ("http",)
         for host in host_names
         for value in (f"{scheme}://{host}", f"{scheme}://{host}:*")
     ]

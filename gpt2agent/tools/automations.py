@@ -26,9 +26,11 @@ def _nullable_next_run_times(value: Any) -> list[str] | None:
         raise BackendContractError(
             "automations", "next_run_times must be an array or null"
         )
-    # The observed contract proves only an array. Preserve that minimum
-    # acceptance while projecting a bounded, useful subset: nested/unknown
-    # values and oversized strings are ignored rather than passed through.
+    if len(value) > 100:
+        raise BackendContractError("automations", "next_run_times exceeds 100 items")
+    # Within the hard input bound, the observed contract proves only an array.
+    # Preserve that minimum acceptance while projecting a bounded, useful
+    # subset: nested/unknown values and oversized strings are ignored.
     result: list[str] = []
     for entry in value:
         if len(result) >= 100:

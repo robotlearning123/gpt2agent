@@ -372,6 +372,25 @@ def test_list_scheduled_tasks_safely_projects_unproven_array_entries() -> None:
     assert "nested" not in repr(result)
 
 
+def test_list_scheduled_tasks_rejects_oversized_next_run_times_array() -> None:
+    client = FakeClient(
+        routes={
+            "/backend-api/automations": {
+                "items": [
+                    {
+                        "id": "task-1",
+                        "next_run_times": ["2026-07-11T12:00:00Z"] * 101,
+                    }
+                ],
+                "cursor": None,
+            }
+        }
+    )
+
+    with pytest.raises(BackendContractError, match="next_run_times exceeds 100 items"):
+        _run(_registered(automations, client).tools["list_scheduled_tasks"])
+
+
 def test_list_scheduled_tasks_redacts_secret_shaped_scalar_values() -> None:
     secret = "sk-" + "a" * 24
     client = FakeClient(

@@ -463,6 +463,25 @@ def test_workflow_actions_are_pinned_to_full_commit_shas() -> None:
     assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for _, _, revision in references)
 
 
+def test_ci_checkouts_do_not_persist_credentials() -> None:
+    lines = (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    checkout_indexes = [
+        index for index, line in enumerate(lines) if "- uses: actions/checkout@" in line
+    ]
+
+    assert checkout_indexes
+    for index in checkout_indexes:
+        step_indent = len(lines[index]) - len(lines[index].lstrip())
+        block: list[str] = []
+        for line in lines[index + 1 :]:
+            if line.strip() and len(line) - len(line.lstrip()) <= step_indent:
+                break
+            block.append(line.strip())
+        assert "persist-credentials: false" in block
+
+
 def test_release_source_guard_accepts_remote_annotated_tag_after_local_clobber(
     tmp_path: Path,
 ) -> None:

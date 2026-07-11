@@ -394,6 +394,17 @@ def test_native_transport_security_accepts_loopback_origin_on_other_port() -> No
     )
 
 
+def test_native_transport_security_rejects_https_origin_for_plain_http() -> None:
+    response = _transport_security_response(
+        {
+            "Host": "localhost:9000",
+            "Origin": "https://localhost:43123",
+        }
+    )
+    assert response is not None
+    assert response.status_code == 403
+
+
 def test_native_transport_security_accepts_absent_origin() -> None:
     assert _transport_security_response({"Host": "127.0.0.1:9000"}) is None
 
