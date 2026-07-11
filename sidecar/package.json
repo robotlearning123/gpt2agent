@@ -4,8 +4,13 @@
   "private": true,
   "type": "module",
   "description": "Experimental GPT-Live voice bridge sidecar (WebRTC) for gpt2agent. Audio stays here; MCP gets a control plane only.",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "test": "node --test"
+  },
+  "dependencies": {
+    "werift": "^0.23.0"
   }
 }
