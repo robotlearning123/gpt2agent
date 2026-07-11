@@ -63,6 +63,9 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
   directory is not yet visible in the current shell's `PATH`.
 - Optional image-asset enrichment preserves typed changed-contract and
   indeterminate-access results while continuing to suppress exception details.
+  A 422 against a backend-produced file identifier is classified as contract
+  drift rather than caller input, and the docs now state that download/info
+  enrichment is optional per asset.
 
 ### Security
 
@@ -105,6 +108,14 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
   while preserving valid signed queries. Common provider secrets,
   credential-bearing database URLs, label-aware assignments, and PEM private
   keys are redacted before private text reaches MCP clients.
+- Citation projection drops query keys or values that still contain a percent
+  escape after one decode, preventing downstream double-decoding from revealing
+  encoded credentials or PII. Local Plugin pagination accepts only canonical,
+  unpadded Base64URL cursors.
+- The shell installer rejects a symlinked or non-directory pipx environment
+  before mutation. Config backups read content and permissions from one open
+  regular-file descriptor so a concurrent symlink swap cannot widen a secret
+  backup.
 - Image generation follows the observed prepare/conduit `/f` v1 stream and
   accepts an asset only when its visible carrier is bound to the current stream
   by the observed dispatch or a same-message marker and has image-generation
@@ -128,6 +139,8 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
 - The locked package lane builds twice from cleaned state, normalizes bounded
   sdist container metadata with a dependency-free fail-closed rewriter, and
   requires byte-identical wheel and sdist pairs before retaining the first set.
+  The rewriter validates complete tar end framing and bounds PAX/GNU extended
+  metadata before Python's tar parser materializes it.
 - CI audits resolved application dependencies, the minimum supported
   `curl_cffi` release, and the hash-locked account-gate runtime for known
   vulnerabilities. A credential-free CI lane also bootstraps that runtime from
