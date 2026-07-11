@@ -114,12 +114,14 @@ def _assert_fresh_locked_environment(job: str) -> None:
     assert 'PIP_FIND_LINKS: ""' in job
     assert 'PIP_NO_INDEX: "0"' in job
     assert 'PIP_NO_INPUT: "1"' in job
+    steps = job.index("    steps:\n")
+    assert '    env:\n      PYTHONDONTWRITEBYTECODE: "1"\n' in job[:steps]
     assert 'BUILD_VENV="$RUNNER_TEMP/' in job
     assert 'rm -rf "$BUILD_VENV"' in job
-    assert '"$GPT2AGENT_REVIEWED_PYTHON_BASE/bin/python3.12" -m venv "$BUILD_VENV"' in job
+    assert ('"$GPT2AGENT_REVIEWED_PYTHON_BASE/bin/python3.12" -B -m venv "$BUILD_VENV"') in job
     assert (
         '"$BUILD_VENV/bin/python" -m pip install --require-hashes '
-        '--only-binary=:all: -r requirements-build.txt'
+        "--only-binary=:all: -r requirements-build.txt"
     ) in job
     assert '"$BUILD_VENV/bin/python" -m pip check' in job
     assert '"$BUILD_VENV/bin/python" -m pip --version' in job
@@ -129,20 +131,46 @@ def _assert_fresh_locked_environment(job: str) -> None:
 def _assert_reviewed_cpython(job: str) -> None:
     assert "scripts/install_account_gate_runtime.sh" in job
     assert "astral-sh/python-build-standalone/releases/download/20260623/" in job
-    assert (
-        "cpython-3.12.13%2B20260623-x86_64-unknown-linux-gnu-"
-        "install_only_stripped.tar.gz" in job
-    )
+    assert "cpython-3.12.13%2B20260623-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz" in job
     assert '"$RUNTIME_BASE/bin/python3.12" -I -S -B -c' in job
     assert '("cpython", (3, 12, 13), "linux", "x86_64")' in job
-    assert job.count("scripts/hash_runtime_tree.sh") == 1
-    assert job.count(
-        "7df598dcc28ad5583fd65f49da6a2ff6460030441070d5c7a105df7dd5294f79"
-    ) == 1
+    assert job.count("scripts/hash_runtime_tree.sh") == 2
+    assert job.count("7df598dcc28ad5583fd65f49da6a2ff6460030441070d5c7a105df7dd5294f79") == 2
+    assert "Revalidate reviewed CPython runtime" in job
     assert "GPT2AGENT_REVIEWED_PYTHON_BASE" in job
     assert "Clean reviewed CPython runtime" in job
     assert job.count("set +o posix") >= 2
     assert job.count("unset POSIXLY_CORRECT") >= 2
+
+
+def _assert_final_runtime_revalidation(
+    job: str,
+    *,
+    final_operation: str,
+    upload_step: str,
+) -> None:
+    revalidation_step = job.rindex("      - name: Revalidate reviewed CPython runtime\n")
+    final_operation_position = job.rindex(final_operation)
+    upload_position = job.index(upload_step, revalidation_step)
+    revalidation = job[revalidation_step:upload_position]
+
+    assert final_operation_position < revalidation_step < upload_position
+    assert "\n      - " not in revalidation
+    assert revalidation.rstrip().endswith(
+        '"7df598dcc28ad5583fd65f49da6a2ff6460030441070d5c7a105df7dd5294f79"'
+    )
+
+
+def _assert_final_runtime_cleanup(job: str) -> None:
+    final_upload = job.rindex("uses: actions/upload-artifact@")
+    cleanup_step = job.rindex("      - name: Clean reviewed CPython runtime\n")
+    cleanup = job[cleanup_step:]
+
+    assert final_upload < cleanup_step
+    assert cleanup.startswith(
+        "      - name: Clean reviewed CPython runtime\n        if: always()\n"
+    )
+    assert "\n      - " not in cleanup
 
 
 def test_build_system_and_direct_builder_inputs_use_exact_approved_pins() -> None:
@@ -199,10 +227,7 @@ def test_package_ci_uses_the_locked_builder_and_reproducible_build_settings() ->
     assert 'SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA")"' in package
     assert "PYTHONHASHSEED=0" in package
     assert "TZ=UTC" in package
-    assert (
-        '"$BUILD_VENV/bin/python" -m build --no-isolation --outdir "$output"'
-        in package
-    )
+    assert '"$BUILD_VENV/bin/python" -m build --no-isolation --outdir "$output"' in package
     assert (
         '"$BUILD_VENV/bin/python" -I -S -B scripts/normalize_sdist.py \\\n'
         '              --epoch "$SOURCE_DATE_EPOCH" "${sdists[0]}"'
@@ -219,14 +244,19 @@ def test_package_ci_uses_the_locked_builder_and_reproducible_build_settings() ->
     assert 'sha256sum -- "${FIRST_WHEELS[0]}" "${FIRST_SDISTS[0]}"' in package
     assert package.count("scripts/package_smoke.sh") == 1
     assert "overwrite: false" in package
+    _assert_final_runtime_revalidation(
+        package,
+        final_operation='scripts/package_smoke.sh dist "$PROJECT_VERSION" "$DIST_VERSION"',
+        upload_step="      - name: Retain exact main-CI release candidate\n",
+    )
+    _assert_final_runtime_cleanup(package)
 
 
 def test_dependency_audit_checks_the_locked_builder_closure_without_resolving() -> None:
     audit = _workflow_job(CI_WORKFLOW, "dependency-audit")
 
     assert (
-        "pip-audit -r requirements-build.txt --no-deps --disable-pip "
-        "--progress-spinner off"
+        "pip-audit -r requirements-build.txt --no-deps --disable-pip --progress-spinner off"
     ) in audit
 
 
@@ -238,14 +268,17 @@ def test_release_relay_validates_with_the_lock_without_rebuilding() -> None:
     assert 'python-version: "3.12.13"' not in build
     _assert_reviewed_cpython(build)
     _assert_fresh_locked_environment(build)
-    assert (
-        'run: |\n          "$BUILD_VENV/bin/python" -m twine check --strict dist/*'
-        in build
-    )
+    assert 'run: |\n          "$BUILD_VENV/bin/python" -m twine check --strict dist/*' in build
     assert " -m build" not in build
     assert "scripts/normalize_sdist.py" not in workflow
     assert "Test built artifacts in clean environments" not in build
     assert workflow.count("scripts/package_smoke.sh") == 0
+    _assert_final_runtime_revalidation(
+        build,
+        final_operation="python scripts/release_evidence.py create",
+        upload_step="      - uses: actions/upload-artifact@",
+    )
+    _assert_final_runtime_cleanup(build)
 
 
 def test_dependabot_groups_only_the_approved_build_lock_inputs() -> None:

@@ -178,6 +178,8 @@ jobs:
     name: Validate and relay exact wheel + sdist
     needs: [verify, test]
     runs-on: ubuntu-24.04
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -254,7 +256,7 @@ jobs:
           set -euo pipefail
           BUILD_VENV="$RUNNER_TEMP/gpt2agent-build"
           rm -rf "$BUILD_VENV"
-          "$GPT2AGENT_REVIEWED_PYTHON_BASE/bin/python3.12" -m venv "$BUILD_VENV"
+          "$GPT2AGENT_REVIEWED_PYTHON_BASE/bin/python3.12" -B -m venv "$BUILD_VENV"
           "$BUILD_VENV/bin/python" -m pip install --require-hashes --only-binary=:all: -r requirements-build.txt --no-cache-dir
           "$BUILD_VENV/bin/python" -m pip check
           "$BUILD_VENV/bin/python" -m pip --version
@@ -345,6 +347,17 @@ jobs:
             --candidate-artifact-expires-at "$CANDIDATE_ARTIFACT_EXPIRES_AT" \
             --account-artifact-set-sha256 "$ACCOUNT_ARTIFACT_SET_SHA256" \
             --job build
+
+      - name: Revalidate reviewed CPython runtime
+        run: |
+          set -euo pipefail
+          RUNTIME_TREE_SHA256="$(
+            /usr/bin/env -i LANG=C LC_ALL=C PATH=/usr/bin:/bin \
+              /usr/bin/bash -p scripts/hash_runtime_tree.sh \
+              "$GPT2AGENT_REVIEWED_PYTHON_BASE"
+          )"
+          test "$RUNTIME_TREE_SHA256" = \
+            "7df598dcc28ad5583fd65f49da6a2ff6460030441070d5c7a105df7dd5294f79"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

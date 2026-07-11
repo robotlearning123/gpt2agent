@@ -315,7 +315,7 @@ they are not an authorization boundary.
 - **Notes**:
   - Async handler; offloads calls to `/backend-api/me` and `/backend-api/accounts/check/v4-2023-04-27` to the synchronous backend client.
   - Email is PII-redacted (regex pattern matching).
-  - Every returned account entry is validated. Inactive entries never override an active subscription; equivalent active `pro`/`chatgptpro` entries are projected deterministically, while conflicting active plans fail closed.
+  - Every returned account entry is validated. Inactive entries never override an active subscription; equivalent active `plus`/`chatgptplus` and `pro`/`chatgptpro` entries are projected deterministically, while conflicting active plans fail closed.
 
 ---
 

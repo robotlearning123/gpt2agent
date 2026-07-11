@@ -190,6 +190,8 @@ jobs:
   package:
     name: Package dry-run
     runs-on: ubuntu-24.04
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -318,7 +320,7 @@ jobs:
           set -euo pipefail
           BUILD_VENV="$RUNNER_TEMP/gpt2agent-build"
           rm -rf "$BUILD_VENV"
-          "$GPT2AGENT_REVIEWED_PYTHON_BASE/bin/python3.12" -m venv "$BUILD_VENV"
+          "$GPT2AGENT_REVIEWED_PYTHON_BASE/bin/python3.12" -B -m venv "$BUILD_VENV"
           "$BUILD_VENV/bin/python" -m pip install --require-hashes --only-binary=:all: -r requirements-build.txt --no-cache-dir
           "$BUILD_VENV/bin/python" -m pip check
           "$BUILD_VENV/bin/python" -m pip --version
@@ -399,15 +401,26 @@ jobs:
 
       - name: Test wheel and sdist in clean environments
         run: |
-          PROJECT_VERSION="$("$GPT2AGENT_REVIEWED_PYTHON_BASE/bin/python3.12" - <<'PY'
+          PROJECT_VERSION="$("$GPT2AGENT_REVIEWED_PYTHON_BASE/bin/python3.12" -B - <<'PY'
           import tomllib
 
           with open("pyproject.toml", "rb") as stream:
               print(tomllib.load(stream)["project"]["version"])
           PY
           )"
-          DIST_VERSION="$("$GPT2AGENT_REVIEWED_PYTHON_BASE/bin/python3.12" scripts/verify_release.py --print-distribution-version)"
+          DIST_VERSION="$("$GPT2AGENT_REVIEWED_PYTHON_BASE/bin/python3.12" -B scripts/verify_release.py --print-distribution-version)"
           scripts/package_smoke.sh dist "$PROJECT_VERSION" "$DIST_VERSION"
+
+      - name: Revalidate reviewed CPython runtime
+        run: |
+          set -euo pipefail
+          RUNTIME_TREE_SHA256="$(
+            /usr/bin/env -i LANG=C LC_ALL=C PATH=/usr/bin:/bin \
+              /usr/bin/bash -p scripts/hash_runtime_tree.sh \
+              "$GPT2AGENT_REVIEWED_PYTHON_BASE"
+          )"
+          test "$RUNTIME_TREE_SHA256" = \
+            "7df598dcc28ad5583fd65f49da6a2ff6460030441070d5c7a105df7dd5294f79"
 
       - name: Retain exact main-CI release candidate
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

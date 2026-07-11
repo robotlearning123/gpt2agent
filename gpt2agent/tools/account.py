@@ -34,6 +34,7 @@ def _active_account_projection(
 ) -> tuple[str | None, bool | None, str | None, int]:
     active: list[tuple[str, str | None, int]] = []
     saw_inactive = False
+    saw_unknown = False
 
     for entry in accounts.values():
         if not isinstance(entry, dict):
@@ -66,15 +67,21 @@ def _active_account_projection(
             maximum=2_048,
         )
         if is_active is True:
-            if plan is None:
+            if plan is None or not plan or plan.strip() != plan:
                 raise BackendContractError("account_status", "active subscription plan is required")
-            canonical_plan = "pro" if plan in {"pro", "chatgptpro"} else plan
+            canonical_plan = {
+                "chatgptplus": "plus",
+                "chatgptpro": "pro",
+            }.get(plan, plan)
             active.append((canonical_plan, expires_at, len(features)))
         elif is_active is False:
             saw_inactive = True
+        else:
+            saw_unknown = True
 
     if not active:
-        return None, False if saw_inactive else None, None, 0
+        known_inactive = saw_inactive and not saw_unknown
+        return None, False if known_inactive else None, None, 0
 
     plans = {plan for plan, _expires_at, _features_count in active}
     if len(plans) != 1:

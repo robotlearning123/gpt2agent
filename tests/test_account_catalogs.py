@@ -131,6 +131,40 @@ def test_account_status_uses_richest_equivalent_active_account(reverse: bool) ->
     assert result["features_count"] == 3
 
 
+@pytest.mark.parametrize("reverse", (False, True))
+def test_account_status_treats_plus_aliases_as_equivalent(reverse: bool) -> None:
+    entries = [
+        (
+            "first-plus",
+            {
+                "entitlement": {
+                    "subscription_plan": "plus",
+                    "has_active_subscription": True,
+                },
+                "features": ["voice"],
+            },
+        ),
+        (
+            "second-plus-alias",
+            {
+                "entitlement": {
+                    "subscription_plan": "chatgptplus",
+                    "has_active_subscription": True,
+                },
+                "features": ["voice", "deep-research"],
+            },
+        ),
+    ]
+    if reverse:
+        entries.reverse()
+
+    result = account.normalize_account_status({}, {"accounts": dict(entries)})
+
+    assert result["subscription"] == "plus"
+    assert result["has_active_subscription"] is True
+    assert result["features_count"] == 2
+
+
 def test_account_status_rejects_conflicting_active_plans() -> None:
     check = {
         "accounts": {
@@ -153,6 +187,59 @@ def test_account_status_rejects_conflicting_active_plans() -> None:
 
     with pytest.raises(BackendContractError, match="conflicting active plans"):
         account.normalize_account_status({}, check)
+
+
+@pytest.mark.parametrize("plan", ("", "   ", " pro "))
+def test_account_status_rejects_unusable_active_plan(plan: str) -> None:
+    check = {
+        "accounts": {
+            "active": {
+                "entitlement": {
+                    "subscription_plan": plan,
+                    "has_active_subscription": True,
+                },
+                "features": [],
+            }
+        }
+    }
+
+    with pytest.raises(BackendContractError, match="active subscription plan"):
+        account.normalize_account_status({}, check)
+
+
+@pytest.mark.parametrize("reverse", (False, True))
+def test_account_status_preserves_unknown_mixed_with_inactive(reverse: bool) -> None:
+    entries = [
+        (
+            "inactive",
+            {
+                "entitlement": {
+                    "subscription_plan": "plus",
+                    "has_active_subscription": False,
+                },
+                "features": [],
+            },
+        ),
+        (
+            "unknown",
+            {
+                "entitlement": {
+                    "subscription_plan": "pro",
+                    "has_active_subscription": None,
+                },
+                "features": [],
+            },
+        ),
+    ]
+    if reverse:
+        entries.reverse()
+
+    result = account.normalize_account_status({}, {"accounts": dict(entries)})
+
+    assert result["subscription"] is None
+    assert result["has_active_subscription"] is None
+    assert result["expires_at"] is None
+    assert result["features_count"] == 0
 
 
 def test_account_status_does_not_report_stale_inactive_entitlement() -> None:
