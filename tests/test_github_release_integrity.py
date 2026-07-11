@@ -32,7 +32,7 @@ CREATE_APP_TOKEN = (
 )
 EXACT_RELEASE_ACTION = (
     "robotlearning123/gpt2agent/.github/actions/publish-exact-github-release@"
-    "bd9ab5412145ee2b1026e07d0c48b4fd2704315c"
+    "15f56b2c16c5923e81df9428c69256237a004c20"
 )
 TAG_OBJECT = "1" * 40
 COMMIT = "2" * 40
