@@ -18,20 +18,47 @@ mode = sys.argv[1] if len(sys.argv) > 1 else "vp"
 offer = sys.stdin.read()
 tok = json.load(open(os.path.expanduser("~/.codex/auth.json")))["tokens"]["access_token"]
 url = f"https://chatgpt.com/realtime/{mode}?dcid=0"
-r = requests.post(
-    url,
-    data=offer,
-    headers={
-        "Authorization": f"Bearer {tok}",
-        "Content-Type": "application/sdp",
-        "Origin": "https://chatgpt.com",
-        "Referer": "https://chatgpt.com/",
-    },
-    impersonate="chrome124",
-    timeout=30,
-)
-sys.stderr.write(f"[sdp_exchange] HTTP {r.status_code} len={len(r.text)}\n")
+base_headers = {
+    "Authorization": f"Bearer {tok}",
+    "Origin": "https://chatgpt.com",
+    "Referer": "https://chatgpt.com/",
+}
+
+if os.environ.get("FORMDATA") == "1":
+    # The real voice handshake: multipart FormData(sdp + session JSON), not raw
+    # application/sdp. (Still missing the Sentinel ProofToken header — this tests
+    # whether FormData+session alone makes the session persist.)
+    import uuid
+    from curl_cffi import CurlMime
+    session = {"voice_session_id": str(uuid.uuid4()), "protocol": "transceiver", "integrated_mode": False}
+    mp = CurlMime()
+    mp.addpart(name="sdp", data=offer.encode())
+    mp.addpart(name="session", data=json.dumps(session).encode())
+    r = requests.post(
+        url,
+        multipart=mp,
+        headers=base_headers,
+        impersonate="chrome124",
+        timeout=30,
+    )
+else:
+    r = requests.post(
+        url,
+        data=offer,
+        headers={**base_headers, "Content-Type": "application/sdp"},
+        impersonate="chrome124",
+        timeout=30,
+    )
+
+sys.stderr.write(f"[sdp_exchange] HTTP {r.status_code} len={len(r.text)} ct={r.headers.get('content-type','')}\n")
 if r.status_code not in (200, 201):
     sys.stderr.write(r.text[:400] + "\n")
     sys.exit(2)
-sys.stdout.write(r.text)
+# Answer may be raw SDP or JSON {sdp: ...}
+body = r.text
+if body.lstrip().startswith("{"):
+    try:
+        body = json.loads(body).get("sdp", body)
+    except Exception:
+        pass
+sys.stdout.write(body)

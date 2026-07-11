@@ -11,7 +11,7 @@
     "test": "node --test"
   },
   "dependencies": {
-    "puppeteer-core": "^23.0.0",
+    "puppeteer-core": "^23.11.1",
     "werift": "^0.23.0"
   }
 }
