@@ -11,6 +11,7 @@ from gpt2agent.tools._redact import redact
 
 _ROUTE = "/backend-api/settings/voices"
 _CONTRACT_ERROR = "voice catalog contract changed"
+_MAX_VOICES = 128
 
 
 def _fail_contract() -> None:
@@ -35,7 +36,7 @@ def _normalize_catalog(data: object) -> list[dict[str, Any]]:
         _fail_contract()
 
     raw_voices = data.get("voices")
-    if not isinstance(raw_voices, list):
+    if not isinstance(raw_voices, list) or len(raw_voices) > _MAX_VOICES:
         _fail_contract()
 
     normalized: list[dict[str, Any]] = []

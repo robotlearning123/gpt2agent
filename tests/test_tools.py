@@ -1,6 +1,6 @@
 """Unit tests for the MCP tool layer — no network.
 
-Round-2 coverage: the 25-tool handler surface (the product's actual value) had
+Round-2 coverage: the 26-tool handler surface (the product's actual value) had
 zero direct unit tests. These exercise every `tools/*.py` handler through its
 real `register(mcp, client, conv=None)` signature using a recording FakeMCP +
 FakeClient, and the server.py SSE closures via FastMCP's tool manager with a
@@ -238,6 +238,30 @@ def test_list_voices_empty_catalog_is_not_contract_drift() -> None:
         "voices": [],
     }})
     assert _run(_reg(voice, client).tools["list_voices"]) == []
+
+
+def test_list_voices_accepts_catalog_at_documented_bound() -> None:
+    items = [_voice_item(f"voice-{index}") for index in range(128)]
+    client = FakeClient(routes={"/backend-api/settings/voices": {
+        "selected": "voice-0",
+        "voices": items,
+    }})
+
+    out = _run(_reg(voice, client).tools["list_voices"])
+
+    assert len(out) == 128
+    assert out[0]["selected"] is True
+
+
+def test_list_voices_rejects_catalog_above_documented_bound() -> None:
+    items = [_voice_item(f"voice-{index}") for index in range(129)]
+    client = FakeClient(routes={"/backend-api/settings/voices": {
+        "selected": "voice-0",
+        "voices": items,
+    }})
+
+    with pytest.raises(RuntimeError, match="^voice catalog contract changed$"):
+        _run(_reg(voice, client).tools["list_voices"])
 
 
 @pytest.mark.parametrize(
