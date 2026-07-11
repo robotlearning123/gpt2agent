@@ -162,6 +162,31 @@ export class ModeBExport {
     return wire;
   }
 
+  /**
+   * Enqueue an already-built speak wire (e.g. undelivered control /send_text).
+   * Does not re-record transcript text.
+   * @param {string} wire
+   */
+  enqueueWire(wire) {
+    if (typeof wire !== "string" || !wire) {
+      throw new TypeError("enqueueWire requires a non-empty wire string");
+    }
+    this._speakQueue.push(wire);
+  }
+
+  /**
+   * Remove one matching speak wire from the queue (first match). Used when
+   * that specific wire was already delivered out-of-band — must not drain
+   * unrelated pending speaks.
+   * @returns {boolean} true if a matching wire was removed
+   */
+  removeSpeakWire(wire) {
+    const i = this._speakQueue.indexOf(wire);
+    if (i < 0) return false;
+    this._speakQueue.splice(i, 1);
+    return true;
+  }
+
   /** Drain queued speak wires (caller sends them on the live datachannel). */
   drainSpeakQueue() {
     const q = this._speakQueue;

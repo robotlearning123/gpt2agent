@@ -58,6 +58,17 @@ test("ModeBExport speak path rejects empty text and queues valid speak", () => {
   assert.equal(plane.drainSpeakQueue().length, 0);
 });
 
+test("removeSpeakWire drops only the matching wire", () => {
+  const plane = new ModeBExport();
+  const a = plane.queueSpeak("keep me");
+  const b = plane.queueSpeak("remove me");
+  assert.equal(plane.removeSpeakWire(b), true);
+  const left = plane.drainSpeakQueue();
+  assert.equal(left.length, 1);
+  assert.equal(left[0], a);
+  assert.equal(plane.removeSpeakWire(b), false);
+});
+
 test("status and transcripts never expose tokens or audio fields", () => {
   const plane = new ModeBExport();
   plane.record("human", "hi");

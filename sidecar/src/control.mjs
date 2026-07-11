@@ -114,22 +114,23 @@ export function createControlServer(exportPlane, opts = {}) {
         }
         let wire;
         try {
-          wire = exportPlane.queueSpeak(text);
+          // Build + record only; do NOT queue yet. If sendSpeak delivers now,
+          // queuing first and then drainSpeakQueue() would drop *other* pending
+          // wires that failed an earlier send.
+          wire = exportPlane.buildSpeakWire(text);
         } catch (err) {
           return sendJson(res, 400, {
             error: err instanceof Error ? err.message : String(err),
           });
         }
+        exportPlane.record("agent", text);
         let delivered = false;
         if (typeof sendSpeak === "function") {
           delivered = Boolean(await sendSpeak(wire));
         }
-        // If not delivered to a live dc, leave it for the next drain.
         if (!delivered) {
-          // queueSpeak already pushed; ensure wire is available via drain if needed
-        } else {
-          // Drop matching head of queue if sendSpeak consumed it outside drain.
-          exportPlane.drainSpeakQueue();
+          // Keep only this undelivered wire for a later drain — never wipe peers.
+          exportPlane.enqueueWire(wire);
         }
         return sendJson(res, 200, {
           ok: true,

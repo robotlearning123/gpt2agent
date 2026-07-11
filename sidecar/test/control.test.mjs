@@ -67,6 +67,8 @@ test("control POST /send_text queues speak wire and rejects empty", async () => 
       assert.equal(delivered.length, 1);
       const outer = JSON.parse(delivered[0]);
       assert.equal(outer.type, DATA_MESSAGE);
+      // Delivered path must leave speak queue empty (not held after send).
+      assert.equal(plane.drainSpeakQueue().length, 0);
       // Response must not include the raw wire or audio.
       assert.equal("wire" in body, false);
       assert.equal("audio" in body, false);
@@ -75,6 +77,45 @@ test("control POST /send_text queues speak wire and rejects empty", async () => 
       sendSpeak: async (wire) => {
         delivered.push(wire);
         return true;
+      },
+    },
+  );
+});
+
+test("control POST /send_text does not drop prior undelivered wires on later success", async () => {
+  // Repro from review: first sendSpeak=false queues LOST; second=true must not
+  // drainSpeakQueue() and erase LOST while only delivering the second wire.
+  let calls = 0;
+  const plane = new ModeBExport();
+  await withServer(
+    plane,
+    async (ctl) => {
+      const first = await fetch(`${ctl.url}/send_text`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: "first undelivered" }),
+      });
+      assert.equal((await first.json()).delivered, false);
+      assert.equal(plane.status().speakQueueLength, 1);
+
+      const second = await fetch(`${ctl.url}/send_text`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: "second delivered" }),
+      });
+      assert.equal((await second.json()).delivered, true);
+
+      // Prior undelivered speak must still be waiting — not wiped by success path.
+      assert.equal(plane.status().speakQueueLength, 1);
+      const remaining = plane.drainSpeakQueue();
+      assert.equal(remaining.length, 1);
+      const inner = JSON.parse(JSON.parse(remaining[0]).data);
+      assert.equal(inner.response.instructions, "first undelivered");
+    },
+    {
+      sendSpeak: async () => {
+        calls += 1;
+        return calls >= 2; // fail first, succeed second
       },
     },
   );
