@@ -9,12 +9,16 @@ import json
 import re
 from typing import TYPE_CHECKING, Any, Mapping
 
-from curl_cffi import CurlOpt
 from curl_cffi.requests import AsyncSession
 
 from gpt2agent._vendored import pow as _pow
 from gpt2agent._vendored import turnstile as _turn
-from gpt2agent.backend import _BoundedResponseBody, _is_filesize_exceeded
+from gpt2agent.backend import (
+    _BoundedResponseBody,
+    _account_session_options,
+    _disable_tls_key_logging,
+    _is_filesize_exceeded,
+)
 from gpt2agent.errors import BackendContractError, BackendHTTPError, backend_http_error
 
 if TYPE_CHECKING:
@@ -145,13 +149,10 @@ class SentinelGate:
         url = "https://chatgpt.com/backend-api/sentinel/chat-requirements"
 
         body = _BoundedResponseBody(_MAX_JSON_BYTES)
-        async with AsyncSession(
-            impersonate="chrome131",
-            verify=True,
-            curl_options={CurlOpt.MAXFILESIZE_LARGE: _MAX_JSON_BYTES},
-        ) as s:
+        async with AsyncSession(**_account_session_options(_MAX_JSON_BYTES)) as s:
             response_oversized = False
             network_failed = False
+            _disable_tls_key_logging()
             try:
                 r = await s.post(
                     url,

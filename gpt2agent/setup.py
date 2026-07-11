@@ -188,8 +188,8 @@ def write_mcp_config(plan: str) -> None:
 
     chat_model = "gpt-5-5-pro" if plan == "pro" else "gpt-5-3"
     cfg = f"""[server]
-# Loopback only: the HTTP transport is unauthenticated and proxies your full
-# ChatGPT account. Version 0.0.12 refuses every non-loopback host.
+# Retained for config compatibility. Version 0.0.12 supports stdio only and
+# does not bind these values.
 host = "127.0.0.1"
 port = {MCP_PORT}
 

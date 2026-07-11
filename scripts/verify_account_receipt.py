@@ -707,12 +707,28 @@ def _require_artifact_digest(value: Any) -> str:
 def _git_output(checkout: Path, *args: str) -> str:
     try:
         result = subprocess.run(
-            ["git", *args],
+            [
+                "/usr/bin/git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                *args,
+            ],
             cwd=checkout,
             check=False,
             capture_output=True,
             text=True,
             timeout=30,
+            env={
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_SYSTEM": "/dev/null",
+                "GIT_TERMINAL_PROMPT": "0",
+                "HOME": "/nonexistent",
+                "LC_ALL": "C",
+                "PATH": "/usr/bin:/bin",
+            },
         )
     except (OSError, subprocess.SubprocessError):
         raise ReceiptError("checkout Git inspection failed") from None
@@ -754,6 +770,9 @@ def verify_checkout(
     )
     if status:
         raise ReceiptError("checkout must be clean")
+    index_entries = _git_output(resolved, "ls-files", "-v", "-z").split("\x00")
+    if any(entry and not entry.startswith("H ") for entry in index_entries):
+        raise ReceiptError("checkout index contains hidden tracked state")
     actual_commit = _git_output(resolved, "rev-parse", "HEAD")
     actual_tree = _git_output(resolved, "rev-parse", "HEAD^{tree}")
     if actual_commit != commit or actual_tree != tree:

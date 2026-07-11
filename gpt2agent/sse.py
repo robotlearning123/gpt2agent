@@ -13,10 +13,15 @@ from copy import deepcopy
 from typing import AsyncIterator, Mapping
 from uuid import uuid4
 
-from curl_cffi import CurlOpt
 from curl_cffi.requests import AsyncSession
 
-from gpt2agent.backend import BackendClient, _BASE, _is_filesize_exceeded
+from gpt2agent.backend import (
+    BackendClient,
+    _BASE,
+    _account_session_options,
+    _disable_tls_key_logging,
+    _is_filesize_exceeded,
+)
 from gpt2agent.errors import BackendContractError, BackendHTTPError, backend_http_error
 from gpt2agent.message_visibility import is_user_visible_message
 from gpt2agent.sentinel import SentinelGate  # noqa: F401  (used in stream)
@@ -657,6 +662,7 @@ async def _post_account_stream(session, url: str, route: str, **kwargs):
     """Issue one stream POST and normalize network failures without body data."""
     response_oversized = False
     network_failed = False
+    _disable_tls_key_logging()
     try:
         kwargs["allow_redirects"] = False
         response = await session.post(url, **kwargs)
@@ -674,11 +680,7 @@ async def _post_account_stream(session, url: str, route: str, **kwargs):
 
 def _stream_session() -> AsyncSession:
     """Build an account stream session with libcurl's native size ceiling."""
-    return AsyncSession(
-        impersonate="chrome131",
-        verify=True,
-        curl_options={CurlOpt.MAXFILESIZE_LARGE: _MAX_SSE_STREAM_BYTES},
-    )
+    return AsyncSession(**_account_session_options(_MAX_SSE_STREAM_BYTES))
 
 
 async def _bounded_sse_lines(response, *, route: str) -> AsyncIterator[str]:

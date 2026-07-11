@@ -53,8 +53,8 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
   and Codex task creation now return bounded allowlisted projections rather
   than opaque private-backend objects. Malformed backend-generated file IDs are
   classified as changed contracts before any URL is built.
-- Plain `gpt2agent run` now defaults to stdio. Streamable HTTP requires the
-  explicit launch command `gpt2agent run --http --port 9000`.
+- Plain `gpt2agent run` now defaults to stdio. Version 0.0.12 disables HTTP;
+  the legacy launch flag fails before constructing the account server.
 
 ### Security
 
@@ -71,9 +71,9 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
   override, fails fast when saturated, and applies route-local 429 cooldowns
   with Retry-After capped at 60 seconds. Direct SSE/Sentinel streams remain
   separately bounded by endpoint timeouts and serial heavy-DR guidance.
-- Streamable HTTP is strictly loopback-only and uses the MCP SDK's native Host
-  and Origin protection against DNS rebinding. The former unauthenticated remote
-  bypass is gone.
+- Network transport is disabled because loopback TCP cannot isolate the account
+  from other local users or processes. Legacy HTTP launch and URL-install paths
+  fail closed before server construction or configuration writes.
 - The former raw SSE/poll dump is gone. Setting its legacy environment variable
   fails before account access and writes no file.
 - Capability probes share one auth snapshot, a 90-second budget enforced by
@@ -163,10 +163,9 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
 - Remove `GPT2AGENT_ALLOW_REMOTE` and `GPT2AGENT_RAW_DUMP` from current launch
   scripts. Both legacy variables now fail closed; the first cannot enable a
   non-loopback bind and the second cannot create diagnostic files.
-- Use stdio for local MCP clients. Streamable HTTP remains available only on a
-  loopback host and has no remote override. Existing HTTP service units that
-  used plain `gpt2agent run` must add `--http`; Claude Code HTTP installation
-  only registers the URL and does not start or supervise the server.
+- Use stdio for local MCP clients. Remove existing HTTP service units and rerun
+  `gpt2agent install` to restore a spawned stdio entry. Network support requires
+  request authentication or an equivalent per-user boundary.
 - Deep Research automation should consume `report.md` plus `status.txt`, not
   `events.jsonl` or `meta.json`.
 - Voice remains outside 0.0.12. A bounded read-only voice catalog is planned for

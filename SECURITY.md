@@ -22,10 +22,11 @@ not bugs:
 - **ToS / account risk.** Using this likely violates the OpenAI Terms of Service;
   automated traffic can get an account rate-limited, challenged, or banned. Use an
   account you can afford to lose.
-- **Unauthenticated HTTP transport.** The HTTP transport has no auth and exposes
-  the whole account. It is strictly loopback-only, has no remote override, and
-  uses the MCP SDK's native Host and Origin validation against DNS rebinding.
-  Prefer the stdio transport.
+- **Network transport is disabled in 0.0.12.** Loopback TCP cannot isolate a
+  full account from other users and processes on the same machine. The legacy
+  HTTP flag and URL installer fail closed; use stdio. Any future network
+  transport must authenticate every request with a per-launch secret or an
+  equivalent per-user boundary.
 - **Limited output redaction.** Returned text masks emails, phone numbers,
   common provider tokens, label-aware credential assignments,
   credential-bearing database URLs, and PEM private keys, but names, addresses,
@@ -53,7 +54,7 @@ not bugs:
   bypass disabled; without them, do not tag or publish.
 
 In-scope reports we want to hear about: token/secret leakage in logs or errors,
-ways to bypass loopback or Host/Origin transport checks, injection that makes a
+ways to expose a network transport or cross the stdio process boundary, injection that makes a
 tool act on attacker-controlled data, unsafe file/permission handling, or a
 capability/resource adapter that returns account content outside its allowlist.
 

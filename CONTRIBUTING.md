@@ -64,7 +64,7 @@ account or network request.
   request-local token snapshots, Sentinel challenges, bounded REST responses,
   process-wide ordinary REST/JSON concurrency, and route-local cooldowns.
 - `ConversationClient` (sse.py): async SSE streaming. Handles `/backend-api/conversation` and `/backend-api/f/conversation` for chat, DR, agent mode, image gen, code interpreter, canvas.
-- `server.py`: FastMCP registration and loopback-only transport policy. Creates `BackendClient` + `ConversationClient` singletons.
+- `server.py`: FastMCP registration and stdio-only transport policy. Creates `BackendClient` + `ConversationClient` singletons.
 - `tools/`: 15 registration modules exposing 26 of the 32 MCP tools. REST-backed handlers
   are async and offload the synchronous `BackendClient` through the shared
   tool backend helper.

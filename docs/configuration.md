@@ -10,8 +10,7 @@ Optional. Searched in this order (first found wins):
 
 ```toml
 [server]
-# Loopback only. The HTTP transport is UNAUTHENTICATED and proxies your full
-# ChatGPT account. Non-loopback binds are always refused.
+# Retained for config compatibility. Version 0.0.12 uses stdio and does not bind.
 host = "127.0.0.1"
 port = 9000
 
@@ -26,8 +25,7 @@ catalog. Optional `thinking_effort` values must appear in that model's
 `thinking_efforts`; leaving the value unset preserves the model default. Work
 models from `list_work_models` remain a separate namespace.
 
-CLI flags override the file. To launch HTTP explicitly on the configured
-loopback host: `gpt2agent run --http --port 9001`.
+The host and port fields are inert under the supported stdio transport.
 
 ## Environment variables
 
@@ -45,10 +43,9 @@ older service definition.
 - **stdio** (default, recommended): local, not network-exposed. Plain
   `gpt2agent run` uses stdio, and this is what `gpt2agent install` wires by
   default for every client.
-- **streamable-http** (`gpt2agent run --http --port 9000`): unauthenticated;
-  loopback by contract with no remote override. Native MCP Host and Origin
-  checks protect the local endpoint from non-loopback DNS rebinding. See the
-  README **Security & risk** section.
+- **Network transport:** disabled in 0.0.12 because loopback TCP cannot isolate
+  a full account from other local users or processes. Legacy launch and install
+  requests fail before server construction or configuration writes.
 
 Ordinary REST/JSON backend requests share the process limit. A 429 activates a
 cooldown only for the normalized route that returned it; valid `Retry-After`

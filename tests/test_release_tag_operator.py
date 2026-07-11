@@ -59,6 +59,10 @@ def _make_harness(tmp_path: Path) -> tuple[list[str], dict[str, str], list[str]]
     printf 'python-ci token=%s\n' "${GH_TOKEN-unset}" >> "$EVENT_LOG"
     if [ "${FAKE_MODE-}" = ci-fail ]; then exit 19; fi
     ;;
+  *verify_pypi_artifacts.py*)
+    printf 'python-pypi token=%s\n' "${GH_TOKEN-unset}" >> "$EVENT_LOG"
+    if [ "${FAKE_MODE-}" = pypi-fail ]; then exit 26; fi
+    ;;
   *audit_release_governance.py*)
     printf 'python-governance token=%s\n' "${GH_TOKEN-unset}" >> "$EVENT_LOG"
     if [ "${FAKE_MODE-}" = governance-fail ]; then exit 20; fi
@@ -182,6 +186,7 @@ esac
     receipt.write_text("{}\n", encoding="utf-8")
     policy = tmp_path / "reviewed-policy.json"
     policy.write_text("{}\n", encoding="utf-8")
+    irreversible_state = tmp_path / "irreversible-state"
     command = [
         str(COORDINATOR),
         "--python",
@@ -200,8 +205,12 @@ esac
         str(receipt),
         "--receipt-sha256",
         RECEIPT_SHA256,
+        "--irreversible-state-file",
+        str(irreversible_state),
         "--repository",
         "robotlearning123/gpt2agent",
+        "--version",
+        "0.0.12",
         "--tag",
         "v0.0.12",
         "--commit",
@@ -246,11 +255,14 @@ def _run_harness(
     token_timeout: str | None = None,
     terminate_at_prompt: bool = False,
     omit_policy: bool = False,
+    version: str | None = None,
 ) -> tuple[list[str], dict[str, str], list[str]]:
     command, environment, logs = _make_harness(tmp_path)
     event_log, poison_log, mode_file = map(Path, logs)
     mode_file.write_text(mode + "\n", encoding="utf-8")
     environment["FAKE_MODE"] = mode
+    if version is not None:
+        command[command.index("--version") + 1] = version
     if token_timeout is not None:
         environment["GPT2AGENT_RELEASE_TOKEN_TIMEOUT_SECONDS"] = token_timeout
     if omit_policy:
@@ -302,7 +314,7 @@ def test_coordinator_closes_governance_action_and_tag_sequence(tmp_path: Path) -
 
     assert result["returncode"] == "0", result["stderr"]
     significant = [event for event in events if not event.startswith(("gh-env", "git-env"))]
-    assert significant[:11] == [
+    assert significant[:12] == [
         "python-tools token=unset",
         "python-governance token=unset",
         "gh-auth token=unset",
@@ -311,6 +323,7 @@ def test_coordinator_closes_governance_action_and_tag_sequence(tmp_path: Path) -
         f"python-governance token={OPERATOR_TOKEN}",
         "python-prepare token=unset",
         f"gh-absence token={APP_TOKEN}",
+        "python-pypi token=unset",
         f"gh-tag token={APP_TOKEN}",
         f"gh-ref token={APP_TOKEN}",
         f"gh-readback token={APP_TOKEN}",
@@ -322,6 +335,9 @@ def test_coordinator_closes_governance_action_and_tag_sequence(tmp_path: Path) -
         event for event in events if event.startswith(("python-", "git-env"))
     )
     assert poison == []
+    assert (tmp_path / "irreversible-state").read_text(encoding="utf-8") == (
+        f"attempted refs/tags/v0.0.12 object={TAG_OBJECT_SHA} commit={COMMIT}\n"
+    )
 
 
 def test_app_token_calls_ignore_path_and_ambient_gh_or_git_environment(tmp_path: Path) -> None:
@@ -352,6 +368,7 @@ def test_app_token_calls_ignore_path_and_ambient_gh_or_git_environment(tmp_path:
         "action-redirect",
         "action-auth-fail",
         "existing",
+        "pypi-fail",
     ),
 )
 def test_pre_mutation_failures_never_create_a_tag_ref(
@@ -363,12 +380,20 @@ def test_pre_mutation_failures_never_create_a_tag_ref(
     assert result["returncode"] != "0"
     assert not any(event.startswith("gh-tag") for event in events)
     assert not any(event.startswith("gh-ref") for event in events)
+    assert not (tmp_path / "irreversible-state").exists()
     if mode.startswith("action-"):
         assert not any(event.startswith("python-ci") for event in events)
 
 
 def test_reviewed_governance_policy_is_mandatory(tmp_path: Path) -> None:
     events, result, _ = _run_harness(tmp_path, omit_policy=True)
+
+    assert result["returncode"] == "2"
+    assert events == []
+
+
+def test_distribution_version_must_match_the_release_tag(tmp_path: Path) -> None:
+    events, result, _ = _run_harness(tmp_path, version="9.9.9")
 
     assert result["returncode"] == "2"
     assert events == []
@@ -401,6 +426,7 @@ def test_post_ref_absence_or_mismatch_emits_irreversible_recovery_error(
     assert any(event.startswith("gh-ref") for event in events)
     assert any(event.startswith("git-fetch") for event in events)
     assert "IRREVERSIBLE POST-REF STATE" in result["stderr"]
+    assert (tmp_path / "irreversible-state").is_file()
     rendered = "\n".join(events + [result["stdout"], result["stderr"]])
     assert "update-ref refs/tags" not in rendered
     assert "git push" not in rendered
@@ -444,6 +470,7 @@ def test_coordinator_source_never_updates_or_deletes_a_remote_ref() -> None:
     )
     action_pin = source.index("scripts/verify_remote_action_pin.py")
     prepare = source.index('verify_account_receipt.py" prepare-tag')
+    pypi = source.index("scripts/verify_pypi_artifacts.py")
     tag_post = source.index('"repos/$REPOSITORY/git/tags"')
     ref_post = source.index('"repos/$REPOSITORY/git/refs"')
     fetch = source.index("fetch --no-tags --no-write-fetch-head")
@@ -454,6 +481,7 @@ def test_coordinator_source_never_updates_or_deletes_a_remote_ref() -> None:
         < final_ci
         < governance
         < prepare
+        < pypi
         < tag_post
         < ref_post
         < fetch
@@ -463,6 +491,28 @@ def test_coordinator_source_never_updates_or_deletes_a_remote_ref() -> None:
     assert "git tag" not in source
     assert "--method DELETE" not in source
     assert "--method PATCH" not in source
+
+
+def test_coordinator_ignores_bash_startup_environment(tmp_path: Path) -> None:
+    marker = tmp_path / "bash-env-ran"
+    bash_env = tmp_path / "bash-env"
+    bash_env.write_text(
+        f": > {shlex.quote(str(marker))}\n",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["BASH_ENV"] = str(bash_env)
+
+    result = subprocess.run(
+        [str(COORDINATOR)],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize("timeout", ("", "0", "901", "-1", "1.5", "not-a-number"))
@@ -493,4 +543,5 @@ def test_signal_after_ref_attempt_reports_irreversible_state_and_cleans_scratch(
     assert result["returncode"] == "130"
     assert any(event.startswith("gh-ref") for event in events)
     assert "IRREVERSIBLE POST-REF STATE" in result["stderr"]
+    assert (tmp_path / "irreversible-state").is_file()
     assert list(tmp_path.glob("gpt2agent-release-tag.*")) == []

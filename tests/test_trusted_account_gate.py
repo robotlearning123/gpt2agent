@@ -240,7 +240,7 @@ def test_create_gate_never_executes_or_imports_candidate_artifacts(
     def guarded_run(argv, *args, **options):
         command = tuple(str(value) for value in argv)
         commands.append(command)
-        assert command[0] == "git"
+        assert command[0] == "/usr/bin/git"
         return original_run(argv, *args, **options)
 
     monkeypatch.setattr(builtins, "__import__", guarded_import)
@@ -253,7 +253,7 @@ def test_create_gate_never_executes_or_imports_candidate_artifacts(
 
     assert len(digest) == 64
     assert output.is_file()
-    assert commands and all(command[0] == "git" for command in commands)
+    assert commands and all(command[0] == "/usr/bin/git" for command in commands)
     assert all(name != "gpt2agent" and not name.startswith("gpt2agent.") for name in imported)
 
 
@@ -915,7 +915,7 @@ def test_bearer_verifier_has_no_candidate_import_or_execution_boundary() -> None
     command = subprocess_calls[0].args[0]
     assert isinstance(command, ast.List)
     assert isinstance(command.elts[0], ast.Constant)
-    assert command.elts[0].value == "git"
+    assert command.elts[0].value == "/usr/bin/git"
     assert not any(
         isinstance(node, ast.Call)
         and (

@@ -2,8 +2,7 @@
 
 Tests include:
   * `_log_redact.redact_error` — bare Bearer, named token fields, cookies, query tokens.
-  * `server._http_bind_decision` — HTTP is always loopback-only.
-  * Native MCP transport security — Host and Origin DNS-rebinding checks.
+  * `server._http_bind_decision` — unauthenticated HTTP is disabled.
   * `sse._dr_report_from_widget_state` — author-role gate, prefix-must-start,
     and in-progress drafts rejected (DR-report spoofing/premature-done guards).
   * `_poll_dr_completion` requests the hidden-widget-state query flags.
@@ -18,9 +17,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from mcp.server.transport_security import TransportSecurityMiddleware
-from starlette.requests import Request
-
 from gpt2agent import server as server_mod
 from gpt2agent import sse as sse_mod
 from gpt2agent._log_redact import redact_error
@@ -200,10 +196,10 @@ def test_image_result_rejects_oversized_asset_list_and_numeric_values() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_bind_loopback_is_ok() -> None:
-    assert _http_bind_decision("127.0.0.1", False) == "ok-loopback"
-    assert _http_bind_decision("localhost", False) == "ok-loopback"
-    assert _http_bind_decision("::1", False) == "ok-loopback"
+def test_bind_loopback_is_refused_without_per_user_authentication() -> None:
+    assert _http_bind_decision("127.0.0.1", False) == "refuse"
+    assert _http_bind_decision("localhost", False) == "refuse"
+    assert _http_bind_decision("::1", False) == "refuse"
 
 
 def test_bind_non_loopback_refused_without_optin() -> None:
@@ -285,10 +281,9 @@ def test_cli_defaults_to_stdio(monkeypatch: pytest.MonkeyPatch, argv: list[str])
     assert mcp.transports == ["stdio"]
 
 
-def test_cli_http_transport_requires_explicit_flag(
+def test_cli_http_transport_is_disabled_before_server_construction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    mcp = _RecordingMCP()
     monkeypatch.setattr(sys, "argv", ["gpt2agent", "run", "--http"])
     monkeypatch.setattr(
         server_mod,
@@ -298,12 +293,14 @@ def test_cli_http_transport_requires_explicit_flag(
             "models": {"chat": "gpt-5-3"},
         },
     )
-    monkeypatch.setattr(server_mod, "build_server", lambda _cfg: mcp)
+    monkeypatch.setattr(
+        server_mod,
+        "build_server",
+        lambda _cfg: pytest.fail("disabled HTTP must not construct the account server"),
+    )
 
-    server_mod.main()
-
-    assert mcp.transports == ["streamable-http"]
-
+    with pytest.raises(SystemExit, match="HTTP transport is disabled"):
+        server_mod.main()
 
 def test_cli_stdio_ignores_legacy_non_loopback_http_host(
     monkeypatch: pytest.MonkeyPatch,
@@ -342,71 +339,41 @@ def test_current_config_guidance_never_recommends_removed_remote_bypass() -> Non
     assert "GPT2AGENT_ALLOW_REMOTE" not in guidance
 
 
-def _transport_security_response(headers: dict[str, str]):
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0"},
-        "http_version": "1.1",
-        "method": "GET",
-        "scheme": "http",
-        "path": "/mcp",
-        "raw_path": b"/mcp",
-        "query_string": b"",
-        "headers": [
-            (name.lower().encode("ascii"), value.encode("ascii"))
-            for name, value in headers.items()
-        ],
-        "client": ("127.0.0.1", 50000),
-        "server": ("127.0.0.1", 9000),
-    }
-    middleware = TransportSecurityMiddleware(
-        server_mod._transport_security_settings()
+def test_active_repository_surfaces_never_recommend_disabled_http() -> None:
+    root = Path(".")
+    historical_prefixes = (
+        Path("docs/superpowers"),
+        Path("tests"),
     )
-    return asyncio.run(middleware.validate_request(Request(scope)))
-
-
-def test_native_transport_security_rejects_non_loopback_host() -> None:
-    response = _transport_security_response({"Host": "attacker.example:9000"})
-    assert response is not None
-    assert response.status_code == 421
-
-
-def test_native_transport_security_rejects_non_loopback_origin() -> None:
-    response = _transport_security_response(
-        {
-            "Host": "127.0.0.1:9000",
-            "Origin": "https://attacker.example",
-        }
+    historical_files = {Path("CHANGELOG.md"), Path("QA_REPORT.html")}
+    text_suffixes = {".html", ".md", ".py", ".sh", ".toml"}
+    forbidden = (
+        "gpt2agent run --http",
+        "--transport http",
+        "streamable-http",
+        "Streamable HTTP",
+        "streamable HTTP",
+        "streamable-HTTP",
+        "loopback-only HTTP",
+        "loopback-only transport",
     )
-    assert response is not None
-    assert response.status_code == 403
+    violations: list[str] = []
 
+    for path in root.rglob("*"):
+        relative = path.relative_to(root)
+        if (
+            not path.is_file()
+            or path.suffix not in text_suffixes
+            or relative in historical_files
+            or any(relative.is_relative_to(prefix) for prefix in historical_prefixes)
+        ):
+            continue
+        text = path.read_text(encoding="utf-8")
+        for phrase in forbidden:
+            if phrase in text:
+                violations.append(f"{relative}: {phrase}")
 
-def test_native_transport_security_accepts_loopback_origin_on_other_port() -> None:
-    assert (
-        _transport_security_response(
-            {
-                "Host": "localhost:9000",
-                "Origin": "http://127.0.0.1:43123",
-            }
-        )
-        is None
-    )
-
-
-def test_native_transport_security_rejects_https_origin_for_plain_http() -> None:
-    response = _transport_security_response(
-        {
-            "Host": "localhost:9000",
-            "Origin": "https://localhost:43123",
-        }
-    )
-    assert response is not None
-    assert response.status_code == 403
-
-
-def test_native_transport_security_accepts_absent_origin() -> None:
-    assert _transport_security_response({"Host": "127.0.0.1:9000"}) is None
+    assert violations == []
 
 
 # --------------------------------------------------------------------------- #

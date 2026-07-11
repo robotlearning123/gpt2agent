@@ -255,6 +255,8 @@ def test_main_ci_validates_the_fresh_runtime_without_account_auth() -> None:
     assert "OPENAI_API_KEY" not in step
     assert "CHATGPT_ACCESS_TOKEN" not in step
     assert "GH_TOKEN" not in step
+    assert "/usr/bin/env -i" in step
+    assert "/bin/bash -p scripts/bootstrap_account_gate.sh" in step
 
 
 def test_main_ci_pins_the_reviewed_setup_python_patch() -> None:
@@ -343,6 +345,53 @@ def test_bootstrap_uses_isolated_hash_locked_commands_in_order(tmp_path: Path) -
         runtime_index
     ]
     assert result.stdout == f"{venv}/lib/python3.12/site-packages\n"
+
+
+def test_bootstrap_ignores_ambient_path_before_trusting_runtime(tmp_path: Path) -> None:
+    python, _log = _pretrusted_interpreter_double(tmp_path)
+    parent = _private_parent(tmp_path)
+    venv = parent / "venv"
+    attacker = tmp_path / "attacker-bin"
+    attacker.mkdir(mode=0o700)
+    marker = tmp_path / "ambient-command-used"
+    bash_env = tmp_path / "attacker-bash-env"
+    bash_env.write_text(
+        f": > {shlex.quote(str(marker))}\nexit 91\n",
+        encoding="utf-8",
+    )
+    fake = (
+        "#!/bin/sh\n"
+        f": > {shlex.quote(str(marker))}\n"
+        "exit 91\n"
+    )
+    for command in (
+        "bash",
+        "chmod",
+        "cp",
+        "dirname",
+        "env",
+        "id",
+        "mkdir",
+        "mktemp",
+        "realpath",
+        "rm",
+        "sha256sum",
+        "stat",
+    ):
+        _write_executable(attacker / command, fake)
+
+    result = _run_bootstrap(
+        python,
+        venv,
+        extra_env={
+            "BASH_ENV": str(bash_env),
+            "PATH": f"{attacker}:/usr/bin:/bin",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists()
+    assert venv.is_dir()
 
 
 @pytest.mark.parametrize(

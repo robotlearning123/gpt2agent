@@ -5,7 +5,6 @@
 #   curl -fsSL https://raw.githubusercontent.com/robotlearning123/gpt2agent/main/install.sh | bash
 #   ./install.sh                                          # from a checkout
 #   ./install.sh --client claude-code                     # install for one client only
-#   ./install.sh --transport http --port 9000             # use HTTP transport
 #   ./install.sh --no-skill                               # skip the deep-research skill
 #   ./install.sh --no-register                            # install package only; skip client wiring
 #   ./install.sh --source <path-or-git-url>               # install from a local path or git URL
@@ -46,6 +45,11 @@ while [[ $# -gt 0 ]]; do
     *) err "Unknown option: $1"; exit 2 ;;
   esac
 done
+
+if [[ $TRANSPORT != "stdio" ]]; then
+  err "HTTP transport is disabled because loopback TCP cannot isolate your ChatGPT account; use stdio."
+  exit 2
+fi
 
 h1 "gpt2agent installer"
 
@@ -144,7 +148,7 @@ fi
 # --- 5. register with clients ----------------------------------------------
 
 if [[ $REGISTER -eq 1 ]]; then
-  ARGS=(install --client "$CLIENT" --transport "$TRANSPORT" --http-port "$PORT")
+  ARGS=(install --client "$CLIENT" --transport "$TRANSPORT")
   if [[ -n "$SKILL_FLAG" ]]; then ARGS+=("$SKILL_FLAG"); fi
   gpt2agent "${ARGS[@]}"
 else

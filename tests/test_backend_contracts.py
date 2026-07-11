@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -338,9 +340,105 @@ def test_backend_aborts_oversize_body_in_native_content_callback(
 def test_backend_sets_native_curl_filesize_limit(
     client: backend_mod.BackendClient,
 ) -> None:
+    ca_bundle = backend_mod._certifi_ca_bundle()
+    assert client._session.init_kwargs["verify"] == ca_bundle
+    assert client._session.init_kwargs["trust_env"] is False
     assert client._session.init_kwargs["curl_options"] == {
-        CurlOpt.MAXFILESIZE_LARGE: 4 * 1024 * 1024
+        CurlOpt.PROXY: "",
+        CurlOpt.CAINFO: ca_bundle,
+        CurlOpt.MAXFILESIZE_LARGE: 4 * 1024 * 1024,
     }
+
+
+def test_backend_session_closes_ambient_proxy_ca_and_tls_keylog(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ca_bundle = tmp_path / "reviewed-ca.pem"
+    ca_bundle.write_text("synthetic reviewed CA\n", encoding="utf-8")
+    malicious_ca = tmp_path / "malicious-ca.pem"
+    keylog = tmp_path / "tls-secrets.log"
+    monkeypatch.setattr(backend_mod.certifi, "where", lambda: str(ca_bundle))
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", str(malicious_ca))
+    monkeypatch.setenv("CURL_CA_BUNDLE", str(malicious_ca))
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+    monkeypatch.setenv("SSLKEYLOGFILE", str(keylog))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _write_auth(tmp_path, "TOKEN_A")
+    monkeypatch.setattr(backend_mod.requests, "Session", _Session)
+
+    client = backend_mod.BackendClient()
+
+    assert client._session.init_kwargs["verify"] == str(ca_bundle)
+    assert client._session.init_kwargs["trust_env"] is False
+    assert client._session.init_kwargs["curl_options"][CurlOpt.PROXY] == ""
+    assert client._session.init_kwargs["curl_options"][CurlOpt.CAINFO] == str(ca_bundle)
+    assert "SSLKEYLOGFILE" not in os.environ
+    assert not keylog.exists()
+
+
+def test_real_curl_session_bypasses_ambient_loopback_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = {"target": 0, "proxy": 0}
+
+    class TargetHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            observed["target"] += 1
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *_: Any) -> None:
+            pass
+
+    class ProxyHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            observed["proxy"] += 1
+            self.send_response(502)
+            self.end_headers()
+
+        def log_message(self, *_: Any) -> None:
+            pass
+
+    target = ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler)
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), ProxyHandler)
+    target_thread = threading.Thread(target=target.serve_forever, daemon=True)
+    proxy_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+    target_thread.start()
+    proxy_thread.start()
+    proxy_url = f"http://127.0.0.1:{proxy.server_port}"
+    for name in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ):
+        monkeypatch.setenv(name, proxy_url)
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+
+    session = None
+    try:
+        session = backend_mod.requests.Session(
+            **backend_mod._account_session_options(1024)
+        )
+        response = session.get(f"http://127.0.0.1:{target.server_port}/", timeout=5)
+        assert response.status_code == 200
+    finally:
+        if session is not None:
+            session.close()
+        target.shutdown()
+        proxy.shutdown()
+        target.server_close()
+        proxy.server_close()
+        target_thread.join(timeout=5)
+        proxy_thread.join(timeout=5)
+
+    assert observed == {"target": 1, "proxy": 0}
 
 
 @pytest.mark.parametrize("method", ["get", "post"])
@@ -565,7 +663,14 @@ def test_sentinel_aborts_oversize_body_in_native_content_callback(
     with pytest.raises(BackendContractError, match="response exceeds"):
         asyncio.run(sentinel_mod.SentinelGate(_Backend()).get_tokens())  # type: ignore[arg-type]
 
-    assert observed["init"]["curl_options"] == {CurlOpt.MAXFILESIZE_LARGE: 8}
+    ca_bundle = backend_mod._certifi_ca_bundle()
+    assert observed["init"]["verify"] == ca_bundle
+    assert observed["init"]["trust_env"] is False
+    assert observed["init"]["curl_options"] == {
+        CurlOpt.PROXY: "",
+        CurlOpt.CAINFO: ca_bundle,
+        CurlOpt.MAXFILESIZE_LARGE: 8,
+    }
     assert callable(observed["request"]["content_callback"])
 
 
@@ -762,8 +867,13 @@ def test_stream_session_sets_native_curl_filesize_limit(
     monkeypatch.setattr(sse_mod, "AsyncSession", _AsyncSession)
 
     assert isinstance(sse_mod._stream_session(), _AsyncSession)
+    ca_bundle = backend_mod._certifi_ca_bundle()
+    assert observed["verify"] == ca_bundle
+    assert observed["trust_env"] is False
     assert observed["curl_options"] == {
-        CurlOpt.MAXFILESIZE_LARGE: sse_mod._MAX_SSE_STREAM_BYTES
+        CurlOpt.PROXY: "",
+        CurlOpt.CAINFO: ca_bundle,
+        CurlOpt.MAXFILESIZE_LARGE: sse_mod._MAX_SSE_STREAM_BYTES,
     }
 
 

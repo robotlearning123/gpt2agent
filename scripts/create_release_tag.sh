@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -p
 # Create one annotated release tag from a freshly revalidated account receipt.
 
 set -euo pipefail
@@ -10,7 +10,8 @@ usage() {
   printf '%s\n' \
     'usage: create_release_tag.sh --python PATH --gh PATH --git PATH' \
     '       --governance-policy PATH --checkout PATH --dist PATH' \
-    '       --receipt PATH --receipt-sha256 HEX --repository OWNER/REPO' \
+    '       --receipt PATH --receipt-sha256 HEX --irreversible-state-file PATH' \
+    '       --repository OWNER/REPO --version PACKAGE_VERSION' \
     '       --tag vX.Y.Z --commit HEX --tree HEX --ci-run-id N' \
     '       --ci-run-attempt N --ci-artifact-id N --ci-artifact-digest sha256:HEX' \
     '       --ci-artifact-size N --ci-artifact-expires-at UTC' >&2
@@ -25,7 +26,9 @@ CHECKOUT=
 DIST=
 RECEIPT=
 RECEIPT_SHA256=
+IRREVERSIBLE_STATE_FILE=
 REPOSITORY=
+VERSION=
 TAG=
 COMMIT=
 TREE=
@@ -46,7 +49,9 @@ while (($#)); do
     --dist) DIST=${2-}; shift 2 ;;
     --receipt) RECEIPT=${2-}; shift 2 ;;
     --receipt-sha256) RECEIPT_SHA256=${2-}; shift 2 ;;
+    --irreversible-state-file) IRREVERSIBLE_STATE_FILE=${2-}; shift 2 ;;
     --repository) REPOSITORY=${2-}; shift 2 ;;
+    --version) VERSION=${2-}; shift 2 ;;
     --tag) TAG=${2-}; shift 2 ;;
     --commit) COMMIT=${2-}; shift 2 ;;
     --tree) TREE=${2-}; shift 2 ;;
@@ -62,7 +67,7 @@ done
 
 for required in \
   VERIFIER_PYTHON GH_BIN GIT_BIN GOVERNANCE_POLICY CHECKOUT DIST RECEIPT \
-  RECEIPT_SHA256 REPOSITORY TAG COMMIT TREE CI_RUN_ID CI_RUN_ATTEMPT \
+  RECEIPT_SHA256 IRREVERSIBLE_STATE_FILE REPOSITORY VERSION TAG COMMIT TREE CI_RUN_ID CI_RUN_ATTEMPT \
   CI_ARTIFACT_ID CI_ARTIFACT_DIGEST CI_ARTIFACT_SIZE CI_ARTIFACT_EXPIRES_AT; do
   if [[ -z ${!required} ]]; then usage; fi
 done
@@ -74,10 +79,20 @@ fi
 if [[ $CHECKOUT != /* || ! -d $CHECKOUT || -L $CHECKOUT ]]; then usage; fi
 if [[ $DIST != /* || ! -d $DIST || -L $DIST ]]; then usage; fi
 if [[ $RECEIPT != /* || ! -f $RECEIPT || -L $RECEIPT ]]; then usage; fi
+if [[ $IRREVERSIBLE_STATE_FILE != /* || -e $IRREVERSIBLE_STATE_FILE || \
+  -L $IRREVERSIBLE_STATE_FILE ]]; then usage; fi
 if [[ ! $REPOSITORY =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then usage; fi
+if [[ ! $VERSION =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)((a|b|rc)[0-9]+)?$ ]]; then
+  usage
+fi
 if [[ ! $TAG =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)[0-9]+)?$ ]]; then
   usage
 fi
+EXPECTED_VERSION=${TAG#v}
+EXPECTED_VERSION=${EXPECTED_VERSION/-alpha/a}
+EXPECTED_VERSION=${EXPECTED_VERSION/-beta/b}
+EXPECTED_VERSION=${EXPECTED_VERSION/-rc/rc}
+[[ $VERSION == "$EXPECTED_VERSION" ]] || usage
 if [[ ! $COMMIT =~ ^[0-9a-f]{40}$ || ! $TREE =~ ^[0-9a-f]{40}$ ]]; then usage; fi
 if [[ ! $RECEIPT_SHA256 =~ ^[0-9a-f]{64}$ ]]; then usage; fi
 if [[ ! $CI_ARTIFACT_DIGEST =~ ^sha256:[0-9a-f]{64}$ ]]; then usage; fi
@@ -114,6 +129,10 @@ require_canonical_file "$GH_BIN"
 require_canonical_file "$GIT_BIN"
 require_canonical_file "$GOVERNANCE_POLICY"
 require_canonical_file "$RECEIPT"
+if [[ $(canonical_file "$IRREVERSIBLE_STATE_FILE") != "$IRREVERSIBLE_STATE_FILE" ]]; then
+  echo "irreversible state path is not canonical" >&2
+  exit 1
+fi
 CHECKOUT=$(canonical_directory "$CHECKOUT")
 DIST=$(canonical_directory "$DIST")
 
@@ -134,7 +153,7 @@ run_git() {
     GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
     GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0 \
     HOME=/nonexistent LC_ALL=C PATH=/usr/bin:/bin \
-    "$GIT_BIN" "$@"
+    "$GIT_BIN" -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
 }
 
 run_python_clean "$CHECKOUT/scripts/verify_release_tools.py" check \
@@ -298,6 +317,9 @@ while IFS= read -r remote_ref; do
   fi
 done <<< "$MATCHING_REFS"
 
+run_python_clean "$CHECKOUT/scripts/verify_pypi_artifacts.py" \
+  --version "$VERSION" --dist "$DIST" --require-absent
+
 if ! TAG_OBJECT_SHA=$(gh_app --method POST \
   "repos/$REPOSITORY/git/tags" --input "$TAG_REQUEST" --jq .sha); then
   echo "annotated tag object creation failed before ref mutation" >&2
@@ -309,6 +331,18 @@ if [[ ! $TAG_OBJECT_SHA =~ ^[0-9a-f]{40}$ ]]; then
 fi
 
 REF_POST_OK=0
+if ! (set -o noclobber; printf 'attempted refs/tags/%s object=%s commit=%s\n' \
+  "$TAG" "$TAG_OBJECT_SHA" "$COMMIT" >"$IRREVERSIBLE_STATE_FILE"); then
+  echo "irreversible state marker could not be created before ref mutation" >&2
+  exit 1
+fi
+/usr/bin/chmod 600 -- "$IRREVERSIBLE_STATE_FILE"
+if [[ ! -f $IRREVERSIBLE_STATE_FILE || -L $IRREVERSIBLE_STATE_FILE || \
+  $(/usr/bin/stat -c '%u:%a:%h' -- "$IRREVERSIBLE_STATE_FILE") != \
+  "$(/usr/bin/id -u):600:1" ]]; then
+  echo "irreversible state marker is invalid" >&2
+  exit 1
+fi
 REF_MUTATION_ATTEMPTED=1
 if gh_app --method POST \
   "repos/$REPOSITORY/git/refs" \

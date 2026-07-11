@@ -133,10 +133,6 @@ def _stdio_entry() -> dict[str, Any]:
     }
 
 
-def _http_entry(port: int) -> dict[str, Any]:
-    return {"type": "url", "url": f"http://localhost:{port}/mcp"}
-
-
 # ── Claude Code ────────────────────────────────────────────────────────────
 
 
@@ -153,8 +149,13 @@ def install_claude_code(
     Preserves all other fields of the existing config (the file is large and
     holds unrelated state — tips history, conversation tracking, etc.).
     """
-    if transport not in {"stdio", "http"}:
-        raise ValueError("transport must be 'stdio' or 'http'")
+    if transport == "http":
+        raise ValueError(
+            "HTTP transport is disabled because it cannot isolate the ChatGPT "
+            "account from other local users; use 'stdio'"
+        )
+    if transport != "stdio":
+        raise ValueError("transport must be 'stdio'")
 
     cfg_path = config_path or Path.home() / ".claude.json"
 
@@ -170,7 +171,7 @@ def install_claude_code(
         data = {}
 
     servers = data.setdefault("mcpServers", {})
-    entry = _stdio_entry() if transport == "stdio" else _http_entry(http_port)
+    entry = _stdio_entry()
     prior = servers.get(server_name)
     servers[server_name] = entry
 
@@ -698,8 +699,15 @@ def run_install(
     dry_run: bool = False,
 ) -> int:
     """Run the install flow for the chosen client(s)."""
-    if transport not in {"stdio", "http"}:
-        _err("transport must be 'stdio' or 'http'")
+    if transport == "http":
+        _err(
+            "HTTP transport is disabled because it cannot isolate the ChatGPT "
+            "account from other local users; use stdio."
+        )
+        _info("No configuration files were changed.")
+        return 1
+    if transport != "stdio":
+        _err("transport must be 'stdio'")
         _info("No configuration files were changed.")
         return 1
 
@@ -717,20 +725,6 @@ def run_install(
         _info(f"detected: {', '.join(targets)}")
     else:
         targets = [client]
-
-    # URL registration is a Claude Code-only contract. Other supported hosts
-    # are configured as spawned stdio subprocesses; accepting --transport http
-    # for them used to silently write stdio entries. Preflight the complete
-    # target set so an auto-detected mixed install cannot be partially applied.
-    if transport == "http":
-        unsupported = [target for target in targets if target != "claude-code"]
-        if unsupported:
-            _err(
-                "HTTP registration is supported only for Claude Code; "
-                f"unsupported detected target(s): {', '.join(unsupported)}."
-            )
-            _info("No configuration files were changed.")
-            return 1
 
     failures = 0
     for target in targets:
@@ -765,16 +759,9 @@ def run_install(
 
     if not dry_run:
         _h1("Next steps")
-        if transport == "http":
-            print(
-                "  • Start and keep the MCP server running separately: "
-                f"gpt2agent run --http --port {http_port}"
-            )
-            print("  • Restart Claude Code after the HTTP server is available")
-        else:
-            if "claude-code" in targets:
-                print("  • Restart Claude Code so it spawns the new MCP subprocess")
-            if "codex" in targets:
-                print("  • Codex will spawn gpt2agent on next run; nothing else to do")
-            print("  • Try:  gpt2agent run --stdio  # (manual stdio smoke test)")
+        if "claude-code" in targets:
+            print("  • Restart Claude Code so it spawns the new MCP subprocess")
+        if "codex" in targets:
+            print("  • Codex will spawn gpt2agent on next run; nothing else to do")
+        print("  • Try:  gpt2agent run --stdio  # (manual stdio smoke test)")
     return 0

@@ -584,6 +584,12 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
     migration = (PROJECT_ROOT / "docs" / "migration-0.0.12.md").read_text(encoding="utf-8")
     contributing = (PROJECT_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    account_operator = (PROJECT_ROOT / "scripts" / "run_account_release.sh").read_text(
+        encoding="utf-8"
+    )
+    receipt_operator = (
+        PROJECT_ROOT / "scripts" / "audit_retained_receipt.sh"
+    ).read_text(encoding="utf-8")
     readme_flat = re.sub(r"\s+", " ", readme)
 
     assert "name: Required checks" in ci
@@ -676,42 +682,48 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     )
     assert action_pin is not None
     assert "release-id: ${{ needs.github-release-draft.outputs.release_id }}" in release
-    assert 'GH_BIN=/usr/bin/gh' in readme
-    assert 'GIT_BIN=/usr/bin/git' in readme
-    assert '"$GH_BIN" pr view "$PR_NUMBER" --json mergeCommit,state' in readme
-    assert "```bash\nset -euo pipefail\nset +x" in readme
-    assert '"$GIT_BIN" fetch --no-tags origin +main:refs/remotes/origin/main' in readme
+    assert "scripts/run_account_release.sh" in readme
+    assert "scripts/audit_retained_receipt.sh" in readme
+    assert "--trusted-python-archive" in readme
+    assert "--trusted-python-base" not in readme
+    assert 'GH_BIN=' in account_operator
+    assert 'GIT_BIN=' in account_operator
+    assert 'run_gh pr view "$PR_NUMBER" --repo "$REPOSITORY"' in account_operator
+    assert account_operator.startswith("#!/bin/bash -p\n")
+    assert "exec /usr/bin/env -i" in account_operator
+    assert 'fetch --no-tags --no-write-fetch-head' in account_operator
     assert "\ngit switch main\n" not in readme
     assert "git pull --ff-only origin main" not in readme
-    assert '"$GIT_BIN" merge-base --is-ancestor "$RELEASE_SHA" origin/main' in readme
-    assert "scripts/bootstrap_account_gate.sh" in readme
-    assert "/usr/bin/python3.12" not in readme
+    assert 'merge-base --is-ancestor' in account_operator
+    assert '"$RELEASE_SHA" refs/release-verification/main' in account_operator
+    assert "scripts/bootstrap_account_gate.sh" in account_operator
+    assert "/usr/bin/python3.12" in account_operator
     assert "CPython 3.12.13 for Linux x86_64" in readme
-    assert "GPT2AGENT_TRUSTED_PYTHON_SHA256" in readme
-    assert '--python-sha256 "$GPT2AGENT_TRUSTED_PYTHON_SHA256"' in readme
-    assert "pinned actions/setup-python action" in readme
-    assert "3.12.13-27650778726" in readme
-    assert "ce7d511228f095b5ea1ad5568543388870f5964688303f9ddc24ba06c336bfba" in readme
-    assert "edcdaf07e49bb241cbccb0f18fdb2c8f2e6e1be36a583fce9fc703894d814238" in readme
+    assert "GPT2AGENT_TRUSTED_PYTHON_ARCHIVE" in readme
+    assert "python-build-standalone" in readme
+    assert "20260510" in readme
+    assert "e7332b4b4bb85006deb48d251c786a04c14de104c9b3a006b33457a4a604b8bc" in readme
+    assert "f7014f68e3c8f180811740735cf1dd5c28be6cff84db11d0ced2a8cd039670a0" in readme
+    assert "74e93975be819af02939878b97bafb7aa7961adfa31ef7c47845d25e2b88fc07" in readme
     assert "CPython 3.12.13 for Linux x86_64" in migration
-    assert "reviewed artifact checksum" in migration
-    assert '"$VERIFIER_PYTHON" -I -S -B' in readme
-    assert "scripts/verify_main_ci.py" in readme
-    assert '--commit "$RELEASE_SHA"' in readme
-    assert "--ignored=matching --ignore-submodules=none" in readme_flat
-    assert '"$GIT_BIN" switch --detach "$RELEASE_SHA"' in readme
-    assert "trap cleanup_release_runtime EXIT" in readme
-    assert 'rm -rf -- "$RUNTIME_ROOT"' in readme
-    assert "scripts/verify_account_receipt.py create" in readme
-    assert '--trusted-site-packages "$SITE_PACKAGES"' in readme
-    assert "scripts/verify_account_receipt.py verify" in readme
-    assert "hashlib.sha256" in readme
-    assert "scripts/create_release_tag.sh" in readme
+    assert "GPT2AGENT_TRUSTED_PYTHON_ARCHIVE" in migration
+    assert '"$VERIFIER_PYTHON" -I -S -B' in account_operator
+    assert "scripts/verify_main_ci.py" in account_operator
+    assert '--commit "$RELEASE_SHA"' in account_operator
+    assert "--ignored=matching --ignore-submodules=none" in account_operator
+    assert "worktree add --detach" in account_operator
+    assert "trap cleanup_release_runtime EXIT" in account_operator
+    assert 'rm -rf -- "$RUNTIME_ROOT"' in account_operator
+    assert "scripts/verify_account_receipt.py\" create" in account_operator
+    assert '--trusted-site-packages "$SITE_PACKAGES"' in account_operator
+    assert "scripts/verify_account_receipt.py\" verify" in account_operator
+    assert "hashlib.sha256" in account_operator
+    assert "scripts/create_release_tag.sh" in account_operator
     for expected in (
         '--python "$VERIFIER_PYTHON"',
         '--gh "$GH_BIN"',
         '--git "$GIT_BIN"',
-        '--governance-policy "$GPT2AGENT_RELEASE_GOVERNANCE_POLICY"',
+        '--governance-policy "$GOVERNANCE_POLICY"',
         '--receipt-sha256 "$RECEIPT_SHA256"',
         '--commit "$COMMIT"',
         '--tree "$TREE"',
@@ -722,18 +734,19 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
         '--ci-artifact-size "$CI_ARTIFACT_SIZE"',
         '--ci-artifact-expires-at "$CI_ARTIFACT_EXPIRES_AT"',
     ):
-        assert expected in readme
-    assert readme.index("scripts/bootstrap_account_gate.sh") < readme.index(
-        "scripts/verify_account_receipt.py create"
-    ) < readme.index("scripts/create_release_tag.sh")
-    assert "TAG_MESSAGE=" not in readme
-    assert "GPT2AGENT_RELEASE_APP_TOKEN:?" not in readme
-    assert 'GH_TOKEN="$GPT2AGENT_RELEASE_APP_TOKEN"' not in readme
+        assert expected in account_operator
+    assert account_operator.index("scripts/bootstrap_account_gate.sh") < account_operator.index(
+        "scripts/verify_account_receipt.py\" create"
+    ) < account_operator.index("scripts/create_release_tag.sh")
+    assert "TAG_MESSAGE=" not in account_operator
+    assert "GPT2AGENT_RELEASE_APP_TOKEN:?" not in account_operator
+    assert 'GH_TOKEN="$GPT2AGENT_RELEASE_APP_TOKEN"' not in account_operator
     assert 'git tag -a "$TAG" "$RELEASE_SHA"' not in readme
     assert 'git push origin "refs/tags/$TAG"' not in readme
-    assert "release_tag_metadata.py" in readme
-    assert "verify-tag-object" in readme
-    assert '"$GIT_BIN" update-ref -d "$AUDIT_REF"' in readme
+    assert "release_tag_metadata.py" in receipt_operator
+    assert "verify-tag-object" in receipt_operator
+    assert "verify-tag-object --tag-object-file" not in readme
+    assert "fetch --no-tags --no-write-fetch-head" in receipt_operator
     assert "release-settings-read" in readme
     assert "GPT2AGENT_RELEASE_SETTINGS_APP_CLIENT_ID" in readme
     assert "GPT2AGENT_RELEASE_SETTINGS_APP_PRIVATE_KEY" in readme

@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Mapping
 
+import certifi
 from curl_cffi import CurlECode, CurlOpt, requests
 
 from gpt2agent.errors import (
@@ -29,6 +30,38 @@ _DEFAULT_GET_TIMEOUT_SECONDS = 20.0
 _MIN_GET_TIMEOUT_SECONDS = 0.1
 _REQUEST_POLICY = RequestPolicy()
 _CURL_WRITEFUNC_ERROR = 0xFFFFFFFF
+
+
+def _disable_tls_key_logging() -> None:
+    """Prevent inherited debug settings from exporting account TLS secrets."""
+    os.environ.pop("SSLKEYLOGFILE", None)
+
+
+def _certifi_ca_bundle() -> str:
+    """Return the dependency-owned CA bundle without consulting CA env vars."""
+    try:
+        path = Path(certifi.where()).resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise RuntimeError("the certifi CA bundle is unavailable") from None
+    if not path.is_file():
+        raise RuntimeError("the certifi CA bundle is unavailable")
+    return str(path)
+
+
+def _account_session_options(maximum_bytes: int) -> dict[str, Any]:
+    """Build the closed curl_cffi policy shared by all account sessions."""
+    _disable_tls_key_logging()
+    ca_bundle = _certifi_ca_bundle()
+    return {
+        "impersonate": "chrome131",
+        "verify": ca_bundle,
+        "trust_env": False,
+        "curl_options": {
+            CurlOpt.PROXY: "",
+            CurlOpt.CAINFO: ca_bundle,
+            CurlOpt.MAXFILESIZE_LARGE: maximum_bytes,
+        },
+    }
 
 
 class _BoundedResponseBody:
@@ -152,11 +185,7 @@ class BackendClient:
         # Keep TLS fingerprint + User-Agent aligned across backend / sentinel /
         # conversation streams. Cloudflare's bot manager cross-checks them and
         # will 403 mixed fingerprints.
-        self._session = requests.Session(
-            impersonate="chrome131",
-            verify=True,
-            curl_options={CurlOpt.MAXFILESIZE_LARGE: _MAX_JSON_BYTES},
-        )
+        self._session = requests.Session(**_account_session_options(_MAX_JSON_BYTES))
         self._session.headers.update(
             {
                 "User-Agent": _CHROME_131_UA,
@@ -325,6 +354,7 @@ class BackendClient:
             body = _BoundedResponseBody(_MAX_JSON_BYTES)
             response_oversized = False
             network_failed = False
+            _disable_tls_key_logging()
             try:
                 request_kwargs: dict[str, Any] = {
                     "headers": headers,
@@ -387,6 +417,7 @@ class BackendClient:
             body = _BoundedResponseBody(_MAX_JSON_BYTES)
             response_oversized = False
             network_failed = False
+            _disable_tls_key_logging()
             try:
                 request_kwargs: dict[str, Any] = {
                     "headers": headers,
