@@ -373,7 +373,10 @@ def _validate_tar_payload(stream: BinaryIO) -> None:
 
 def _validate_tar_framing(stream: BinaryIO) -> BinaryIO:
     """Return a rewound anonymous snapshot of the exact validated tar payload."""
-    snapshot = tempfile.TemporaryFile(mode="w+b")
+    try:
+        snapshot = tempfile.TemporaryFile(mode="w+b")
+    except OSError as exc:
+        raise SdistNormalizationError("sdist tar snapshot could not be created") from exc
     try:
         stream.seek(0)
         with gzip.GzipFile(fileobj=stream, mode="rb") as expanded:

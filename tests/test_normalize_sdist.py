@@ -524,6 +524,27 @@ def test_tarfile_reads_the_validated_snapshot_when_source_changes(
     assert not list(tmp_path.glob(f".{sdist.name}.*.tmp"))
 
 
+def test_normalization_reports_snapshot_creation_failure_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    sdist = tmp_path / f"{ROOT}.tar.gz"
+    _write_custom_sdist(sdist, _required_entries())
+    original = sdist.read_bytes()
+
+    def fail_snapshot(*_args: object, **_kwargs: object) -> None:
+        raise OSError("simulated anonymous snapshot failure")
+
+    monkeypatch.setattr(module.tempfile, "TemporaryFile", fail_snapshot)
+
+    with pytest.raises(module.SdistNormalizationError, match="snapshot"):
+        module.normalize_sdist(sdist, epoch=1_700_000_000)
+
+    assert sdist.read_bytes() == original
+    assert not list(tmp_path.glob(f".{sdist.name}.*.tmp"))
+
+
 def test_normalization_rejects_a_regular_file_used_as_a_parent(tmp_path: Path) -> None:
     module = _load_module()
     sdist = tmp_path / f"{ROOT}.tar.gz"
