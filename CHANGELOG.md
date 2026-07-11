@@ -39,7 +39,9 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
   `list_scheduled_tasks`; neither tool claims to enumerate the other's jobs.
 - Apps/connectors and Plugins are separate surfaces. `list_apps` accepts the
   observed string and object variants, while the two Plugin tools normalize the
-  catalog and installed-plugin envelopes independently.
+  catalog and installed-plugin envelopes independently. Every projected Plugin
+  string is secret/PII-redacted, while local pagination fingerprints bind the
+  validated pre-redaction identities so catalog changes still fail closed.
 - `list_work_models` reports Work metadata without merging Work-only identifiers
   into `list_models` or suggesting them for `chat`.
 - The bundled Deep Research runner persists only the requested `report.md` and a
@@ -123,6 +125,9 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
 - The stable `Required checks` gate now includes the full OS/Python suite,
   Ruff, ShellCheck, both MCP v1 compatibility lanes, and a wheel/sdist dry-run
   installed into clean environments.
+- The locked package lane builds twice from cleaned state, normalizes bounded
+  sdist container metadata with a dependency-free fail-closed rewriter, and
+  requires byte-identical wheel and sdist pairs before retaining the first set.
 - CI audits resolved application dependencies, the minimum supported
   `curl_cffi` release, and the hash-locked account-gate runtime for known
   vulnerabilities. A credential-free CI lane also bootstraps that runtime from
