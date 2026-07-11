@@ -335,6 +335,28 @@ def test_exact_plan_route_and_parser_fail_closed() -> None:
             == "pro"
         )
 
+    assert (
+        parse_active_pro_entitlement(
+            {
+                "accounts": {
+                    "personal": {
+                        "entitlement": {
+                            "subscription_plan": "chatgptpro",
+                            "has_active_subscription": True,
+                        }
+                    },
+                    "secondary": {
+                        "entitlement": {
+                            "subscription_plan": "pro",
+                            "has_active_subscription": True,
+                        }
+                    },
+                }
+            }
+        )
+        == "pro"
+    )
+
     rejected_entitlements = (
         {"subscription_plan": "plus", "has_active_subscription": True},
         {"subscription_plan": "free", "has_active_subscription": False},

@@ -620,7 +620,7 @@ def run_probe_sequence(
 
 
 def parse_active_pro_entitlement(value: Any) -> str:
-    """Accept exactly one unambiguous active Pro entitlement."""
+    """Accept active entitlements only when every active plan is Pro."""
     if not isinstance(value, dict):
         raise ReceiptError("authenticated account plan is invalid")
     accounts = value.get("accounts")
@@ -639,7 +639,7 @@ def parse_active_pro_entitlement(value: Any) -> str:
             raise ReceiptError("authenticated account plan is invalid")
         if active:
             active_plans.append(plan)
-    if len(active_plans) != 1 or active_plans[0] not in {"pro", "chatgptpro"}:
+    if not active_plans or any(plan not in {"pro", "chatgptpro"} for plan in active_plans):
         raise ReceiptError("authenticated account plan does not match the release gate")
     return "pro"
 
