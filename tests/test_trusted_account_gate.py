@@ -24,6 +24,16 @@ import pytest
 TOKEN_CANARY = "eyJtrusted.canary.signature"
 
 
+@pytest.fixture(autouse=True)
+def _private_security_fixture_umask():
+    """Keep Git/security fixtures deterministic under collaborative umasks."""
+    previous = os.umask(0o077)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
 def _record_digest(payload: bytes) -> str:
     digest = base64.urlsafe_b64encode(hashlib.sha256(payload).digest())
     return "sha256=" + digest.rstrip(b"=").decode("ascii")

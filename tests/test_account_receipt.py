@@ -13,6 +13,16 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _private_security_fixture_umask():
+    """Keep Git/security fixtures deterministic under collaborative umasks."""
+    previous = os.umask(0o077)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
 def test_request_policy_accepts_only_the_normative_get_allowlist() -> None:
     from scripts.verify_account_receipt import (
         ReceiptError,
