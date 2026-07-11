@@ -372,6 +372,48 @@ def test_remote_action_pin_rejects_missing_multiple_or_symbolic_local_inputs(
             "        with:\n"
             "      - uses: ./.github/actions/publish-exact-github-release\n"
         ),
+        (
+            "jobs:\n"
+            "  github-release:\n"
+            "    steps:\n"
+            "      - uses: robotlearning123/gpt2agent/.github/actions/"
+            "publish-exact-github-release@main\n"
+            "      - name: Validate and publish the exact draft\n"
+            "        uses: robotlearning123/gpt2agent/.github/actions/"
+            f"publish-exact-github-release@{ACTION_PIN}\n"
+            "        with:\n"
+        ),
+        (
+            "jobs:\n"
+            "  github-release:\n"
+            "    steps:\n"
+            "      - name: symbolic decoy\n"
+            '        "uses": robotlearning123/gpt2agent/.github/actions/'
+            "publish-exact-github-release@main\n"
+            "      - name: Validate and publish the exact draft\n"
+            "        uses: robotlearning123/gpt2agent/.github/actions/"
+            f"publish-exact-github-release@{ACTION_PIN}\n"
+            "        with:\n"
+        ),
+        (
+            "jobs:\n"
+            "  github-release:\n"
+            "    steps:\n"
+            "      - name: Validate and publish the exact draft\n"
+            "        uses: robotlearning123/gpt2agent/.github/actions/"
+            f"publish-exact-github-release@{ACTION_PIN}#attacker\n"
+            "        with:\n"
+        ),
+        (
+            "jobs:\n"
+            "  github-release:\n"
+            "    name: Publisher\x85    if: false\n"
+            "    steps:\n"
+            "      - name: Validate and publish the exact draft\n"
+            "        uses: robotlearning123/gpt2agent/.github/actions/"
+            f"publish-exact-github-release@{ACTION_PIN}\n"
+            "        with:\n"
+        ),
     ],
 )
 def test_action_pin_extractor_rejects_non_executable_or_conditional_yaml_context(

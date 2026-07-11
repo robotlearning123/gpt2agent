@@ -127,20 +127,26 @@ def _extract_pin(workflow: bytes, repository: str) -> str:
     # path: jobs -> github-release -> steps -> the named, unconditional action
     # step. Exact indentation keeps block-scalar text and unrelated mappings
     # from masquerading as an executable ``uses`` key.
-    if "\r" in source or "\t" in source or "\x00" in source:
+    if any(character in source for character in ("\r", "\t", "\x00", "\x85", "\u2028", "\u2029")):
         raise ActionVerificationError("release workflow is not canonical block YAML")
-    lines = source.split("\n")
+    # Fail closed on every second uses-like mapping for this action, including
+    # quoted keys, local paths, and uses-shaped text hidden in a block scalar.
+    # Do not count ordinary command arguments: the verify job legitimately
+    # executes this action's ``publish.py`` during its immutable-settings
+    # preflight.
     action_use_lines = [
         line
-        for line in lines
+        for line in source.split("\n")
         if _ACTION_PATH in line
-        and (
-            re.fullmatch(r"      - uses:.*", line) is not None
-            or re.fullmatch(r"        uses:.*", line) is not None
+        and re.fullmatch(
+            r"\s*(?:-\s*)?(?:uses|\"uses\"|'uses')\s*:.*",
+            line,
         )
+        is not None
     ]
     if len(action_use_lines) != 1:
         raise ActionVerificationError("release workflow must invoke the publication action once")
+    lines = source.split("\n")
 
     def significant(index: int) -> bool:
         stripped = lines[index].lstrip(" ")
@@ -244,7 +250,7 @@ def _extract_pin(workflow: bytes, repository: str) -> str:
     expected_prefix = f"{repository}/{_ACTION_PATH}@"
     uses_value = properties["uses"][0]
     uses_match = re.fullmatch(
-        rf"{re.escape(expected_prefix)}([^\s#]+)\s*(?:#.*)?",
+        rf"{re.escape(expected_prefix)}([0-9a-f]{{40}})",
         uses_value,
     )
     if uses_match is None or not _SHA_RE.fullmatch(uses_match.group(1)):
