@@ -155,6 +155,21 @@ esac
 set -euo pipefail
 EVENT_LOG={shlex.quote(str(event_log))}
 FAKE_MODE=$(/usr/bin/cat {shlex.quote(str(mode_file))})
+CHECKOUT={shlex.quote(str(tmp_path / "checkout"))}
+CHECKOUT_SELECTED=0
+CHECKOUT_PINNED=0
+arguments=("$@")
+for ((index = 0; index < ${{#arguments[@]}}; index++)); do
+  if [[ ${{arguments[index]}} = -C && ${{arguments[index + 1]-}} = "$CHECKOUT" ]]; then
+    CHECKOUT_SELECTED=1
+  fi
+  if [[ ${{arguments[index]}} = "--work-tree=$CHECKOUT" ]]; then
+    CHECKOUT_PINNED=1
+  fi
+done
+if (( CHECKOUT_SELECTED == 1 && CHECKOUT_PINNED == 0 )); then
+  printf '%s\n' 'git-checkout-unpinned' >> "$EVENT_LOG"
+fi
 printf 'git-env token=%s dir=%s worktree=%s ssh=%s path=%s global=%s nosystem=%s system=%s\n' "${{GH_TOKEN-unset}}" "${{GIT_DIR-unset}}" "${{GIT_WORK_TREE-unset}}" "${{GIT_SSH_COMMAND-unset}}" "${{PATH-unset}}" "${{GIT_CONFIG_GLOBAL-unset}}" "${{GIT_CONFIG_NOSYSTEM-unset}}" "${{GIT_CONFIG_SYSTEM-unset}}" >> "$EVENT_LOG"
 if [[ " $* " != *' -c core.fsmonitor=false '* || \
   " $* " != *' -c core.hooksPath=/dev/null '* ]]; then
@@ -170,6 +185,22 @@ case "$*" in
   *'merge-base --is-ancestor 15f56b2c16c5923e81df9428c69256237a004c20 refs/remotes/origin/main'*)
     if [ "${{FAKE_MODE-}}" = action-not-on-main ]; then exit 1; fi
     ;;
+  *'rev-parse --show-toplevel'*)
+    printf '%s\n' 'git-checkout-root' >> "$EVENT_LOG"
+    if (( CHECKOUT_PINNED == 0 )); then
+      printf '%s\n' '/attacker/worktree'
+    else
+      printf '%s\n' "$CHECKOUT"
+    fi
+    ;;
+  *'ls-files -v'*)
+    printf '%s\n' 'git-checkout-index' >> "$EVENT_LOG"
+    case "${{FAKE_MODE-}}" in
+      assume-unchanged) printf '%s\n' 'h reviewed.py' ;;
+      skip-worktree) printf '%s\n' 'S reviewed.py' ;;
+      *) printf '%s\n' 'H reviewed.py' ;;
+    esac
+    ;;
   *'rev-parse HEAD^{{tree}}'*) printf '%s\n' '{TREE}' ;;
   *'rev-parse HEAD'*)
     checks=$(/usr/bin/grep -c '^git-checkout-head$' "$EVENT_LOG" || true)
@@ -183,7 +214,8 @@ case "$*" in
   *'status --porcelain=v1'*)
     checks=$(/usr/bin/grep -c '^git-checkout-status$' "$EVENT_LOG" || true)
     printf '%s\n' 'git-checkout-status' >> "$EVENT_LOG"
-    if [ "${{FAKE_MODE-}}" = checkout-dirty ] && [ "$checks" -gt 0 ]; then
+    if [[ "${{FAKE_MODE-}}" = core-worktree-redirect && $CHECKOUT_PINNED = 1 ]] || \
+      [[ "${{FAKE_MODE-}}" = checkout-dirty && $checks -gt 0 ]]; then
       printf '%s\n' ' M reviewed.py'
     fi
     ;;
@@ -198,13 +230,6 @@ case "$*" in
   *'rev-parse refs/release-verification/'*)
     if [ "${{FAKE_MODE-}}" = mismatch ]; then printf '%s\n' '{MISMATCH_SHA}'; else printf '%s\n' '{TAG_OBJECT_SHA}'; fi
     ;;
-  *'show-ref --hash --verify refs/release-verification/'*)
-    case "${{FAKE_MODE-}}" in
-      mismatch|cleanup-race) printf '%s\n' '{MISMATCH_SHA}' ;;
-      *) printf '%s\n' '{TAG_OBJECT_SHA}' ;;
-    esac
-    ;;
-  *'update-ref -d refs/release-verification/'*) printf 'git-clean %s\n' "${{@: -2:1}}" >> "$EVENT_LOG" ;;
   *) exit 99 ;;
 esac
 """,
@@ -396,6 +421,7 @@ def test_coordinator_closes_governance_action_and_tag_sequence(tmp_path: Path) -
     assert APP_TOKEN not in "\n".join(
         event for event in events if event.startswith(("python-", "git-env"))
     )
+    assert list((tmp_path / "operator-home").glob(".gpt2agent-release-tag.*")) == []
     assert poison == []
     assert (tmp_path / "irreversible-state").read_text(encoding="utf-8") == (
         f"attempted refs/tags/v0.0.12 object={TAG_OBJECT_SHA} commit={COMMIT}\n"
@@ -425,6 +451,7 @@ def test_every_git_call_disables_executable_local_config(tmp_path: Path) -> None
 
     assert result["returncode"] == "0", result["stderr"]
     assert "git-missing-safe-config" not in events
+    assert "git-checkout-unpinned" not in events
     git_environments = [event for event in events if event.startswith("git-env")]
     assert git_environments
     assert all(
@@ -531,6 +558,22 @@ def test_checkout_identity_and_cleanliness_are_rechecked_before_ref_mutation(
     assert not any(event.startswith("gh-ref") for event in events)
 
 
+@pytest.mark.parametrize("mode", ("core-worktree-redirect", "assume-unchanged", "skip-worktree"))
+def test_checkout_redirection_and_hidden_index_flags_fail_before_mutation(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    events, result, _ = _run_harness(tmp_path, mode=mode)
+
+    assert result["returncode"] != "0"
+    assert not any(event.startswith(("python-tools", "gh-tag", "gh-ref")) for event in events)
+    if mode == "core-worktree-redirect":
+        assert "release checkout must be clean" in result["stderr"]
+        assert "git-checkout-status" in events
+    else:
+        assert "release checkout index contains hidden paths" in result["stderr"]
+
+
 @pytest.mark.parametrize("mode", ("ref-ambiguous-success", "readback-fail"))
 def test_independent_fetch_recovers_ambiguous_ref_mutation_success(
     tmp_path: Path,
@@ -578,15 +621,6 @@ def test_concurrent_coordinators_use_distinct_verification_refs(tmp_path: Path) 
         refs.extend(event.split(" ", 1)[1] for event in events if event.startswith("git-fetch "))
     assert len(refs) == 2
     assert refs[0] != refs[1]
-
-
-def test_cleanup_does_not_delete_a_verification_ref_changed_by_another_process(
-    tmp_path: Path,
-) -> None:
-    events, result, _ = _run_harness(tmp_path, mode="cleanup-race")
-
-    assert result["returncode"] == "0", result["stderr"]
-    assert not any(event.startswith("git-clean") for event in events)
 
 
 def test_coordinator_source_never_updates_or_deletes_a_remote_ref() -> None:
@@ -653,6 +687,18 @@ def test_coordinator_ignores_bash_startup_environment(tmp_path: Path) -> None:
     assert not marker.exists()
 
 
+def test_final_checkout_check_is_immediately_before_ref_post() -> None:
+    source = COORDINATOR.read_text(encoding="utf-8")
+    ref_post = source.index('if gh_app --method POST \\\n  "repos/$REPOSITORY/git/refs"')
+    final_check = source.rindex("verify_checkout_state", 0, ref_post)
+    boundary = source[final_check:ref_post]
+
+    assert source.count("\nverify_checkout_state\n") == 3
+    assert "merge-base" not in boundary
+    assert "run_git" not in boundary
+    assert "run_python" not in boundary
+
+
 @pytest.mark.parametrize("timeout", ("", "0", "901", "-1", "1.5", "not-a-number"))
 def test_coordinator_rejects_unbounded_or_malformed_token_timeout(
     tmp_path: Path,
@@ -670,7 +716,7 @@ def test_signal_during_token_prompt_removes_only_owned_scratch(tmp_path: Path) -
 
     assert result["returncode"] == "130"
     assert not any(event.startswith("python-ci") for event in events)
-    assert list(tmp_path.glob("gpt2agent-release-tag.*")) == []
+    assert list((tmp_path / "operator-home").glob(".gpt2agent-release-tag.*")) == []
 
 
 def test_signal_after_ref_attempt_reports_irreversible_state_and_cleans_scratch(
@@ -682,4 +728,4 @@ def test_signal_after_ref_attempt_reports_irreversible_state_and_cleans_scratch(
     assert any(event.startswith("gh-ref") for event in events)
     assert "IRREVERSIBLE POST-REF STATE" in result["stderr"]
     assert (tmp_path / "irreversible-state").is_file()
-    assert list(tmp_path.glob("gpt2agent-release-tag.*")) == []
+    assert list((tmp_path / "operator-home").glob(".gpt2agent-release-tag.*")) == []

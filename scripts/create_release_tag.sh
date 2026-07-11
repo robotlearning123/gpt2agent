@@ -174,16 +174,34 @@ run_git() {
     "$GIT_BIN" -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
 }
 
+run_checkout_git() {
+  run_git -C "$CHECKOUT" --work-tree="$CHECKOUT" "$@"
+}
+
 verify_checkout_state() {
-  if [[ $(run_git -C "$CHECKOUT" rev-parse HEAD) != "$COMMIT" ]]; then
+  local root index_state index_entry marker
+  root=$(run_checkout_git rev-parse --show-toplevel)
+  if [[ $root != "$CHECKOUT" ]]; then
+    echo "release checkout Git root does not match" >&2
+    exit 1
+  fi
+  if [[ $(run_checkout_git rev-parse HEAD) != "$COMMIT" ]]; then
     echo "release checkout commit does not match" >&2
     exit 1
   fi
-  if [[ $(run_git -C "$CHECKOUT" rev-parse 'HEAD^{tree}') != "$TREE" ]]; then
+  if [[ $(run_checkout_git rev-parse 'HEAD^{tree}') != "$TREE" ]]; then
     echo "release checkout tree does not match" >&2
     exit 1
   fi
-  if [[ -n $(run_git -C "$CHECKOUT" status --porcelain=v1 --untracked-files=all \
+  index_state=$(run_checkout_git ls-files -v)
+  while IFS= read -r index_entry; do
+    marker=${index_entry:0:1}
+    if [[ $marker == S || $marker == [a-z] ]]; then
+      echo "release checkout index contains hidden paths" >&2
+      exit 1
+    fi
+  done <<< "$index_state"
+  if [[ -n $(run_checkout_git status --porcelain=v1 --untracked-files=all \
     --ignored=matching --ignore-submodules=none) ]]; then
     echo "release checkout must be clean" >&2
     exit 1
@@ -393,7 +411,6 @@ fi
 
 # No checkout-owned code or mutable local input is consumed between this final
 # same-user trust-boundary recheck and the one irreversible ref POST.
-verify_checkout_state
 if ! run_git --git-dir="$MAIN_GIT_DIR" merge-base --is-ancestor \
   "$ACTION_PIN" refs/remotes/origin/main; then
   echo "reviewed publication action pin is not an ancestor of fetched origin/main" >&2
@@ -413,6 +430,7 @@ if [[ ! -f $IRREVERSIBLE_STATE_FILE || -L $IRREVERSIBLE_STATE_FILE || \
   echo "irreversible state marker is invalid" >&2
   exit 1
 fi
+verify_checkout_state
 REF_MUTATION_ATTEMPTED=1
 if gh_app --method POST \
   "repos/$REPOSITORY/git/refs" \

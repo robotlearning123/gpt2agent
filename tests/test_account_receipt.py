@@ -677,6 +677,91 @@ def test_checkout_validation_rejects_wrong_or_dirty_state_without_name_leak(
     assert secret_name not in str(caught.value)
 
 
+def test_checkout_git_inspection_ignores_hostile_path_and_fsmonitor_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.verify_account_receipt import verify_checkout
+
+    checkout, commit, tree = _create_checkout(tmp_path)
+    execution_marker = tmp_path / "hostile-git-executed"
+    fsmonitor_marker = tmp_path / "hostile-fsmonitor-executed"
+    poison_bin = tmp_path / "poison-bin"
+    poison_bin.mkdir()
+    poison_git = poison_bin / "git"
+    poison_git.write_text(
+        "#!/bin/sh\n"
+        f"/usr/bin/touch {shlex.quote(str(execution_marker))}\n"
+        'exec /usr/bin/git "$@"\n',
+        encoding="utf-8",
+    )
+    poison_git.chmod(0o700)
+    fsmonitor = tmp_path / "hostile-fsmonitor"
+    fsmonitor.write_text(
+        "#!/bin/sh\n"
+        f"/usr/bin/touch {shlex.quote(str(fsmonitor_marker))}\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    fsmonitor.chmod(0o700)
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(checkout), "config", "core.fsmonitor", str(fsmonitor)],
+        check=True,
+    )
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(checkout), "status", "--porcelain=v1"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert fsmonitor_marker.is_file()
+    fsmonitor_marker.unlink()
+    hostile_config = tmp_path / "hostile.gitconfig"
+    hostile_config.write_text(f"[core]\n\tfsmonitor = {fsmonitor}\n", encoding="utf-8")
+    monkeypatch.setenv("PATH", f"{poison_bin}:/usr/bin:/bin")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(hostile_config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "0")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(hostile_config))
+
+    assert verify_checkout(checkout, declared_commit=commit, declared_tree=tree) == (
+        commit,
+        tree,
+    )
+    assert not execution_marker.exists()
+    assert not fsmonitor_marker.exists()
+
+
+def test_checkout_git_inspection_rejects_noncanonical_git(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.verify_account_receipt as receipt_module
+
+    checkout, commit, tree = _create_checkout(tmp_path)
+    untrusted_git = tmp_path / "git"
+    untrusted_git.symlink_to("/usr/bin/git")
+    monkeypatch.setattr(receipt_module, "_GIT", untrusted_git)
+
+    with pytest.raises(receipt_module.ReceiptError, match="trusted Git executable"):
+        receipt_module.verify_checkout(
+            checkout,
+            declared_commit=commit,
+            declared_tree=tree,
+        )
+
+
+@pytest.mark.parametrize("flag", ("--assume-unchanged", "--skip-worktree"))
+def test_checkout_validation_rejects_hidden_index_flags(tmp_path: Path, flag: str) -> None:
+    from scripts.verify_account_receipt import ReceiptError, verify_checkout
+
+    checkout, commit, tree = _create_checkout(tmp_path)
+    _git(checkout, "update-index", flag, "source.py")
+    (checkout / "source.py").write_text("VALUE = 2\n", encoding="utf-8")
+
+    with pytest.raises(ReceiptError, match="clean"):
+        verify_checkout(checkout, declared_commit=commit, declared_tree=tree)
+
+
 def test_verify_receipt_invalidates_later_artifact_or_source_change(tmp_path: Path) -> None:
     from scripts.verify_account_receipt import ReceiptError, verify_receipt_file
 

@@ -42,6 +42,7 @@ _PACKAGE_VERSION = "0.0.12"
 _SCHEMA_VERSION = "4"
 _VERIFIER_NAME = "gpt2agent-account-receipt"
 _VERIFIER_VERSION = "6"
+_GIT = Path("/usr/bin/git")
 _MAX_TOKEN_BYTES = 16 * 1024
 _HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
@@ -704,31 +705,64 @@ def _require_artifact_digest(value: Any) -> str:
     return value
 
 
-def _git_output(checkout: Path, *args: str) -> str:
+def _trusted_git() -> Path:
     try:
+        resolved = _GIT.resolve(strict=True)
+        metadata = _GIT.lstat()
+    except OSError:
+        raise ReceiptError("trusted Git executable is unavailable") from None
+    if (
+        resolved != _GIT
+        or stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != 0
+        or metadata.st_mode & 0o6022
+        or not metadata.st_mode & 0o111
+    ):
+        raise ReceiptError("trusted Git executable is invalid")
+    for parent in (_GIT.parent, *_GIT.parent.parents):
+        try:
+            parent_metadata = parent.lstat()
+        except OSError:
+            raise ReceiptError("trusted Git parent path is unavailable") from None
+        if (
+            not stat.S_ISDIR(parent_metadata.st_mode)
+            or parent_metadata.st_uid != 0
+            or parent_metadata.st_mode & 0o022
+        ):
+            raise ReceiptError("trusted Git parent path is invalid")
+    return _GIT
+
+
+def _git_output(checkout: Path, *args: str) -> str:
+    environment = {
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+        "HOME": "/nonexistent",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+    }
+    try:
+        _trusted_git()
         result = subprocess.run(
             [
                 "/usr/bin/git",
                 "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
                 "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-C",
+                str(checkout),
+                f"--work-tree={checkout}",
                 *args,
             ],
-            cwd=checkout,
+            env=environment,
             check=False,
             capture_output=True,
             text=True,
             timeout=30,
-            env={
-                "GIT_CONFIG_GLOBAL": "/dev/null",
-                "GIT_CONFIG_NOSYSTEM": "1",
-                "GIT_CONFIG_SYSTEM": "/dev/null",
-                "GIT_TERMINAL_PROMPT": "0",
-                "HOME": "/nonexistent",
-                "LC_ALL": "C",
-                "PATH": "/usr/bin:/bin",
-            },
         )
     except (OSError, subprocess.SubprocessError):
         raise ReceiptError("checkout Git inspection failed") from None
@@ -760,6 +794,14 @@ def verify_checkout(
         raise ReceiptError("checkout Git root is invalid") from None
     if root != resolved:
         raise ReceiptError("checkout must name the repository root")
+    index_state = _git_output(resolved, "ls-files", "-v")
+    if any(
+        len(line) >= 2
+        and line[1] == " "
+        and (line[0] == "S" or "a" <= line[0] <= "z")
+        for line in index_state.splitlines()
+    ):
+        raise ReceiptError("checkout must be clean")
     status = _git_output(
         resolved,
         "status",
