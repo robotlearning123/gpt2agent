@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -34,6 +35,43 @@ def test_root_array_catalog_uses_deterministic_local_pagination() -> None:
     second = _run(tool, limit=2, cursor=first["cursor"])
     assert [item["id"] for item in second["items"]] == ["plugin-2", "plugin-3"]
     assert "pageToken" not in client.gets[-1]
+
+
+def _produced_local_cursor(*, offset: int = 1) -> tuple[Any, str]:
+    raw = [
+        {"id": f"plugin-{index}", "name": f"Plugin {index}"}
+        for index in range(offset + 1)
+    ]
+    tool = _tools(FakeClient(routes={"/backend-api/plugins/list": raw}))["list_plugins"]
+    cursor = _run(tool, limit=offset)["cursor"]
+    assert isinstance(cursor, str)
+    return tool, cursor
+
+
+def test_local_cursor_rejects_non_base64url_characters() -> None:
+    tool, cursor = _produced_local_cursor()
+
+    with pytest.raises(ValueError, match="valid g2a-local-v1 cursor"):
+        _run(tool, limit=1, cursor=cursor + "!")
+
+
+def test_local_cursor_rejects_explicit_base64_padding() -> None:
+    tool, cursor = _produced_local_cursor()
+
+    with pytest.raises(ValueError, match="valid g2a-local-v1 cursor"):
+        _run(tool, limit=1, cursor=cursor + "=")
+
+
+def test_local_cursor_rejects_noncanonical_base64_pad_bits() -> None:
+    tool, cursor = _produced_local_cursor(offset=10)
+    prefix, token = cursor.split(":", 1)
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    final_index = alphabet.index(token[-1])
+    assert final_index % 16 == 0
+    noncanonical = f"{prefix}:{token[:-1]}{alphabet[final_index + 1]}"
+
+    with pytest.raises(ValueError, match="valid g2a-local-v1 cursor"):
+        _run(tool, limit=10, cursor=noncanonical)
 
 
 def test_current_web_catalog_maps_only_release_version_and_backend_cursor() -> None:

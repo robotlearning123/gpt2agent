@@ -31,10 +31,12 @@ _UNSAFE_ENCODED_URL_CHARACTER_RE = re.compile(r"%(?:0[0-9a-f]|1[0-9a-f]|5c|7f)",
 
 
 def _enrichment_error_code(error: Exception) -> str:
-    """Project optional file-enrichment failures without exposing their text."""
+    """Project optional backend-produced file enrichment without error text."""
     if isinstance(error, BackendContractError):
         return error.code
     if isinstance(error, BackendHTTPError):
+        if error.code == "invalid_input":
+            return "contract_changed"
         return error.code
     return "temporarily_failed"
 
@@ -286,7 +288,8 @@ def register(mcp, client: BackendClient, conv=None) -> None:
         prepare/conduit + `/f` v1 flow. This is an undocumented ChatGPT route,
         not an official or stable API contract. The tool waits until a visible
         result is bound to this stream by the observed dispatch or a same-message
-        marker and then returns download URLs plus allowlisted asset fields.
+        marker and then returns allowlisted base asset fields. Per-asset download
+        and info enrichment is optional and uses typed status-only failures.
 
         Args:
             prompt: Description of the image to generate.
@@ -294,8 +297,9 @@ def register(mcp, client: BackendClient, conv=None) -> None:
                    Defaults to gpt-5-3.
 
         Returns:
-            Dict with: conversation_id, assets (list with asset_pointer, file_id,
-            width, height, size_bytes, download_url, file_name).
+            Dict with: conversation_id and assets (list with asset_pointer,
+            file_id, width, height, size_bytes, optional download/info fields,
+            and typed download_error/info_error statuses when enrichment fails).
         """
         if conv is None:
             from gpt2agent.sse import ConversationClient
