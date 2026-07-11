@@ -13,11 +13,16 @@ from pathlib import Path
 import pytest
 
 
-_AUTH_EXISTS = (Path.home() / ".codex" / "auth.json").exists()
+_CODEX_AUTH = (
+    Path(os.environ["CODEX_HOME"])
+    if os.environ.get("CODEX_HOME")
+    else Path.home() / ".codex"
+) / "auth.json"
+_AUTH_EXISTS = _CODEX_AUTH.exists()
 _SKIP_LIVE = os.environ.get("SKIP_LIVE", "1") == "1"
 
 
-@pytest.mark.skipif(not _AUTH_EXISTS, reason="requires ~/.codex/auth.json")
+@pytest.mark.skipif(not _AUTH_EXISTS, reason="requires the selected Codex auth.json")
 @pytest.mark.skipif(_SKIP_LIVE, reason="SKIP_LIVE=1 — set SKIP_LIVE=0 to run live")
 def test_deep_research_yields_done_event():
     """DR stream must emit at least one 'done' event with non-empty text."""
@@ -40,7 +45,7 @@ def test_deep_research_yields_done_event():
     assert done_events[-1]["text"], "final 'done' event has empty text"
 
 
-@pytest.mark.skipif(not _AUTH_EXISTS, reason="requires ~/.codex/auth.json")
+@pytest.mark.skipif(not _AUTH_EXISTS, reason="requires the selected Codex auth.json")
 @pytest.mark.skipif(_SKIP_LIVE, reason="SKIP_LIVE=1 — set SKIP_LIVE=0 to run live")
 def test_deep_research_emits_tool_events():
     """DR stream should emit at least one 'tool' event (search call)."""
@@ -67,7 +72,7 @@ def test_deep_research_emits_tool_events():
     )
 
 
-@pytest.mark.skipif(not _AUTH_EXISTS, reason="requires ~/.codex/auth.json")
+@pytest.mark.skipif(not _AUTH_EXISTS, reason="requires the selected Codex auth.json")
 @pytest.mark.skipif(_SKIP_LIVE, reason="SKIP_LIVE=1 — set SKIP_LIVE=0 to run live")
 def test_deep_research_has_content_references():
     """Completed DR response should include web source references."""

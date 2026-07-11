@@ -23,6 +23,7 @@ def test_reload_picks_up_codex_refresh(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
 
     auth = tmp_path / ".codex" / "auth.json"
     _write_auth(auth, "TOK_OLD")
@@ -48,6 +49,7 @@ def test_reload_noop_when_mtime_unchanged(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     auth = tmp_path / ".codex" / "auth.json"
     _write_auth(auth, "TOK_STABLE")
 
@@ -67,6 +69,7 @@ def test_auth_generation_detects_rotation_before_cached_metadata_is_reused(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     auth = tmp_path / ".codex" / "auth.json"
     _write_auth(auth, "TOK_ACCOUNT_A")
 
@@ -92,6 +95,7 @@ def test_auth_snapshot_pairs_generation_and_request_headers_atomically(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     auth = tmp_path / ".codex" / "auth.json"
     _write_auth(auth, "TOK_ACCOUNT_A")
 
@@ -120,6 +124,7 @@ def test_reload_tolerates_missing_file(
 ) -> None:
     """Deleted token file mid-session must not crash — keep stale bearer."""
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     auth = tmp_path / ".codex" / "auth.json"
     _write_auth(auth, "TOK_OLD")
 

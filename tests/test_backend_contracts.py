@@ -366,6 +366,7 @@ def test_backend_session_rejects_ambient_tls_keylog_before_account_io(
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
     monkeypatch.setenv("SSLKEYLOGFILE", str(keylog))
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     _write_auth(tmp_path, "TOKEN_A")
     monkeypatch.setattr(backend_mod.requests, "Session", _Session)
 
@@ -386,6 +387,7 @@ def test_backend_session_ignores_all_ambient_ca_bundle_paths(
     for name in ("SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"):
         monkeypatch.setenv(name, str(malicious_ca))
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     _write_auth(tmp_path, "TOKEN_A")
     monkeypatch.setattr(backend_mod.certifi, "where", lambda: str(ca_bundle))
     monkeypatch.setattr(backend_mod.requests, "Session", _Session)

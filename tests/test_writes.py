@@ -14,9 +14,13 @@ from pathlib import Path
 
 import pytest
 
-_AUTH = Path.home() / ".codex" / "auth.json"
+_AUTH = (
+    Path(os.environ["CODEX_HOME"])
+    if os.environ.get("CODEX_HOME")
+    else Path.home() / ".codex"
+) / "auth.json"
 _needs_auth = pytest.mark.skipif(
-    not _AUTH.exists(), reason="~/.codex/auth.json not present"
+    not _AUTH.exists(), reason="selected Codex auth.json not present"
 )
 _skip_live = pytest.mark.skipif(
     os.environ.get("SKIP_LIVE", "1") == "1",

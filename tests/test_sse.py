@@ -14,10 +14,15 @@ import pytest
 
 _SKIP_LIVE = os.environ.get("SKIP_LIVE", "1") == "1"
 _SKIP_HEAVY_DR = os.environ.get("SKIP_HEAVY_DR", "1") == "1"
+_CODEX_AUTH = (
+    Path(os.environ["CODEX_HOME"])
+    if os.environ.get("CODEX_HOME")
+    else Path.home() / ".codex"
+) / "auth.json"
 
 _NEEDS_AUTH = pytest.mark.skipif(
-    not (Path.home() / ".codex" / "auth.json").exists(),
-    reason="requires ~/.codex/auth.json",
+    not _CODEX_AUTH.exists(),
+    reason="requires the selected Codex auth.json",
 )
 
 

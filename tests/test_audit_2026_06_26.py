@@ -55,6 +55,7 @@ class _Sess:
 
 def test_backend_get_non_json_2xx_raises_clean_error(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     _mk_codex_auth(tmp_path)
     from gpt2agent import backend as be
 
@@ -68,6 +69,7 @@ def test_backend_get_non_json_2xx_raises_clean_error(tmp_path, monkeypatch):
 
 def test_backend_get_empty_2xx_returns_none(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     _mk_codex_auth(tmp_path)
     from gpt2agent import backend as be
 
@@ -78,6 +80,7 @@ def test_backend_get_empty_2xx_returns_none(tmp_path, monkeypatch):
 
 def test_backend_get_redacts_secret_in_non_json_error(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     _mk_codex_auth(tmp_path)
     from gpt2agent import backend as be
 

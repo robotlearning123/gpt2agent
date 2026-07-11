@@ -600,6 +600,7 @@ def test_install_codex_defaults_to_selected_codex_home(
 
 def test_detect_clients_with_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     assert detect_clients() == []
 
     (tmp_path / ".claude").mkdir()

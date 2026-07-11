@@ -1,18 +1,26 @@
 """Integration test: BackendClient.account_status() against live chatgpt.com.
 
-Skipped automatically when ~/.codex/auth.json is absent.
+Skipped automatically when the selected Codex auth file is absent.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 
+_CODEX_AUTH = (
+    Path(os.environ["CODEX_HOME"])
+    if os.environ.get("CODEX_HOME")
+    else Path.home() / ".codex"
+) / "auth.json"
+
+
 @pytest.mark.skipif(
-    not (Path.home() / ".codex" / "auth.json").exists(),
-    reason="~/.codex/auth.json not present",
+    not _CODEX_AUTH.exists(),
+    reason="selected Codex auth.json not present",
 )
 def test_account_status_has_subscription() -> None:
     from gpt2agent.backend import BackendClient
