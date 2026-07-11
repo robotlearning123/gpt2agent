@@ -173,7 +173,7 @@ def test_release_notes_prep_job_is_explicitly_read_only() -> None:
     text = "\n".join(job)
 
     assert _job_permissions(job) == {"actions": "read", "contents": "read"}
-    assert "    needs: [pypi-canary, verify]" in job
+    assert "    needs: [build, verify]" in job
     assert CHECKOUT in _job_actions(job)
     assert UPLOAD in _job_actions(job)
     assert "python scripts/verify_release.py" in text
@@ -188,6 +188,7 @@ def test_github_release_draft_writer_is_action_only_and_closed_to_approved_pins(
     actions = _job_actions(job)
 
     assert _job_permissions(job) == {"actions": "read", "contents": "write"}
+    assert "    needs: [build, prepare-release-notes, verify]" in job
     assert "    outputs:" in job
     assert "      release_id: ${{ steps.release.outputs.id }}" in job
     assert not any(re.match(r"^\s+(?:- )?run:", line) for line in job)
@@ -222,7 +223,7 @@ def test_github_release_publisher_is_action_only_and_binds_exact_draft_id() -> N
     text = "\n".join(job)
 
     assert _job_permissions(job) == {"actions": "read", "contents": "write"}
-    assert "    needs: [github-release-draft, verify]" in job
+    assert "    needs: [github-release-draft, pypi-canary, verify]" in job
     assert "    environment: release-settings-read" in job
     assert not any(re.match(r"^\s+(?:- )?run:", line) for line in job)
     assert not any(action.startswith("actions/checkout@") for action in _job_actions(job))
@@ -254,6 +255,16 @@ def test_github_release_publisher_is_action_only_and_binds_exact_draft_id() -> N
     )
     assert "          files:" not in text
     assert SOFTPROPS_RELEASE not in _job_actions(job)
+
+
+def test_complete_github_draft_precedes_irreversible_pypi_publication() -> None:
+    pypi = _workflow_job("pypi-publish")
+    draft = _workflow_job("github-release-draft")
+    publication = _workflow_job("github-release")
+
+    assert "    needs: [build, github-release-draft]" in pypi
+    assert "    needs: [build, prepare-release-notes, verify]" in draft
+    assert "    needs: [github-release-draft, pypi-canary, verify]" in publication
 
 
 def test_github_release_readback_job_is_read_only_and_closes_public_bytes() -> None:

@@ -160,7 +160,11 @@ REMOTE_DIR={remote_literal}
 FAKE_MODE=$(/usr/bin/cat {mode_literal})
 printf 'host=%s config=%s debug=%s token=%s path=%s\n' "${{GH_HOST-unset}}" "${{GH_CONFIG_DIR-unset}}" "${{GH_DEBUG-unset}}" "${{GH_TOKEN-unset}}" "${{PATH-unset}}" >> "$EVENT_LOG"
 endpoint=${{@: -1}}
-if [[ $endpoint == repos/*/commits/* ]]; then
+printf 'endpoint=%s\n' "$endpoint" >> "$EVENT_LOG"
+commit_endpoint=repos/robotlearning123/gpt2agent/commits/{ACTION_PIN}
+action_endpoint=repos/robotlearning123/gpt2agent/contents/.github/actions/publish-exact-github-release/action.yml?ref={ACTION_PIN}
+publish_endpoint=repos/robotlearning123/gpt2agent/contents/.github/actions/publish-exact-github-release/publish.py?ref={ACTION_PIN}
+if [[ $endpoint == "$commit_endpoint" ]]; then
   case "${{FAKE_MODE-}}" in
     unresolved) exit 22;;
     redirect)
@@ -173,6 +177,9 @@ if [[ $endpoint == repos/*/commits/* ]]; then
   printf '%s\n' 'HTTP/2.0 200 OK' 'Content-Type: application/json; charset=utf-8' '' '{{"sha":"{ACTION_PIN}"}}'
   exit 0
 fi
+if [[ $endpoint != "$action_endpoint" && $endpoint != "$publish_endpoint" ]]; then
+  exit 64
+fi
 name=${{endpoint%%[?]*}}
 name=${{name##*/}}
 printf '%s\n' 'HTTP/2.0 200 OK' 'Content-Type: application/json; charset=utf-8' ''
@@ -184,19 +191,7 @@ PY
 """,
     )
     workflow = tmp_path / "release.yml"
-    workflow.write_text(
-        "name: Release\n"
-        "jobs:\n"
-        "  github-release:\n"
-        "    runs-on: ubuntu-latest\n"
-        "    steps:\n"
-        "      - name: Validate and publish the exact draft\n"
-        "        uses: robotlearning123/gpt2agent/.github/actions/"
-        f"publish-exact-github-release@{ACTION_PIN}\n"
-        "        with:\n"
-        "          repository: example/repository\n",
-        encoding="utf-8",
-    )
+    workflow.write_bytes((PROJECT_ROOT / ".github/workflows/release.yml").read_bytes())
     environment = {
         **os.environ,
         "GH_TOKEN": "operator-token",
@@ -238,6 +233,18 @@ def test_remote_action_pin_verifies_full_sha_and_exact_bytes(tmp_path: Path) -> 
         "host=unset config=/nonexistent debug=unset token=operator-token path=/usr/bin:/bin"
         in events
     )
+    endpoints = [
+        line.removeprefix("endpoint=")
+        for line in events.splitlines()
+        if line.startswith("endpoint=")
+    ]
+    assert endpoints == [
+        f"repos/robotlearning123/gpt2agent/commits/{ACTION_PIN}",
+        "repos/robotlearning123/gpt2agent/contents/.github/actions/"
+        f"publish-exact-github-release/action.yml?ref={ACTION_PIN}",
+        "repos/robotlearning123/gpt2agent/contents/.github/actions/"
+        f"publish-exact-github-release/publish.py?ref={ACTION_PIN}",
+    ]
     assert result.stdout == ""
 
 
@@ -245,6 +252,87 @@ def test_repository_release_workflow_has_one_executable_exact_action_pin() -> No
     workflow = PROJECT_ROOT / ".github" / "workflows" / "release.yml"
 
     assert _extract_pin(workflow.read_bytes(), "robotlearning123/gpt2agent") == ACTION_PIN
+
+
+def test_action_pin_extractor_rejects_yaml_equivalent_overrides() -> None:
+    source = (PROJECT_ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+    target = "      - name: Validate and publish the exact draft\n"
+    uses = (
+        "        uses: robotlearning123/gpt2agent/.github/actions/"
+        f"publish-exact-github-release@{ACTION_PIN}\n"
+    )
+    job = "  github-release:\n"
+    cases = {
+        "flow mapping action": source.replace(
+            target,
+            "      - {uses: robotlearning123/gpt2agent/.github/actions/"
+            "publish-exact-github-release@main}\n" + target,
+            1,
+        ),
+        "explicit mapping action": source.replace(
+            target,
+            "      - ? uses\n"
+            "        : robotlearning123/gpt2agent/.github/actions/"
+            "publish-exact-github-release@main\n"
+            + target,
+            1,
+        ),
+        "escaped quoted action": source.replace(
+            target,
+            '      - "uses": "robotlearning123/gpt2agent/\\u002egithub/actions/'
+            'publish-exact-github-release@main"\n'
+            + target,
+            1,
+        ),
+        "folded action ref": source.replace(
+            target,
+            "      - uses: >\n"
+            "          robotlearning123/gpt2agent/.github/actions/"
+            "publish-exact-github-release@main\n"
+            + target,
+            1,
+        ),
+        "explicit block indentation": source.replace(
+            target,
+            "      - run: |9\n"
+            "        uses: robotlearning123/gpt2agent/.github/actions/"
+            "publish-exact-github-release@main\n"
+            + target,
+            1,
+        ),
+        "continued target ref": source.replace(uses, uses + "          attacker\n", 1),
+        "ref suffix": source.replace(
+            uses,
+            uses.removesuffix("\n") + "#attacker\n",
+            1,
+        ),
+        "quoted duplicate jobs": source + '\n"jobs":\n  decoy:\n    steps: []\n',
+        "spaced duplicate jobs": source + "\njobs :\n  decoy:\n    steps: []\n",
+        "quoted duplicate publication job": source.replace(
+            job,
+            job + '  "github-release":\n    steps: []\n',
+            1,
+        ),
+        "spaced duplicate publication job": source.replace(
+            job,
+            job + "  github-release :\n    steps: []\n",
+            1,
+        ),
+        "quoted conditional job": source.replace(
+            job,
+            job + '    "if": false\n',
+            1,
+        ),
+    }
+
+    for label, mutated in cases.items():
+        try:
+            _extract_pin(mutated.encode(), "robotlearning123/gpt2agent")
+        except ActionVerificationError:
+            continue
+        pytest.fail(f"accepted noncanonical release workflow: {label}")
 
 
 def test_remote_action_pin_fails_closed_for_unresolved_or_mismatched_remote(

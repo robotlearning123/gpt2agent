@@ -447,6 +447,14 @@ pinned CI candidate with the operator's read token, independently re-verifies th
 receipt, builds canonical tag JSON, and lets the App create only the new annotated
 tag and ref. Never substitute the operator's user token for the App token.
 
+Run the operator and retained-receipt procedures only in a dedicated
+owner-private clone whose `.git/config`, remote URL, and filesystem ancestors
+have been reviewed, with no concurrent writer. Pinning an exact Git executable
+path does not disable repository-local Git configuration. The coordinator
+therefore repeats its mutation-critical checks with scrubbed Git configuration;
+the surrounding documentation checks remain an operator trust boundary, not a
+sandbox for an untrusted checkout.
+
 ```bash
 set -euo pipefail
 set +x
@@ -458,6 +466,12 @@ ROOT=$("$GIT_BIN" rev-parse --show-toplevel)
 cd "$ROOT"
 "$GIT_BIN" fetch --no-tags origin +main:refs/remotes/origin/main
 : "${GPT2AGENT_RELEASE_GOVERNANCE_POLICY:?set this to the reviewed policy JSON}"
+case "$GPT2AGENT_RELEASE_GOVERNANCE_POLICY" in
+  (/*) ;;
+  (*) exit 1 ;;
+esac
+GPT2AGENT_RELEASE_GOVERNANCE_POLICY=$(realpath -e -- \
+  "$GPT2AGENT_RELEASE_GOVERNANCE_POLICY")
 : "${GPT2AGENT_TRUSTED_PYTHON_BASE:?set this to the canonical base extracted from the reviewed CPython 3.12.13 Linux x86_64 artifact}"
 : "${GPT2AGENT_TRUSTED_PYTHON_SHA256:?set this to the independently recorded canonical executable SHA-256}"
 case "$GPT2AGENT_TRUSTED_PYTHON_SHA256" in
@@ -546,13 +560,15 @@ VERIFIER_PYTHON="$VENV/bin/python"
 test -x "$VERIFIER_PYTHON"
 
 REPOSITORY=$("$GH_BIN" repo view --json nameWithOwner --jq .nameWithOwner)
-"$VERIFIER_PYTHON" -I -S -B scripts/audit_release_governance.py \
+GH_TOKEN="$("$GH_BIN" auth token --hostname github.com)" \
+  "$VERIFIER_PYTHON" -I -S -B scripts/audit_release_governance.py \
   --live "$REPOSITORY" \
   --policy "$GPT2AGENT_RELEASE_GOVERNANCE_POLICY" \
   --gh "$GH_BIN"
 
 CANDIDATE_JSON="$RUNTIME_ROOT/candidate.json"
-GH_TOKEN="$("$GH_BIN" auth token)" "$VERIFIER_PYTHON" -I -S -B \
+GH_TOKEN="$("$GH_BIN" auth token --hostname github.com)" \
+  "$VERIFIER_PYTHON" -I -S -B \
   scripts/verify_main_ci.py \
   --repository "$REPOSITORY" --commit "$RELEASE_SHA" \
   --print-candidate-json --attempts 180 --delay 10 >"$CANDIDATE_JSON"
@@ -580,7 +596,8 @@ DIST="$ROOT/../gpt2agent-$TAG-$COMMIT-main-ci-candidate"
 RECEIPT="$ROOT/../gpt2agent-$TAG-$COMMIT.account-receipt.json"
 test ! -e "$DIST" && test ! -L "$DIST"
 test ! -e "$RECEIPT" && test ! -L "$RECEIPT"
-GH_TOKEN="$("$GH_BIN" auth token)" "$GH_BIN" run download "$CI_RUN_ID" \
+GH_TOKEN="$("$GH_BIN" auth token --hostname github.com)" \
+  "$GH_BIN" run download "$CI_RUN_ID" \
   --repo "$REPOSITORY" --name "$CI_ARTIFACT_NAME" --dir "$DIST"
 
 CREATE_SUMMARY="$RUNTIME_ROOT/create-summary.txt"
@@ -645,14 +662,22 @@ and exact wheel/sdist hashes.
 
 The workflow never rebuilds after the account gate. It downloads the exact
 account-bound main-CI artifact by numeric ID, reconstructs its artifact-set
-digest, and publishes those same bytes to PyPI via OIDC trusted publishing. No
-pre-publication release job installs or imports the candidate or reruns
-`package_smoke.sh`; the required credential-free main-CI package job is the sole
-pre-publication packaged-artifact execution gate. After PyPI publication, a
-credential-free canary installs the public version and checks its CLIs,
-resources, and import surface. The workflow also verifies published filenames
-and hashes before creating the GitHub Release, whose initial assets include the
-distributions and `release-workflow-artifacts.json`.
+digest, and creates and validates the complete numeric-ID-bound GitHub Release
+draft before any irreversible package publication. It then publishes those same
+bytes to PyPI via OIDC trusted publishing. No pre-publication release job
+installs or imports the candidate or reruns `package_smoke.sh`; the required
+credential-free main-CI package job is the sole pre-publication packaged-artifact
+execution gate. After PyPI publication, a credential-free canary installs the
+public version and checks its CLIs, resources, and import surface. Only then does
+the workflow revalidate and publish the same GitHub draft, whose initial assets
+include the distributions and `release-workflow-artifacts.json`.
+
+GitHub and PyPI provide no cross-registry atomic transaction. A privileged
+out-of-band mutation or deletion after the complete draft check therefore makes
+the later exact-ID revalidation fail closed; it cannot roll back bytes already
+published to PyPI. This residual administrator and service-availability boundary
+requires the reviewed live controls and operator recovery policy rather than a
+claim of transactional publication.
 
 GitHub publication is pinned to the reviewed local action by its full 40-byte
 commit SHA. That action resolves or creates only the exact-tag draft, captures
@@ -688,6 +713,14 @@ publication. Run `scripts/audit_release_governance.py` with
 these reviewed, read-only GitHub checks. It exits nonzero when the closed
 identity policy or any required live control is absent.
 
+The live audit verifies the current settings-reader installation's repository
+selection, permissions, events, and environment binding through available GitHub
+GET endpoints. Those endpoints cannot prove that the App has no other installation
+under another owner, or that its private key is not reused outside the protected
+environment. The App owner must retain separately reviewed manual evidence for
+those two organization-level exclusivity claims; the machine audit must not be
+treated as proof of them.
+
 Immediately before the release App creates the immutable tag, the operator
 command re-fetches the complete pinned run artifact list, requires at least one
 hour of remaining retention, and revalidates every recorded artifact identity
@@ -717,7 +750,8 @@ test "$SOURCE_PYTHON_SHA256" = "$GPT2AGENT_TRUSTED_PYTHON_SHA256"
 read -r -p "Release tag (for example v0.0.12): " TAG
 ROOT=$("$GIT_BIN" rev-parse --show-toplevel)
 cd "$ROOT"
-case "$TAG" in (v[0-9]*.[0-9]*.[0-9]*) ;; (*) exit 1;; esac
+TAG_PATTERN='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)[1-9][0-9]*)?$'
+[[ $TAG =~ $TAG_PATTERN ]] || exit 1
 AUDIT_REF=refs/release-verification/retained-receipt
 if "$GIT_BIN" show-ref --verify --quiet "$AUDIT_REF"; then exit 1; fi
 AUDIT_HOME=$(realpath -e -- "$HOME")
@@ -762,14 +796,16 @@ test "$("$GIT_BIN" cat-file -t "$AUDIT_REF")" = tag
 COMMIT=$("$GIT_BIN" rev-parse "$AUDIT_REF^{}")
 TREE=$("$GIT_BIN" rev-parse "$AUDIT_REF^{tree}")
 RECEIPT="$ROOT/../gpt2agent-$TAG-$COMMIT.account-receipt.json"
-test -f "$RECEIPT" && test ! -L "$RECEIPT"
-test "$(stat -c '%a' "$RECEIPT")" = 600
+test "$("$GIT_BIN" rev-parse HEAD)" = "$COMMIT"
+test "$("$GIT_BIN" rev-parse 'HEAD^{tree}')" = "$TREE"
+test -z "$("$GIT_BIN" status --porcelain=v1 --untracked-files=all \
+  --ignored=matching --ignore-submodules=none)"
 
 TAG_OBJECT="$AUDIT_ROOT/tag-object"
 TAG_OUTPUT="$AUDIT_ROOT/tag-output"
-TAG_VERIFIER="$AUDIT_ROOT/release_tag_metadata.py"
+TAG_VERIFIER="$ROOT/scripts/release_tag_metadata.py"
+test -f "$TAG_VERIFIER" && test ! -L "$TAG_VERIFIER"
 "$GIT_BIN" cat-file tag "$AUDIT_REF" >"$TAG_OBJECT"
-"$GIT_BIN" show "$AUDIT_REF:scripts/release_tag_metadata.py" >"$TAG_VERIFIER"
 REPOSITORY=$("$GH_BIN" repo view --json nameWithOwner --jq .nameWithOwner)
 GITHUB_OUTPUT="$TAG_OUTPUT" "$AUDIT_PYTHON" -I -S -B "$TAG_VERIFIER" \
   verify-tag-object --tag-object-file "$TAG_OBJECT" \
@@ -780,7 +816,19 @@ TAG_RECEIPT_SHA256=$(sed -n 's/^receipt_sha256=//p' "$TAG_OUTPUT")
 test "${#TAG_RECEIPT_SHA256}" -eq 64
 case "$TAG_RECEIPT_SHA256" in (*[!0-9a-f]*|'') exit 1;; esac
 LOCAL_RECEIPT_SHA256=$("$AUDIT_PYTHON" -I -S -B -c \
-  'import hashlib,pathlib,sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' \
+  'import hashlib,os,stat,sys
+fd=os.open(sys.argv[1],os.O_RDONLY|os.O_CLOEXEC|os.O_NOFOLLOW)
+try:
+ st=os.fstat(fd)
+ assert stat.S_ISREG(st.st_mode)
+ assert st.st_uid == os.geteuid()
+ assert st.st_nlink == 1
+ assert stat.S_IMODE(st.st_mode) == 0o600
+ with os.fdopen(fd,"rb",closefd=False) as stream:
+  digest=hashlib.sha256(stream.read()).hexdigest()
+finally:
+ os.close(fd)
+print(digest)' \
   "$RECEIPT")
 test "$LOCAL_RECEIPT_SHA256" = "$TAG_RECEIPT_SHA256"
 

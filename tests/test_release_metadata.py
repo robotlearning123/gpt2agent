@@ -664,7 +664,10 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert "--require-complete --attempts 7 --delay 10" in release
     assert "name: Verify PyPI install in a clean environment" in release
     assert '"gpt2agent==$DIST_VERSION"' in release
-    assert "needs: [pypi-canary, verify]" in release
+    assert "needs: [build, verify]" in release
+    assert "needs: [build, prepare-release-notes, verify]" in release
+    assert "needs: [build, github-release-draft]" in release
+    assert "needs: [github-release-draft, pypi-canary, verify]" in release
     assert "scripts/release_evidence.py create" in release
     assert "scripts/release_evidence.py verify" in release
     assert "release-workflow-artifacts.json" in release
@@ -746,6 +749,63 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert "Re-run failed jobs" in readme_flat
     assert "Do not re-run the whole workflow" in readme_flat
     assert not re.search(r"python scripts/verify_release\.py --tag v\d+\.\d+\.\d+", readme)
+
+
+def test_release_operator_docs_close_token_policy_and_retained_receipt_boundaries() -> None:
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    migration = (PROJECT_ROOT / "docs" / "migration-0.0.12.md").read_text(
+        encoding="utf-8"
+    )
+    contributing = (PROJECT_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+
+    governance_command = re.compile(
+        r'GH_TOKEN="\$\("\$GH_BIN" auth token --hostname github\.com\)" \\\n'
+        r'\s+"\$VERIFIER_PYTHON" -I -S -B '
+        r'scripts/audit_release_governance\.py',
+    )
+    assert governance_command.search(readme)
+    for document in (contributing, migration):
+        assert 'GH_TOKEN="$(/usr/bin/gh auth token --hostname github.com)" \\' in document
+        assert '"$VERIFIER_PYTHON" -I -S -B \\' in document
+        assert "python scripts/audit_release_governance.py" not in document
+
+    assert 'case "$GPT2AGENT_RELEASE_GOVERNANCE_POLICY" in' in readme
+    assert '  (/*) ;;' in readme
+    assert re.search(
+        r"GPT2AGENT_RELEASE_GOVERNANCE_POLICY=\$\(realpath -e -- \\\n"
+        r'\s+"\$GPT2AGENT_RELEASE_GOVERNANCE_POLICY"\)',
+        readme,
+    )
+    assert "--policy /trusted/local/release-governance-policy.json" in contributing
+    assert "--policy /trusted/local/release-governance-policy.json" in migration
+
+    assert 'case "$TAG" in (v[0-9]*.[0-9]*.[0-9]*)' not in readme
+    assert (
+        "TAG_PATTERN='^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\."
+        "(0|[1-9][0-9]*)(-(alpha|beta|rc)[1-9][0-9]*)?$'" in readme
+    )
+    assert '[[ $TAG =~ $TAG_PATTERN ]] || exit 1' in readme
+    assert 'show "$AUDIT_REF:scripts/release_tag_metadata.py"' not in readme
+    assert 'TAG_VERIFIER="$ROOT/scripts/release_tag_metadata.py"' in readme
+    assert 'test "$("$GIT_BIN" rev-parse HEAD)" = "$COMMIT"' in readme
+    assert 'test "$("$GIT_BIN" rev-parse \'HEAD^{tree}\')" = "$TREE"' in readme
+    assert "os.O_NOFOLLOW" in readme
+    assert "st.st_uid == os.geteuid()" in readme
+    assert "st.st_nlink == 1" in readme
+    assert "stat.S_IMODE(st.st_mode) == 0o600" in readme
+
+    for document in (readme, contributing, migration):
+        normalized = " ".join(document.split())
+        assert "cannot prove that the App has no other installation" in normalized
+        assert "no cross-registry atomic transaction" in normalized
+
+    normalized_readme = " ".join(readme.split())
+    assert "dedicated owner-private clone" in normalized_readme
+    assert "no concurrent writer" in normalized_readme
+    assert (
+        "an exact Git executable path does not disable repository-local Git configuration"
+        in normalized_readme
+    )
 
 
 def test_release_workflow_uses_distinct_admin_read_tokens_for_immutable_settings() -> None:

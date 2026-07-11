@@ -305,7 +305,7 @@ jobs:
 
   pypi-publish:
     name: Publish to PyPI
-    needs: build
+    needs: [build, github-release-draft]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -450,7 +450,7 @@ jobs:
 
   prepare-release-notes:
     name: Prepare exact GitHub Release notes
-    needs: [pypi-canary, verify]
+    needs: [build, verify]
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -478,7 +478,7 @@ jobs:
 
   github-release-draft:
     name: Create complete GitHub Release draft
-    needs: [prepare-release-notes, verify]
+    needs: [build, prepare-release-notes, verify]
     runs-on: ubuntu-latest
     outputs:
       release_id: ${{ steps.release.outputs.id }}
@@ -515,7 +515,7 @@ jobs:
 
   github-release:
     name: Publish immutable GitHub Release
-    needs: [github-release-draft, verify]
+    needs: [github-release-draft, pypi-canary, verify]
     runs-on: ubuntu-latest
     environment: release-settings-read
     permissions:

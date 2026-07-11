@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import hashlib
 import json
 import os
 import re
@@ -23,6 +24,10 @@ _ACTION_PATH = ".github/actions/publish-exact-github-release"
 _ACTION_FILES = ("action.yml", "publish.py")
 _PUBLISH_JOB = "github-release"
 _PUBLISH_STEP_NAME = "Validate and publish the exact draft"
+_REVIEWED_WORKFLOW_SHA256 = (
+    "6adda8afd5cbe5b45be6bde58bff4088c7361f9affab880f5a3cbb8128ec9e3c"
+)
+_REVIEWED_ACTION_PIN = "15f56b2c16c5923e81df9428c69256237a004c20"
 
 
 class ActionVerificationError(ValueError):
@@ -122,140 +127,20 @@ def _extract_pin(workflow: bytes, repository: str) -> str:
     except UnicodeDecodeError:
         raise ActionVerificationError("release workflow is not UTF-8") from None
 
-    # This gate runs under stdlib-only ``python -I -S``. Rather than pretend a
-    # regex is a YAML parser, accept only the repository's canonical block-style
-    # path: jobs -> github-release -> steps -> the named, unconditional action
-    # step. Exact indentation keeps block-scalar text and unrelated mappings
-    # from masquerading as an executable ``uses`` key.
-    if any(character in source for character in ("\r", "\t", "\x00", "\x85", "\u2028", "\u2029")):
-        raise ActionVerificationError("release workflow is not canonical block YAML")
-    # Fail closed on every second uses-like mapping for this action, including
-    # quoted keys, local paths, and uses-shaped text hidden in a block scalar.
-    # Do not count ordinary command arguments: the verify job legitimately
-    # executes this action's ``publish.py`` during its immutable-settings
-    # preflight.
-    action_use_lines = [
-        line
-        for line in source.split("\n")
-        if _ACTION_PATH in line
-        and re.fullmatch(
-            r"\s*(?:-\s*)?(?:uses|\"uses\"|'uses')\s*:.*",
-            line,
-        )
-        is not None
-    ]
-    if len(action_use_lines) != 1:
-        raise ActionVerificationError("release workflow must invoke the publication action once")
-    lines = source.split("\n")
-
-    def significant(index: int) -> bool:
-        stripped = lines[index].lstrip(" ")
-        return bool(stripped) and not stripped.startswith("#")
-
-    jobs = [index for index, line in enumerate(lines) if line == "jobs:"]
-    if len(jobs) != 1:
-        raise ActionVerificationError("release workflow lacks one canonical jobs mapping")
-    jobs_start = jobs[0]
-    jobs_end = len(lines)
-    for index in range(jobs_start + 1, len(lines)):
-        if significant(index) and len(lines[index]) - len(lines[index].lstrip(" ")) == 0:
-            jobs_end = index
-            break
-
-    job_header = f"  {_PUBLISH_JOB}:"
-    job_indices = [
-        index
-        for index in range(jobs_start + 1, jobs_end)
-        if lines[index] == job_header
-    ]
-    if len(job_indices) != 1:
-        raise ActionVerificationError("release workflow lacks one canonical publication job")
-    job_start = job_indices[0]
-    job_end = jobs_end
-    for index in range(job_start + 1, jobs_end):
-        if not significant(index):
-            continue
-        indentation = len(lines[index]) - len(lines[index].lstrip(" "))
-        if indentation <= 2:
-            job_end = index
-            break
-    for index in range(job_start + 1, job_end):
-        if not significant(index):
-            continue
-        line = lines[index]
-        indentation = len(line) - len(line.lstrip(" "))
-        if indentation != 4:
-            continue
-        property_match = re.fullmatch(r"    ([a-z][a-z0-9-]*):(.*)", line)
-        if property_match is None:
-            raise ActionVerificationError("publication job is not canonical block YAML")
-        if property_match.group(1) == "if":
-            raise ActionVerificationError("publication job must be unconditional")
-
-    step_mappings = [
-        index
-        for index in range(job_start + 1, job_end)
-        if lines[index] == "    steps:"
-    ]
-    if len(step_mappings) != 1:
-        raise ActionVerificationError("publication job lacks one canonical steps sequence")
-    steps_start = step_mappings[0]
-    steps_end = job_end
-    for index in range(steps_start + 1, job_end):
-        if not significant(index):
-            continue
-        indentation = len(lines[index]) - len(lines[index].lstrip(" "))
-        if indentation <= 4:
-            steps_end = index
-            break
-
-    target_header = f"      - name: {_PUBLISH_STEP_NAME}"
-    target_indices = [
-        index
-        for index in range(steps_start + 1, steps_end)
-        if lines[index] == target_header
-    ]
-    if len(target_indices) != 1:
-        raise ActionVerificationError("release workflow lacks one canonical publication step")
-    target_start = target_indices[0]
-    target_end = steps_end
-    for index in range(target_start + 1, steps_end):
-        if not significant(index):
-            continue
-        line = lines[index]
-        indentation = len(line) - len(line.lstrip(" "))
-        if indentation <= 6:
-            target_end = index
-            break
-
-    properties: dict[str, list[str]] = {}
-    for index in range(target_start + 1, target_end):
-        line = lines[index]
-        if not significant(index):
-            continue
-        indentation = len(line) - len(line.lstrip(" "))
-        if indentation != 8:
-            continue
-        match = re.fullmatch(r"        ([a-z][a-z0-9-]*):(.*)", line)
-        if match is None:
-            raise ActionVerificationError("publication step is not canonical block YAML")
-        properties.setdefault(match.group(1), []).append(match.group(2).strip())
-    if set(properties) != {"uses", "with"} or any(
-        len(values) != 1 for values in properties.values()
+    if len(workflow) > _MAX_BYTES or hashlib.sha256(workflow).hexdigest() != (
+        _REVIEWED_WORKFLOW_SHA256
     ):
-        raise ActionVerificationError("publication step must be one unconditional action call")
-    if properties["with"] != [""]:
-        raise ActionVerificationError("publication action inputs are not a canonical mapping")
+        raise ActionVerificationError("release workflow differs from the reviewed exact bytes")
 
-    expected_prefix = f"{repository}/{_ACTION_PATH}@"
-    uses_value = properties["uses"][0]
-    uses_match = re.fullmatch(
-        rf"{re.escape(expected_prefix)}([0-9a-f]{{40}})",
-        uses_value,
+    pattern = re.compile(
+        rf"^        uses: {re.escape(repository)}/{re.escape(_ACTION_PATH)}"
+        r"@([0-9a-f]{40})$",
+        re.MULTILINE,
     )
-    if uses_match is None or not _SHA_RE.fullmatch(uses_match.group(1)):
+    references = pattern.findall(source)
+    if references != [_REVIEWED_ACTION_PIN]:
         raise ActionVerificationError("release workflow lacks one exact publication action pin")
-    return uses_match.group(1)
+    return references[0]
 
 
 def _token() -> str:

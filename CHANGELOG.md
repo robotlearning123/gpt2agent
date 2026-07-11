@@ -152,8 +152,12 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
   metadata operation, validates the complete release before and after making it
   public, requires the immutable public readback, and permits an already-public
   rerun only for an exact match. The publication action is pinned by its full
-  commit SHA. Independent restricted tag creation and protected-environment
-  approval remain required release controls.
+  commit SHA. The complete draft now precedes irreversible PyPI publication and
+  is revalidated after the public-package canary. GitHub and PyPI still have no
+  cross-registry atomic transaction, so intervening privileged mutation fails
+  closed without claiming that already-published PyPI bytes can be rolled back.
+  Independent restricted tag creation and protected-environment approval remain
+  required release controls.
 - GitHub Release notes are extracted by the same exact-version CHANGELOG parser
   used by release metadata verification, so regex-like version near-matches
   cannot select another section.

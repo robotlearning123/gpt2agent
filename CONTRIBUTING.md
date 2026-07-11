@@ -95,8 +95,13 @@ or an OS-isolated environment with no account auth. See
 Before creating a release tag, run:
 
 ```bash
-python scripts/audit_release_governance.py \
-  --live OWNER/REPO --policy POLICY.json --gh /usr/bin/gh
+: "${VERIFIER_PYTHON:?set this to the reviewed isolated CPython 3.12.13 verifier}"
+GH_TOKEN="$(/usr/bin/gh auth token --hostname github.com)" \
+  "$VERIFIER_PYTHON" -I -S -B \
+  scripts/audit_release_governance.py \
+  --live OWNER/REPO \
+  --policy /trusted/local/release-governance-policy.json \
+  --gh /usr/bin/gh
 ```
 
 Any failed check blocks tagging and publication. `POLICY.json` is a separately
@@ -137,3 +142,11 @@ Metadata read, and no subscribed events. The nonblocking
 administrator bypass, expose exactly one client-ID variable named
 `GPT2AGENT_RELEASE_SETTINGS_APP_CLIENT_ID`, and expose exactly one private-key
 secret named `GPT2AGENT_RELEASE_SETTINGS_APP_PRIVATE_KEY`.
+
+Available GitHub GET endpoints validate the current settings-reader
+installation, but cannot prove that the App has no other installation under a
+different owner or that the private key is unused elsewhere. Preserve separately
+reviewed App-owner evidence for those exclusivity claims. Likewise, GitHub and
+PyPI offer no cross-registry atomic transaction: the workflow prepares a complete
+GitHub draft before PyPI, then revalidates it after the PyPI canary, and fails
+closed on intervening mutation without pretending it can roll back PyPI.
