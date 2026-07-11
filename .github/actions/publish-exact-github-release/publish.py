@@ -39,12 +39,23 @@ REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-(?:alpha|beta|rc)[0-9]+)?\Z")
 VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:(?:a|b|rc)[0-9]+)?\Z")
 POSITIVE_INTEGER = re.compile(r"[1-9][0-9]*\Z")
+HEX_SHA1 = re.compile(r"[0-9a-f]{40}\Z")
 RELEASE_API_PATH = re.compile(
     r"/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/[1-9][0-9]*"
     r"(?:/assets\?per_page=100)?\Z"
 )
 SETTINGS_API_PATH = re.compile(
     r"/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/immutable-releases\Z"
+)
+TAG_REF_API_PATH = re.compile(
+    r"/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/git/ref/tags/"
+    r"v[0-9]+\.[0-9]+\.[0-9]+(?:-(?:alpha|beta|rc)[0-9]+)?\Z"
+)
+TAG_OBJECT_API_PATH = re.compile(
+    r"/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/git/tags/[0-9a-f]{40}\Z"
+)
+COMMIT_OBJECT_API_PATH = re.compile(
+    r"/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/git/commits/[0-9a-f]{40}\Z"
 )
 
 
@@ -74,6 +85,10 @@ def _require_positive_int(value: object, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{label} must be a positive integer")
     return value
+
+
+def _require_sha1(value: str, label: str) -> str:
+    return _require_match(HEX_SHA1, value, label)
 
 
 def _parse_release_id(value: str) -> int:
@@ -325,12 +340,19 @@ def _request_release_json(
     token: str,
     payload: object | None,
 ) -> object:
-    if not RELEASE_API_PATH.fullmatch(path):
-        raise ValueError("disallowed GitHub Release API request")
-    is_assets = path.endswith("/assets?per_page=100")
-    if is_assets and (method != "GET" or payload is not None):
-        raise ValueError("disallowed GitHub Release API request")
-    if not is_assets and method not in {"GET", "PATCH"}:
+    if RELEASE_API_PATH.fullmatch(path):
+        is_assets = path.endswith("/assets?per_page=100")
+        if is_assets and (method != "GET" or payload is not None):
+            raise ValueError("disallowed GitHub Release API request")
+        if not is_assets and method not in {"GET", "PATCH"}:
+            raise ValueError("disallowed GitHub Release API request")
+    elif any(
+        pattern.fullmatch(path)
+        for pattern in (TAG_REF_API_PATH, TAG_OBJECT_API_PATH, COMMIT_OBJECT_API_PATH)
+    ):
+        if method != "GET" or payload is not None:
+            raise ValueError("disallowed GitHub Release API request")
+    else:
         raise ValueError("disallowed GitHub Release API request")
     return _perform_json_request(method, path, token, payload)
 
@@ -384,6 +406,77 @@ def require_immutable_releases_enabled(
         raise ValueError("GitHub immutable-release setting is not an exact enabled response")
 
 
+def _verify_live_tag_reference(
+    reference: object,
+    tag: str,
+    expected_tag_object: str,
+) -> None:
+    if not isinstance(reference, dict) or reference.get("ref") != f"refs/tags/{tag}":
+        raise ValueError("live release tag reference does not match")
+    reference_object = reference.get("object")
+    if (
+        not isinstance(reference_object, dict)
+        or reference_object.get("type") != "tag"
+        or reference_object.get("sha") != expected_tag_object
+    ):
+        raise ValueError("live release tag is not the exact annotated tag object")
+
+
+def verify_remote_tag_binding(
+    repository: str,
+    tag: str,
+    expected_tag_object: str,
+    expected_commit: str,
+    expected_tree: str,
+    token: str,
+    *,
+    request_json: JsonRequester = _request_release_json,
+) -> None:
+    """Bind the live annotated tag ref to one exact commit and source tree."""
+    normalized_repository = _require_match(REPOSITORY, repository, "repository")
+    normalized_tag = _require_match(TAG, tag, "release tag")
+    normalized_tag_object = _require_sha1(expected_tag_object, "tag object")
+    normalized_commit = _require_sha1(expected_commit, "commit")
+    normalized_tree = _require_sha1(expected_tree, "tree")
+    validated_token = _validate_token(token)
+    base = f"/repos/{normalized_repository}"
+
+    reference = request_json(
+        "GET", f"{base}/git/ref/tags/{normalized_tag}", validated_token, None
+    )
+    _verify_live_tag_reference(reference, normalized_tag, normalized_tag_object)
+
+    tag_object = request_json(
+        "GET", f"{base}/git/tags/{normalized_tag_object}", validated_token, None
+    )
+    if (
+        not isinstance(tag_object, dict)
+        or tag_object.get("sha") != normalized_tag_object
+        or tag_object.get("tag") != normalized_tag
+    ):
+        raise ValueError("annotated tag object identity does not match")
+    tagged_object = tag_object.get("object")
+    if (
+        not isinstance(tagged_object, dict)
+        or tagged_object.get("type") != "commit"
+        or tagged_object.get("sha") != normalized_commit
+    ):
+        raise ValueError("annotated tag object does not target the exact commit")
+
+    commit = request_json(
+        "GET", f"{base}/git/commits/{normalized_commit}", validated_token, None
+    )
+    if not isinstance(commit, dict) or commit.get("sha") != normalized_commit:
+        raise ValueError("Git commit object identity does not match")
+    tree = commit.get("tree")
+    if not isinstance(tree, dict) or tree.get("sha") != normalized_tree:
+        raise ValueError("Git commit does not target the exact source tree")
+    final_reference = request_json(
+        "GET", f"{base}/git/ref/tags/{normalized_tag}", validated_token, None
+    )
+    _verify_live_tag_reference(final_reference, normalized_tag, normalized_tag_object)
+
+
 def publish_exact_release(
     repository: str,
     release_id: int,
@@ -394,6 +487,9 @@ def publish_exact_release(
     release_token: str,
     settings_token: str,
     *,
+    expected_tag_object: str,
+    expected_commit: str,
+    expected_tree: str,
     release_request_json: JsonRequester = _request_release_json,
     settings_request_json: JsonRequester = _request_settings_json,
     sleep: Callable[[float], None] = time.sleep,
@@ -402,6 +498,9 @@ def publish_exact_release(
     normalized_repository = _require_match(REPOSITORY, repository, "repository")
     normalized_release_id = _require_positive_int(release_id, "release ID")
     normalized_tag = _require_match(TAG, tag, "release tag")
+    normalized_tag_object = _require_sha1(expected_tag_object, "tag object")
+    normalized_commit = _require_sha1(expected_commit, "commit")
+    normalized_tree = _require_sha1(expected_tree, "tree")
     validated_release_token = _validate_token(release_token)
     validated_settings_token = _validate_token(settings_token)
     if hmac.compare_digest(
@@ -426,6 +525,15 @@ def publish_exact_release(
             prerelease=prerelease,
             expected_assets=expected_assets,
             expected_draft=False,
+        )
+        verify_remote_tag_binding(
+            normalized_repository,
+            normalized_tag,
+            normalized_tag_object,
+            normalized_commit,
+            normalized_tree,
+            validated_release_token,
+            request_json=release_request_json,
         )
         return "already-published"
     verify_release_state(
@@ -466,6 +574,15 @@ def publish_exact_release(
         validated_settings_token,
         request_json=settings_request_json,
     )
+    verify_remote_tag_binding(
+        normalized_repository,
+        normalized_tag,
+        normalized_tag_object,
+        normalized_commit,
+        normalized_tree,
+        validated_release_token,
+        request_json=release_request_json,
+    )
 
     path = f"/repos/{normalized_repository}/releases/{normalized_release_id}"
     try:
@@ -491,6 +608,15 @@ def publish_exact_release(
                 expected_assets=expected_assets,
                 expected_draft=False,
             )
+            verify_remote_tag_binding(
+                normalized_repository,
+                normalized_tag,
+                normalized_tag_object,
+                normalized_commit,
+                normalized_tree,
+                validated_release_token,
+                request_json=release_request_json,
+            )
             return "published-after-ambiguous-response"
         verify_release_state(
             release,
@@ -506,6 +632,15 @@ def publish_exact_release(
             normalized_repository,
             validated_settings_token,
             request_json=settings_request_json,
+        )
+        verify_remote_tag_binding(
+            normalized_repository,
+            normalized_tag,
+            normalized_tag_object,
+            normalized_commit,
+            normalized_tree,
+            validated_release_token,
+            request_json=release_request_json,
         )
         release_request_json(
             "PATCH", path, validated_release_token, {"draft": False}
@@ -530,6 +665,15 @@ def publish_exact_release(
                 expected_assets=expected_assets,
                 expected_draft=False,
             )
+            verify_remote_tag_binding(
+                normalized_repository,
+                normalized_tag,
+                normalized_tag_object,
+                normalized_commit,
+                normalized_tree,
+                validated_release_token,
+                request_json=release_request_json,
+            )
             return "published"
         except ValueError as error:
             last_error = str(error)
@@ -546,6 +690,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--repository", required=True)
     parser.add_argument("--release-id")
     parser.add_argument("--tag")
+    parser.add_argument("--tag-object")
+    parser.add_argument("--commit")
+    parser.add_argument("--tree")
     parser.add_argument("--version")
     parser.add_argument("--expected-prerelease")
     parser.add_argument("--notes", type=Path)
@@ -565,6 +712,9 @@ def main(argv: list[str] | None = None) -> int:
                 for value in (
                     args.release_id,
                     args.tag,
+                    args.tag_object,
+                    args.commit,
+                    args.tree,
                     args.version,
                     args.expected_prerelease,
                     args.notes,
@@ -586,6 +736,9 @@ def main(argv: list[str] | None = None) -> int:
             for value in (
                 args.release_id,
                 args.tag,
+                args.tag_object,
+                args.commit,
+                args.tree,
                 args.version,
                 args.expected_prerelease,
                 args.notes,
@@ -608,6 +761,9 @@ def main(argv: list[str] | None = None) -> int:
             expected_assets,
             release_token,
             settings_token,
+            expected_tag_object=args.tag_object,
+            expected_commit=args.commit,
+            expected_tree=args.tree,
         )
     except ValueError as error:
         print(f"exact GitHub Release publication failed: {error}", file=sys.stderr)

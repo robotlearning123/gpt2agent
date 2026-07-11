@@ -551,6 +551,9 @@ jobs:
           repository: ${{ github.repository }}
           release-id: ${{ needs.github-release-draft.outputs.release_id }}
           tag: ${{ github.ref_name }}
+          tag-object: ${{ needs.verify.outputs.tag_object }}
+          commit: ${{ needs.verify.outputs.commit }}
+          tree: ${{ needs.verify.outputs.tree }}
           version: ${{ needs.verify.outputs.distribution_version }}
           expected-prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}
           notes: ${{ runner.temp }}/github-release-publish-${{ github.run_id }}-${{ github.run_attempt }}/notes/release_notes.md
@@ -583,14 +586,23 @@ jobs:
         with:
           name: release-notes-${{ github.run_id }}
           path: ${{ runner.temp }}/github-release-verify-${{ github.run_id }}-${{ github.run_attempt }}/notes/
-      - name: Read back exact public release body and assets
-        run: >-
-          python scripts/verify_github_release.py
-          --repository "$GITHUB_REPOSITORY"
-          --tag "$GITHUB_REF_NAME"
-          --notes "${{ runner.temp }}/github-release-verify-${{ github.run_id }}-${{ github.run_attempt }}/notes/release_notes.md"
-          --dist "${{ runner.temp }}/github-release-verify-${{ github.run_id }}-${{ github.run_attempt }}/dist"
-          --evidence "${{ runner.temp }}/github-release-verify-${{ github.run_id }}-${{ github.run_attempt }}/release-evidence/release-workflow-artifacts.json"
-          --download-root "${{ runner.temp }}/github-release-verify-${{ github.run_id }}-${{ github.run_attempt }}/public-assets"
-          --expected-prerelease "${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}"
-          --attempts 7 --delay 10
+      - name: Read back exact public release body, assets, and live tag graph
+        env:
+          GITHUB_RELEASE_VERIFY_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GITHUB_RELEASE_VERIFY_TOKEN" |
+            /usr/bin/env -i /usr/bin/python3 -I -S -B \
+              scripts/verify_github_release.py \
+              --token-stdin \
+              --repository "$GITHUB_REPOSITORY" \
+              --tag "$GITHUB_REF_NAME" \
+              --tag-object "${{ needs.verify.outputs.tag_object }}" \
+              --commit "${{ needs.verify.outputs.commit }}" \
+              --tree "${{ needs.verify.outputs.tree }}" \
+              --notes "${{ runner.temp }}/github-release-verify-${{ github.run_id }}-${{ github.run_attempt }}/notes/release_notes.md" \
+              --dist "${{ runner.temp }}/github-release-verify-${{ github.run_id }}-${{ github.run_attempt }}/dist" \
+              --evidence "${{ runner.temp }}/github-release-verify-${{ github.run_id }}-${{ github.run_attempt }}/release-evidence/release-workflow-artifacts.json" \
+              --download-root "${{ runner.temp }}/github-release-verify-${{ github.run_id }}-${{ github.run_attempt }}/public-assets" \
+              --expected-prerelease "${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}" \
+              --attempts 7 --delay 10

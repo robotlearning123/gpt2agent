@@ -17,6 +17,15 @@ inputs:
   tag:
     description: Exact release tag.
     required: true
+  tag-object:
+    description: Exact annotated tag object SHA verified by the release gate.
+    required: true
+  commit:
+    description: Exact commit SHA targeted by the annotated tag.
+    required: true
+  tree:
+    description: Exact source tree SHA targeted by the commit.
+    required: true
   version:
     description: Normalized Python distribution version.
     required: true
@@ -44,6 +53,9 @@ runs:
         INPUT_REPOSITORY: ${{ inputs.repository }}
         INPUT_RELEASE_ID: ${{ inputs.release-id }}
         INPUT_TAG: ${{ inputs.tag }}
+        INPUT_TAG_OBJECT: ${{ inputs.tag-object }}
+        INPUT_COMMIT: ${{ inputs.commit }}
+        INPUT_TREE: ${{ inputs.tree }}
         INPUT_VERSION: ${{ inputs.version }}
         INPUT_EXPECTED_PRERELEASE: ${{ inputs.expected-prerelease }}
         INPUT_NOTES: ${{ inputs.notes }}
@@ -58,6 +70,9 @@ runs:
           --repository "$INPUT_REPOSITORY" \
           --release-id "$INPUT_RELEASE_ID" \
           --tag "$INPUT_TAG" \
+          --tag-object "$INPUT_TAG_OBJECT" \
+          --commit "$INPUT_COMMIT" \
+          --tree "$INPUT_TREE" \
           --version "$INPUT_VERSION" \
           --expected-prerelease "$INPUT_EXPECTED_PRERELEASE" \
           --notes "$INPUT_NOTES" \

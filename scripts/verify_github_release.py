@@ -14,17 +14,26 @@ import json
 import os
 import re
 import shutil
+import ssl
 import stat
 import sys
 import tempfile
 import time
+import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, quote, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import (
+    HTTPRedirectHandler,
+    HTTPSHandler,
+    ProxyHandler,
+    Request,
+    build_opener,
+    urlopen,
+)
 
 
 API_ROOT = "https://api.github.com"
@@ -35,9 +44,21 @@ MAX_JSON_BYTES = 4 * 1024 * 1024
 MAX_NOTES_BYTES = 1024 * 1024
 MAX_ASSET_BYTES = 128 * 1024 * 1024
 MAX_TOTAL_ASSET_BYTES = 256 * 1024 * 1024
+MAX_TOKEN_BYTES = 4096
 REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
 TAG = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-(?:alpha|beta|rc)[0-9]+)?\Z")
 POSITIVE_INTEGER = re.compile(r"[1-9][0-9]*\Z")
+HEX_SHA1 = re.compile(r"[0-9a-f]{40}\Z")
+TAG_REF_API_PATH = re.compile(
+    r"/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/git/ref/tags/"
+    r"v[0-9]+\.[0-9]+\.[0-9]+(?:-(?:alpha|beta|rc)[0-9]+)?\Z"
+)
+TAG_OBJECT_API_PATH = re.compile(
+    r"/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/git/tags/[0-9a-f]{40}\Z"
+)
+COMMIT_OBJECT_API_PATH = re.compile(
+    r"/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/git/commits/[0-9a-f]{40}\Z"
+)
 
 
 @dataclass(frozen=True)
@@ -53,6 +74,11 @@ JsonFetcher = Callable[[str, str], tuple[Any, Mapping[str, str]]]
 AssetDownloader = Callable[[str, int, Path, str, ExpectedAsset], None]
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        return None
+
+
 def _require_repository(repository: str) -> str:
     if not REPOSITORY.fullmatch(repository):
         raise ValueError("invalid GitHub repository")
@@ -63,6 +89,36 @@ def _require_tag(tag: str) -> str:
     if not TAG.fullmatch(tag):
         raise ValueError("invalid GitHub Release tag")
     return tag
+
+
+def _require_sha1(value: str, label: str) -> str:
+    if not HEX_SHA1.fullmatch(value):
+        raise ValueError(f"invalid {label}")
+    return value
+
+
+def _validate_token(token: str) -> str:
+    try:
+        encoded = token.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("GitHub token is invalid") from None
+    if (
+        not encoded
+        or len(encoded) > MAX_TOKEN_BYTES
+        or any(unicodedata.category(character).startswith("C") for character in token)
+    ):
+        raise ValueError("GitHub token is invalid")
+    return token
+
+
+def _read_token() -> str:
+    raw_token = sys.stdin.buffer.read(MAX_TOKEN_BYTES + 1)
+    if len(raw_token) > MAX_TOKEN_BYTES:
+        raise ValueError("GitHub token is invalid")
+    try:
+        return _validate_token(raw_token.decode("utf-8"))
+    except UnicodeDecodeError:
+        raise ValueError("GitHub token is invalid") from None
 
 
 def _require_positive_int(value: object, label: str) -> int:
@@ -232,6 +288,119 @@ def _fetch_json(
         return json.loads(payload.decode("utf-8")), headers
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise ValueError("GitHub API returned invalid JSON") from None
+
+
+def _validate_tag_binding_url(url: str) -> str:
+    parts = urlsplit(url)
+    if (
+        parts.scheme != "https"
+        or parts.netloc != "api.github.com"
+        or parts.username is not None
+        or parts.password is not None
+        or parts.port is not None
+        or parts.query
+        or parts.fragment
+        or not any(
+            pattern.fullmatch(parts.path)
+            for pattern in (TAG_REF_API_PATH, TAG_OBJECT_API_PATH, COMMIT_OBJECT_API_PATH)
+        )
+    ):
+        raise ValueError("untrusted GitHub tag binding URL")
+    return url
+
+
+def _open_without_redirects(request: Request, timeout: int):
+    opener = build_opener(
+        ProxyHandler({}),
+        HTTPSHandler(context=ssl.create_default_context()),
+        _NoRedirect(),
+    )
+    return opener.open(request, timeout=timeout)
+
+
+def _fetch_tag_binding_json(
+    url: str,
+    token: str,
+) -> tuple[Any, Mapping[str, str]]:
+    """Fetch one authenticated, allowlisted Git-object URL without redirects."""
+    normalized_url = _validate_tag_binding_url(url)
+    validated_token = _validate_token(token)
+    return _fetch_json(
+        normalized_url,
+        validated_token,
+        opener=_open_without_redirects,
+    )
+
+
+def _verify_live_tag_reference(
+    reference: object,
+    tag: str,
+    expected_tag_object: str,
+) -> None:
+    if not isinstance(reference, dict) or reference.get("ref") != f"refs/tags/{tag}":
+        raise ValueError("live release tag reference does not match")
+    reference_object = reference.get("object")
+    if (
+        not isinstance(reference_object, dict)
+        or reference_object.get("type") != "tag"
+        or reference_object.get("sha") != expected_tag_object
+    ):
+        raise ValueError("live release tag is not the exact annotated tag object")
+
+
+def verify_remote_tag_binding(
+    repository: str,
+    tag: str,
+    expected_tag_object: str,
+    expected_commit: str,
+    expected_tree: str,
+    token: str,
+    *,
+    fetch_json: JsonFetcher = _fetch_tag_binding_json,
+) -> None:
+    """Independently bind the live annotated tag to one commit and source tree."""
+    normalized_repository = _require_repository(repository)
+    normalized_tag = _require_tag(tag)
+    normalized_tag_object = _require_sha1(expected_tag_object, "tag object")
+    normalized_commit = _require_sha1(expected_commit, "commit")
+    normalized_tree = _require_sha1(expected_tree, "tree")
+    validated_token = _validate_token(token)
+    base = f"{API_ROOT}/repos/{normalized_repository}"
+
+    reference, _ = fetch_json(
+        f"{base}/git/ref/tags/{normalized_tag}", validated_token
+    )
+    _verify_live_tag_reference(reference, normalized_tag, normalized_tag_object)
+
+    tag_object, _ = fetch_json(
+        f"{base}/git/tags/{normalized_tag_object}", validated_token
+    )
+    if (
+        not isinstance(tag_object, dict)
+        or tag_object.get("sha") != normalized_tag_object
+        or tag_object.get("tag") != normalized_tag
+    ):
+        raise ValueError("annotated tag object identity does not match")
+    tagged_object = tag_object.get("object")
+    if (
+        not isinstance(tagged_object, dict)
+        or tagged_object.get("type") != "commit"
+        or tagged_object.get("sha") != normalized_commit
+    ):
+        raise ValueError("annotated tag object does not target the exact commit")
+
+    commit, _ = fetch_json(
+        f"{base}/git/commits/{normalized_commit}", validated_token
+    )
+    if not isinstance(commit, dict) or commit.get("sha") != normalized_commit:
+        raise ValueError("Git commit object identity does not match")
+    tree = commit.get("tree")
+    if not isinstance(tree, dict) or tree.get("sha") != normalized_tree:
+        raise ValueError("Git commit does not target the exact source tree")
+    final_reference, _ = fetch_json(
+        f"{base}/git/ref/tags/{normalized_tag}", validated_token
+    )
+    _verify_live_tag_reference(final_reference, normalized_tag, normalized_tag_object)
 
 
 def _link_header(headers: Mapping[str, str]) -> str | None:
@@ -419,16 +588,24 @@ def verify_public_release(
     download_root: Path,
     *,
     expected_prerelease: bool,
-    token: str,
+    expected_tag_object: str,
+    expected_commit: str,
+    expected_tree: str,
+    tag_token: str,
     attempts: int = 7,
     delay: float = 10,
     fetch_json: JsonFetcher = _fetch_json,
     download_asset: AssetDownloader = _download_asset,
+    tag_fetch_json: JsonFetcher = _fetch_tag_binding_json,
     sleep: Callable[[float], None] = time.sleep,
 ) -> Path:
     """Poll and verify one exact public release, including downloaded bytes."""
     normalized_repository = _require_repository(repository)
     normalized_tag = _require_tag(tag)
+    normalized_tag_object = _require_sha1(expected_tag_object, "tag object")
+    normalized_commit = _require_sha1(expected_commit, "commit")
+    normalized_tree = _require_sha1(expected_tree, "tree")
+    validated_tag_token = _validate_token(tag_token)
     if isinstance(attempts, bool) or not isinstance(attempts, int) or not 1 <= attempts <= 100:
         raise ValueError("attempts must be between 1 and 100")
     if isinstance(delay, bool) or not isinstance(delay, (int, float)) or not 0 <= delay <= 3600:
@@ -447,14 +624,14 @@ def verify_public_release(
         for attempt in range(1, attempts + 1):
             attempt_dir: Path | None = None
             try:
-                release, _ = fetch_json(release_url, token)
+                release, _ = fetch_json(release_url, "")
                 if not isinstance(release, dict):
                     raise ValueError("GitHub Release response must be an object")
                 release_id = _require_positive_int(release.get("id"), "GitHub Release ID")
                 assets = collect_release_assets(
                     normalized_repository,
                     release_id,
-                    token,
+                    "",
                     fetch_json=fetch_json,
                 )
                 asset_ids = verify_release_metadata(
@@ -473,10 +650,19 @@ def verify_public_release(
                         normalized_repository,
                         asset_ids[name],
                         attempt_dir / name,
-                        token,
+                        "",
                         expected_assets[name],
                     )
                 verify_downloaded_assets(attempt_dir, expected_assets)
+                verify_remote_tag_binding(
+                    normalized_repository,
+                    normalized_tag,
+                    normalized_tag_object,
+                    normalized_commit,
+                    normalized_tree,
+                    validated_tag_token,
+                    fetch_json=tag_fetch_json,
+                )
                 return attempt_dir
             except (OSError, ValueError) as error:
                 last_error = str(error)
@@ -514,6 +700,10 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", required=True)
     parser.add_argument("--tag", required=True)
+    parser.add_argument("--tag-object", required=True)
+    parser.add_argument("--commit", required=True)
+    parser.add_argument("--tree", required=True)
+    parser.add_argument("--token-stdin", action="store_true")
     parser.add_argument("--notes", type=Path, required=True)
     parser.add_argument("--dist", type=Path, required=True)
     parser.add_argument("--evidence", type=Path, required=True)
@@ -527,6 +717,9 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if not args.token_stdin:
+            raise ValueError("GitHub tag binding token must be read from standard input")
+        tag_token = _read_token()
         verified_dir = verify_public_release(
             args.repository,
             args.tag,
@@ -535,9 +728,10 @@ def main(argv: list[str] | None = None) -> int:
             args.evidence,
             args.download_root,
             expected_prerelease=args.expected_prerelease == "true",
-            # This is deliberately unauthenticated: success proves the
-            # repository, release metadata, and numeric-ID assets are public.
-            token="",
+            expected_tag_object=args.tag_object,
+            expected_commit=args.commit,
+            expected_tree=args.tree,
+            tag_token=tag_token,
             attempts=args.attempts,
             delay=args.delay,
         )

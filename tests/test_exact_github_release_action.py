@@ -17,6 +17,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ACTION_ROOT = PROJECT_ROOT / ".github" / "actions" / "publish-exact-github-release"
 ACTION_YAML = ACTION_ROOT / "action.yml"
 PUBLISHER = ACTION_ROOT / "publish.py"
+TAG_OBJECT = "1" * 40
+COMMIT = "2" * 40
+TREE = "3" * 40
 
 
 def _load_publisher():
@@ -114,6 +117,19 @@ class _FakeGitHub:
             return response
         if method == "GET" and path == f"{base}/assets?per_page=100":
             return deepcopy(self.assets)
+        if method == "GET" and path == "/repos/robotlearning123/gpt2agent/git/ref/tags/v1.2.3":
+            return {
+                "ref": "refs/tags/v1.2.3",
+                "object": {"type": "tag", "sha": TAG_OBJECT},
+            }
+        if method == "GET" and path == f"/repos/robotlearning123/gpt2agent/git/tags/{TAG_OBJECT}":
+            return {
+                "sha": TAG_OBJECT,
+                "tag": "v1.2.3",
+                "object": {"type": "commit", "sha": COMMIT},
+            }
+        if method == "GET" and path == f"/repos/robotlearning123/gpt2agent/git/commits/{COMMIT}":
+            return {"sha": COMMIT, "tree": {"sha": TREE}}
         if method == "PATCH" and path == base and payload == {"draft": False}:
             if not self.ambiguous_patch or self.ambiguous_patch_applies:
                 self.release["draft"] = False
@@ -135,6 +151,9 @@ def _publish(api: _FakeGitHub, expected: dict[str, Any]) -> str:
         expected,
         "release-token",
         "settings-token",
+        expected_tag_object=TAG_OBJECT,
+        expected_commit=COMMIT,
+        expected_tree=TREE,
         release_request_json=api,
         settings_request_json=api,
         sleep=lambda delay: None,
@@ -176,13 +195,37 @@ def test_exact_draft_is_validated_twice_and_patched_by_numeric_id() -> None:
     assert patch_calls == [
         ("PATCH", release_path, "release-token", {"draft": False})
     ]
-    assert api.calls[:7] == [
+    assert api.calls[:11] == [
         ("GET", release_path, "release-token", None),
         ("GET", assets_path, "release-token", None),
         ("GET", settings_path, "settings-token", None),
         ("GET", release_path, "release-token", None),
         ("GET", assets_path, "release-token", None),
         ("GET", settings_path, "settings-token", None),
+        (
+            "GET",
+            "/repos/robotlearning123/gpt2agent/git/ref/tags/v1.2.3",
+            "release-token",
+            None,
+        ),
+        (
+            "GET",
+            f"/repos/robotlearning123/gpt2agent/git/tags/{TAG_OBJECT}",
+            "release-token",
+            None,
+        ),
+        (
+            "GET",
+            f"/repos/robotlearning123/gpt2agent/git/commits/{COMMIT}",
+            "release-token",
+            None,
+        ),
+        (
+            "GET",
+            "/repos/robotlearning123/gpt2agent/git/ref/tags/v1.2.3",
+            "release-token",
+            None,
+        ),
         ("PATCH", release_path, "release-token", {"draft": False}),
     ]
     assert {method for method, _, _, _ in api.calls} <= {"GET", "PATCH"}
@@ -385,6 +428,9 @@ def test_missing_numeric_draft_fails_without_fallback_creation() -> None:
             _expected_assets(),
             "release-token",
             "settings-token",
+            expected_tag_object=TAG_OBJECT,
+            expected_commit=COMMIT,
+            expected_tree=TREE,
             release_request_json=missing,
             settings_request_json=missing,
             sleep=lambda delay: None,
@@ -464,6 +510,12 @@ def _main_args(tmp_path: Path) -> list[str]:
         "42",
         "--tag",
         "v1.2.3",
+        "--tag-object",
+        TAG_OBJECT,
+        "--commit",
+        COMMIT,
+        "--tree",
+        TREE,
         "--version",
         "1.2.3",
         "--expected-prerelease",

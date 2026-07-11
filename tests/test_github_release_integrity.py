@@ -34,6 +34,9 @@ EXACT_RELEASE_ACTION = (
     "robotlearning123/gpt2agent/.github/actions/publish-exact-github-release@"
     "bd9ab5412145ee2b1026e07d0c48b4fd2704315c"
 )
+TAG_OBJECT = "1" * 40
+COMMIT = "2" * 40
+TREE = "3" * 40
 
 
 def _workflow_job(name: str) -> list[str]:
@@ -123,6 +126,24 @@ def _release(
         "prerelease": prerelease,
         "immutable": immutable,
     }
+
+
+def _exact_tag_fetch(url: str, token: str):
+    assert token == "tag-token"
+    if url.endswith("/git/ref/tags/v1.2.3"):
+        return {
+            "ref": "refs/tags/v1.2.3",
+            "object": {"type": "tag", "sha": TAG_OBJECT},
+        }, {}
+    if url.endswith(f"/git/tags/{TAG_OBJECT}"):
+        return {
+            "sha": TAG_OBJECT,
+            "tag": "v1.2.3",
+            "object": {"type": "commit", "sha": COMMIT},
+        }, {}
+    if url.endswith(f"/git/commits/{COMMIT}"):
+        return {"sha": COMMIT, "tree": {"sha": TREE}}, {}
+    raise AssertionError(f"unexpected tag binding URL: {url}")
 
 
 def test_public_github_release_verifier_exists() -> None:
@@ -216,6 +237,9 @@ def test_github_release_publisher_is_action_only_and_binds_exact_draft_id() -> N
     assert "          name: release-notes-${{ github.run_id }}" in job
     assert "          release-id: ${{ needs.github-release-draft.outputs.release_id }}" in job
     assert "          tag: ${{ github.ref_name }}" in job
+    assert "          tag-object: ${{ needs.verify.outputs.tag_object }}" in job
+    assert "          commit: ${{ needs.verify.outputs.commit }}" in job
+    assert "          tree: ${{ needs.verify.outputs.tree }}" in job
     assert "          version: ${{ needs.verify.outputs.distribution_version }}" in job
     assert "          expected-prerelease: ${{ contains(github.ref_name, '-rc') ||" in text
     assert "          github-token: ${{ github.token }}" in job
@@ -240,14 +264,21 @@ def test_github_release_readback_job_is_read_only_and_closes_public_bytes() -> N
     assert "    needs: [github-release, prepare-release-notes, verify]" in job
     assert _job_actions(job).count(DOWNLOAD) == 3
     assert CHECKOUT in _job_actions(job)
-    assert "python scripts/verify_github_release.py" in text
+    assert "scripts/verify_github_release.py" in text
     assert '--tag "$GITHUB_REF_NAME"' in text
     assert "--attempts 7 --delay 10" in text
     assert "--expected-prerelease \"${{ contains(github.ref_name, '-rc') ||" in text
     assert "${{ github.run_id }}-${{ github.run_attempt }}" in text
     assert "contents: write" not in text
     assert "GH_TOKEN" not in text
-    assert "github.token" not in text
+    assert "--token-stdin" in text
+    assert 'printf \'%s\' "$GITHUB_RELEASE_VERIFY_TOKEN" |' in text
+    assert "/usr/bin/env -i /usr/bin/python3 -I -S -B" in text
+    assert "GITHUB_RELEASE_VERIFY_TOKEN: ${{ github.token }}" in text
+    assert '--tag-object "${{ needs.verify.outputs.tag_object }}"' in text
+    assert '--commit "${{ needs.verify.outputs.commit }}"' in text
+    assert '--tree "${{ needs.verify.outputs.tree }}"' in text
+    assert "--github-token" not in text
 
 
 def test_candidate_executing_release_jobs_do_not_inherit_actions_read() -> None:
@@ -848,11 +879,15 @@ def test_public_release_poll_retries_then_downloads_exact_numeric_asset_ids(
         evidence,
         tmp_path / "public-downloads",
         expected_prerelease=False,
-        token="",
+        expected_tag_object=TAG_OBJECT,
+        expected_commit=COMMIT,
+        expected_tree=TREE,
+        tag_token="tag-token",
         attempts=7,
         delay=10,
         fetch_json=fetch_json,
         download_asset=download_asset,
+        tag_fetch_json=_exact_tag_fetch,
         sleep=sleeps.append,
     )
 
@@ -902,11 +937,15 @@ def test_public_release_poll_removes_failed_attempt_before_retry(tmp_path: Path)
         evidence,
         download_root,
         expected_prerelease=False,
-        token="",
+        expected_tag_object=TAG_OBJECT,
+        expected_commit=COMMIT,
+        expected_tree=TREE,
+        tag_token="tag-token",
         attempts=2,
         delay=0,
         fetch_json=fetch_json,
         download_asset=download_asset,
+        tag_fetch_json=_exact_tag_fetch,
         sleep=sleep,
     )
 
@@ -952,11 +991,15 @@ def test_public_release_poll_removes_download_root_after_unexpected_failure(
             evidence,
             download_root,
             expected_prerelease=False,
-            token="",
+            expected_tag_object=TAG_OBJECT,
+            expected_commit=COMMIT,
+            expected_tree=TREE,
+            tag_token="tag-token",
             attempts=2,
             delay=0,
             fetch_json=fetch_json,
             download_asset=download_asset,
+            tag_fetch_json=_exact_tag_fetch,
             sleep=lambda delay: None,
         )
 
