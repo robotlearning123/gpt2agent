@@ -64,6 +64,9 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
   directory is not yet visible in the current shell's `PATH`.
 - Optional image-asset enrichment preserves typed changed-contract and
   indeterminate-access results while continuing to suppress exception details.
+  A 422 against a backend-produced file identifier is classified as contract
+  drift rather than caller input, and the docs now state that download/info
+  enrichment is optional per asset.
 
 ### Security
 
@@ -111,6 +114,14 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
   while preserving valid signed queries. Common provider secrets,
   credential-bearing database URLs, label-aware assignments, and PEM private
   keys are redacted before private text reaches MCP clients.
+- Citation projection drops query keys or values that still contain a percent
+  escape after one decode, preventing downstream double-decoding from revealing
+  encoded credentials or PII. Local Plugin pagination accepts only canonical,
+  unpadded Base64URL cursors.
+- The shell installer rejects a symlinked or non-directory pipx environment
+  before mutation. Config backups read content and permissions from one open
+  regular-file descriptor so a concurrent symlink swap cannot widen a secret
+  backup.
 - Image generation follows the observed prepare/conduit `/f` v1 stream and
   accepts an asset only when its visible carrier is bound to the current stream
   by the observed dispatch or a same-message marker and has image-generation
@@ -133,10 +144,12 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
   installed into clean environments.
 - The locked package lane builds twice from cleaned state, rewrites bounded
   sdist container metadata under a fixed source epoch with an isolated,
-  dependency-free fail-closed normalizer, revalidates member types and payload
-  hashes, and requires byte-identical wheel and sdist pairs before Twine,
-  package smoke, and retention of the first set. The release workflow relays
-  those exact bytes and never normalizes or rebuilds them.
+  dependency-free fail-closed normalizer, and revalidates member types and
+  payload hashes. The rewriter validates complete tar framing and bounds
+  PAX/GNU extended metadata before Python's tar parser materializes it. CI then
+  requires byte-identical wheel and sdist pairs before Twine, package smoke,
+  and retention of the first set; the release workflow relays those exact bytes
+  and never normalizes or rebuilds them.
 - CI audits resolved application dependencies, the minimum supported
   `curl_cffi` release, and the hash-locked account-gate runtime for known
   vulnerabilities. A credential-free CI lane also bootstraps that runtime from

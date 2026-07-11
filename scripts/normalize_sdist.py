@@ -30,6 +30,7 @@ _MAX_TAR_BYTES = _MAX_TOTAL_BYTES + _MAX_MEMBERS * 8 * 1024 + 20 * 1024
 _COPY_CHUNK = 1024 * 1024
 _ARCHIVE_ROOT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}\Z")
 _VOLATILE_PAX_FIELDS = frozenset({"mtime"})
+_SNAPSHOT_ERROR = "sdist tar snapshot is unavailable"
 _EXTENDED_HEADER_TYPES = frozenset(
     {
         tarfile.XHDTYPE,
@@ -174,13 +175,10 @@ def _read_tar_block(stream: BinaryIO, *, eof_ok: bool = False) -> bytes | None:
 
 
 def _tar_header_size(header: bytes) -> int:
-    try:
-        size = tarfile.nti(header[124:136])
-    except (ValueError, tarfile.TarError) as error:
-        raise SdistNormalizationError("sdist tar header has an invalid size") from error
-    if size < 0:
-        raise SdistNormalizationError("sdist tar header has a negative size")
-    return size
+    field = header[124:136]
+    if re.fullmatch(rb"[0-7]{11}\0", field) is None:
+        raise SdistNormalizationError("sdist tar header has a noncanonical size field")
+    return int(field[:-1], 8)
 
 
 def _discard_exact(stream: BinaryIO, size: int) -> None:
@@ -207,14 +205,15 @@ def _validate_payload_and_padding(stream: BinaryIO, size: int) -> None:
         raise SdistNormalizationError("sdist tar payload padding must be zero")
 
 
-def _preflight_tar_stream(stream: BinaryIO) -> None:
+def _preflight_tar_stream(stream: BinaryIO, *, rewind: bool = True) -> None:
     """Validate raw tar framing before ``tarfile`` parses extended metadata."""
     header_count = 0
     member_count = 0
     total_size = 0
     pending_extended_header = False
     try:
-        stream.seek(0)
+        if rewind:
+            stream.seek(0)
         while True:
             header = _read_tar_block(stream)
             assert header is not None
@@ -285,7 +284,63 @@ def _preflight_tar_stream(stream: BinaryIO) -> None:
                         )
             _validate_payload_and_padding(stream, size)
     finally:
-        stream.seek(0)
+        if rewind:
+            stream.seek(0)
+
+
+class _TeeReader:
+    def __init__(self, source: BinaryIO, destination: BinaryIO) -> None:
+        self.source = source
+        self.destination = destination
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self.source.read(size)
+        written = self.destination.write(chunk)
+        if written != len(chunk):
+            raise OSError("short anonymous snapshot write")
+        return chunk
+
+
+def _close_failed_snapshot(snapshot: BinaryIO) -> None:
+    try:
+        snapshot.close()
+    except OSError:
+        pass
+
+
+def _snapshot_preflighted_tar(stream: BinaryIO) -> BinaryIO:
+    """Return an anonymous snapshot containing exactly the validated tar bytes."""
+    try:
+        snapshot = tempfile.TemporaryFile(mode="w+b")
+    except OSError as error:
+        raise SdistNormalizationError(_SNAPSHOT_ERROR) from error
+    try:
+        _preflight_tar_stream(_TeeReader(stream, snapshot), rewind=False)
+        snapshot.flush()
+        snapshot.seek(0)
+        return snapshot
+    except SdistNormalizationError:
+        _close_failed_snapshot(snapshot)
+        raise
+    except (EOFError, gzip.BadGzipFile, OSError, ValueError) as error:
+        _close_failed_snapshot(snapshot)
+        raise SdistNormalizationError(_SNAPSHOT_ERROR) from error
+
+
+def _close_snapshot(snapshot: BinaryIO) -> None:
+    try:
+        snapshot.close()
+    except OSError as error:
+        raise SdistNormalizationError(_SNAPSHOT_ERROR) from error
+
+
+def _require_open_identity(stream: BinaryIO, expected: _Identity) -> None:
+    try:
+        current = _identity(os.fstat(stream.fileno()))
+    except OSError:
+        raise SdistNormalizationError("sdist changed while it was being normalized") from None
+    if current != expected:
+        raise SdistNormalizationError("sdist changed while it was being normalized")
 
 
 def _bounded_members(archive: tarfile.TarFile) -> list[tarfile.TarInfo]:
@@ -408,14 +463,17 @@ def _scan_archive(
     with raw:
         _validate_complete_gzip(raw)
         try:
-            with gzip.GzipFile(fileobj=raw, mode="rb") as expanded:
-                _preflight_tar_stream(expanded)
-                with tarfile.open(fileobj=expanded, mode="r:") as archive:
+            with (
+                gzip.GzipFile(fileobj=raw, mode="rb") as expanded,
+                _snapshot_preflighted_tar(expanded) as snapshot,
+            ):
+                _require_open_identity(raw, observed_identity)
+                with tarfile.open(fileobj=snapshot, mode="r:") as archive:
                     if archive.pax_headers:
                         raise SdistNormalizationError("sdist global PAX metadata is unsupported")
                     members = _bounded_members(archive)
-                    _validate_header_string_fields(expanded, members)
-                    _validate_tar_tail(expanded, archive.offset)
+                    _validate_header_string_fields(snapshot, members)
+                    _validate_tar_tail(snapshot, archive.offset)
 
                     names: set[str] = set()
                     types: dict[str, str] = {}
@@ -495,6 +553,7 @@ def _scan_archive(
                                 f"sdist member {name!r} has a missing or non-directory parent"
                             )
                     records.sort(key=lambda record: record.name)
+                    _require_open_identity(raw, observed_identity)
                     return observed_identity, tuple(records)
         except SdistNormalizationError:
             raise
@@ -525,15 +584,18 @@ def _write_normalized(
     raw_destination: BinaryIO,
     epoch: int,
 ) -> None:
-    raw_source, _ = _open_regular(source_path, source_identity)
+    raw_source, observed_identity = _open_regular(source_path, source_identity)
     with raw_source:
         _validate_complete_gzip(raw_source)
         try:
-            with gzip.GzipFile(fileobj=raw_source, mode="rb") as expanded:
-                _preflight_tar_stream(expanded)
-                with tarfile.open(fileobj=expanded, mode="r:") as source:
+            with (
+                gzip.GzipFile(fileobj=raw_source, mode="rb") as expanded,
+                _snapshot_preflighted_tar(expanded) as snapshot,
+            ):
+                _require_open_identity(raw_source, observed_identity)
+                with tarfile.open(fileobj=snapshot, mode="r:") as source:
                     members = _bounded_members(source)
-                    _validate_tar_tail(expanded, source.offset)
+                    _validate_tar_tail(snapshot, source.offset)
                     with gzip.GzipFile(
                         filename="",
                         mode="wb",
@@ -558,6 +620,7 @@ def _write_normalized(
                                 else:
                                     with payload:
                                         output.addfile(canonical, payload)
+                    _require_open_identity(raw_source, observed_identity)
             raw_destination.flush()
             os.fsync(raw_destination.fileno())
         except SdistNormalizationError:

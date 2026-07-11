@@ -406,6 +406,15 @@ def test_raw_tar_preflight_stops_on_member_limit_plus_one(
     assert stream.furthest_offset == 4 * 512
 
 
+def test_raw_tar_preflight_rejects_noncanonical_base256_size_field() -> None:
+    module = _load_module()
+    header = bytearray(_raw_tar_header(f"{ROOT}/member"))
+    header[124:136] = bytes([0x80]) + b"\0" * 11
+
+    with pytest.raises(module.SdistNormalizationError, match="noncanonical size"):
+        module._preflight_tar_stream(io.BytesIO(bytes(header)))
+
+
 @pytest.mark.parametrize(
     "member_type",
     [
@@ -435,6 +444,39 @@ def test_raw_tar_preflight_rejects_oversized_extended_header_without_reading_pay
 
     with pytest.raises(module.SdistNormalizationError, match="extended header.*bound"):
         module._preflight_tar_stream(stream)
+
+
+def test_snapshot_tee_rejects_oversized_header_before_reading_or_copying_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    declared_size = module._MAX_EXTENDED_HEADER_BYTES + 1
+    header = _raw_tar_header(
+        "././@PaxHeader",
+        size=declared_size,
+        member_type=tarfile.XHDTYPE,
+    )
+
+    class HeaderOnlyStream(io.BytesIO):
+        def read(self, size: int = -1) -> bytes:
+            if self.tell() >= 512:
+                raise AssertionError("oversized extended-header payload was read")
+            return super().read(size)
+
+    class RecordingSnapshot(io.BytesIO):
+        close_called = False
+
+        def close(self) -> None:
+            self.close_called = True
+
+    snapshot = RecordingSnapshot()
+    monkeypatch.setattr(module.tempfile, "TemporaryFile", lambda *, mode: snapshot)
+
+    with pytest.raises(module.SdistNormalizationError, match="extended header.*bound"):
+        module._snapshot_preflighted_tar(HeaderOnlyStream(header))
+
+    assert snapshot.getvalue() == header
+    assert snapshot.close_called
 
 
 def test_raw_tar_preflight_rejects_consecutive_local_extended_headers() -> None:
@@ -564,6 +606,73 @@ def test_normalizer_rejects_same_size_source_mutation_even_with_restored_mtime(
     assert archive.stat().st_size == original_stat.st_size
     assert archive.stat().st_mtime_ns == original_stat.st_mtime_ns
     assert not list(tmp_path.glob(f".{archive.name}.*.tmp"))
+
+
+def test_tarfile_reads_exact_validated_snapshot_and_detects_source_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    archive = tmp_path / f"{ROOT}.tar.gz"
+    _write_custom_archive(archive, _source_entries())
+    original_tar_open = module.tarfile.open
+    mutated = False
+    parsed_snapshot = False
+
+    def mutate_before_parse(*args: object, **kwargs: object) -> tarfile.TarFile:
+        nonlocal mutated, parsed_snapshot
+        if kwargs.get("mode") == "r:" and not mutated:
+            parsed_snapshot = not isinstance(kwargs.get("fileobj"), gzip.GzipFile)
+            archive.write_bytes(b"rewritten after tar preflight")
+            mutated = True
+        return original_tar_open(*args, **kwargs)
+
+    monkeypatch.setattr(module.tarfile, "open", mutate_before_parse)
+
+    with pytest.raises(module.SdistNormalizationError, match="changed"):
+        module.normalize_sdist(archive, epoch=EPOCH)
+
+    assert mutated
+    assert parsed_snapshot
+    assert archive.read_bytes() == b"rewritten after tar preflight"
+    assert not list(tmp_path.glob(f".{archive.name}.*.tmp"))
+
+
+def test_normalizer_wraps_snapshot_creation_failure_without_payload_or_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    archive = tmp_path / f"{ROOT}.tar.gz"
+    _write_custom_archive(archive, _source_entries())
+    original = archive.read_bytes()
+
+    def fail_snapshot(*_args: object, **_kwargs: object) -> None:
+        raise OSError("sensitive snapshot creation payload")
+
+    monkeypatch.setattr(module.tempfile, "TemporaryFile", fail_snapshot)
+
+    with pytest.raises(module.SdistNormalizationError) as captured:
+        module.normalize_sdist(archive, epoch=EPOCH)
+
+    assert str(captured.value) == "sdist tar snapshot is unavailable"
+    assert "sensitive" not in str(captured.value)
+    assert archive.read_bytes() == original
+    assert not list(tmp_path.glob(f".{archive.name}.*.tmp"))
+
+
+def test_snapshot_read_failure_has_stable_payload_free_error() -> None:
+    module = _load_module()
+
+    class FailingStream:
+        def read(self, _size: int = -1) -> bytes:
+            raise OSError("sensitive snapshot read payload")
+
+    with pytest.raises(module.SdistNormalizationError) as captured:
+        module._snapshot_preflighted_tar(FailingStream())
+
+    assert str(captured.value) == "sdist tar snapshot is unavailable"
+    assert "sensitive" not in str(captured.value)
 
 
 def test_normalizer_replace_failure_is_atomic_and_cleans_temp(
