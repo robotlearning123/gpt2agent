@@ -17,7 +17,10 @@ const argv = process.argv;
 const AUDIO = argv[argv.indexOf("--audio") + 1] || "./q.wav";
 const CHROME = "/usr/bin/google-chrome";
 const PY = "/home/robot/workspace/47-chatgpt2agent/gpt2agent/.venv/bin/python";
-const HELPER = fileURLToPath(new URL("../experiments/sdp_exchange.py", import.meta.url));
+const HELPER = fileURLToPath(new URL(
+  process.env.FULL === "1" ? "../experiments/sdp_exchange_full.py" : "../experiments/sdp_exchange.py",
+  import.meta.url,
+));
 
 function exchange(offerSdp) {
   return new Promise((resolve, reject) => {
