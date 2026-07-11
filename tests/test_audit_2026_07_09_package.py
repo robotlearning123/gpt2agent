@@ -577,7 +577,7 @@ def _python_with_build_backend() -> tuple[list[str], str]:
     ``build`` when it and the declared backend requirements are available,
     otherwise invoke a compatible setuptools backend directly.  A system Python
     is a final fallback for minimal test venvs; incompatible ambient backends
-    must not be mistaken for the project's declared ``setuptools>=77`` backend.
+    must not be mistaken for the project's exact locked build backend.
     """
     candidates = [sys.executable]
     system_python = shutil.which("python3")
@@ -589,9 +589,9 @@ def _python_with_build_backend() -> tuple[list[str], str]:
 
     backend_probe = (
         "from importlib.metadata import version; "
-        "from packaging.version import Version; "
         "import setuptools.build_meta, wheel; "
-        "assert Version(version('setuptools')) >= Version('77')"
+        "assert version('setuptools') == '83.0.0'; "
+        "assert version('wheel') == '0.47.0'"
     )
     for python in candidates:
         has_build = subprocess.run(

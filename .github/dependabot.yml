@@ -4,3 +4,22 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    allow:
+      - dependency-name: "pip"
+      - dependency-name: "build"
+      - dependency-name: "twine"
+      - dependency-name: "setuptools"
+      - dependency-name: "wheel"
+    groups:
+      build-lock:
+        patterns:
+          - "pip"
+          - "build"
+          - "twine"
+          - "setuptools"
+          - "wheel"

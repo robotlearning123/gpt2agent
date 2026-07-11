@@ -635,8 +635,8 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert 'mcp_spec: "mcp==1.26.0"' in ci
     assert 'mcp_spec: "mcp>=1.26,<2"' in ci
     assert "name: Package dry-run" in ci
-    assert "python -m build" in ci
-    assert "python -m twine check dist/*" in ci
+    assert '"$BUILD_VENV/bin/python" -m build --no-isolation' in ci
+    assert '"$BUILD_VENV/bin/python" -m twine check --strict dist/*' in ci
     assert 'scripts/package_smoke.sh dist "$PROJECT_VERSION" "$DIST_VERSION"' in ci
     assert (
         "name: release-candidate-${{ github.sha }}-${{ github.run_id }}-"

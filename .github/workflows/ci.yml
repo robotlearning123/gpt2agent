@@ -53,11 +53,12 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Audit resolved and minimum curl_cffi dependencies
+      - name: Audit runtime and locked builder dependencies
         run: |
           python -m pip install --upgrade pip "pip-audit==2.10.0"
           pip-audit -r requirements.txt --progress-spinner off
           printf '%s\n' 'curl_cffi==0.15.0' | pip-audit -r /dev/stdin --no-deps --disable-pip --progress-spinner off
+          pip-audit -r requirements-build.txt --no-deps --disable-pip --progress-spinner off
 
   test:
     name: Test (${{ matrix.os }}, Python ${{ matrix.python }})
@@ -187,7 +188,7 @@ jobs:
 
   package:
     name: Package dry-run
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -196,14 +197,42 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.12"
-          cache: pip
+          python-version: "3.12.13"
+
+      - name: Install locked build toolchain
+        env:
+          PIP_CONFIG_FILE: /dev/null
+          PIP_INDEX_URL: https://pypi.org/simple
+          PIP_EXTRA_INDEX_URL: ""
+          PIP_TRUSTED_HOST: ""
+          PIP_FIND_LINKS: ""
+          PIP_NO_INDEX: "0"
+          PIP_NO_INPUT: "1"
+        run: |
+          set -euo pipefail
+          BUILD_VENV="$RUNNER_TEMP/gpt2agent-build"
+          rm -rf "$BUILD_VENV"
+          python -m venv "$BUILD_VENV"
+          "$BUILD_VENV/bin/python" -m pip install --require-hashes --only-binary=:all: -r requirements-build.txt --no-cache-dir
+          "$BUILD_VENV/bin/python" -m pip check
+          "$BUILD_VENV/bin/python" -m pip --version
+          "$BUILD_VENV/bin/python" - <<'PY'
+          from importlib.metadata import version
+
+          for distribution in ("build", "twine", "setuptools", "wheel"):
+              print(f"{distribution}=={version(distribution)}")
+          PY
+          echo "BUILD_VENV=$BUILD_VENV" >> "$GITHUB_ENV"
 
       - name: Build and validate distributions
         run: |
-          python -m pip install --upgrade pip build twine
-          python -m build
-          python -m twine check dist/*
+          set -euo pipefail
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA")"
+          export SOURCE_DATE_EPOCH PYTHONHASHSEED=0 TZ=UTC
+          printf 'SOURCE_DATE_EPOCH=%s\nPYTHONHASHSEED=%s\nTZ=%s\n' \
+            "$SOURCE_DATE_EPOCH" "$PYTHONHASHSEED" "$TZ"
+          "$BUILD_VENV/bin/python" -m build --no-isolation
+          "$BUILD_VENV/bin/python" -m twine check --strict dist/*
 
       - name: Test wheel and sdist in clean environments
         run: |
