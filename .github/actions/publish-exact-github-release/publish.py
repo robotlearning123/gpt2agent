@@ -280,6 +280,21 @@ def _fetch_state(
     return release, assets
 
 
+def _require_immutable_releases_enabled(
+    repository: str,
+    token: str,
+    request_json: JsonRequester,
+) -> None:
+    settings = request_json("GET", f"/repos/{repository}/immutable-releases", token, None)
+    if (
+        not isinstance(settings, dict)
+        or set(settings) != {"enabled", "enforced_by_owner"}
+        or settings.get("enabled") is not True
+        or not isinstance(settings.get("enforced_by_owner"), bool)
+    ):
+        raise ValueError("GitHub immutable-release setting is not an exact enabled response")
+
+
 def publish_exact_release(
     repository: str,
     release_id: int,
@@ -322,6 +337,7 @@ def publish_exact_release(
         expected_assets=expected_assets,
         expected_draft=True,
     )
+    _require_immutable_releases_enabled(normalized_repository, token, request_json)
 
     # Close the observable validation/mutation window as much as the REST API permits.
     release, assets = _fetch_state(
@@ -337,6 +353,7 @@ def publish_exact_release(
         expected_assets=expected_assets,
         expected_draft=True,
     )
+    _require_immutable_releases_enabled(normalized_repository, token, request_json)
 
     path = f"/repos/{normalized_repository}/releases/{normalized_release_id}"
     try:
@@ -368,6 +385,7 @@ def publish_exact_release(
             expected_assets=expected_assets,
             expected_draft=True,
         )
+        _require_immutable_releases_enabled(normalized_repository, token, request_json)
         request_json("PATCH", path, token, {"draft": False})
 
     last_error = "published release was not observable"

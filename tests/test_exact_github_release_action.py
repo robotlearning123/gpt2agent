@@ -67,6 +67,10 @@ def _assets(expected: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _immutable_settings(*, enabled: bool = True) -> dict[str, bool]:
+    return {"enabled": enabled, "enforced_by_owner": False}
+
+
 class _FakeGitHub:
     def __init__(
         self,
@@ -74,19 +78,33 @@ class _FakeGitHub:
         assets: list[dict[str, Any]],
         *,
         ambiguous_patch: bool = False,
+        ambiguous_patch_applies: bool = True,
         change_second_snapshot: bool = False,
+        immutable_settings: list[object] | None = None,
     ) -> None:
         self.release = deepcopy(release)
         self.assets = deepcopy(assets)
         self.ambiguous_patch = ambiguous_patch
+        self.ambiguous_patch_applies = ambiguous_patch_applies
         self.change_second_snapshot = change_second_snapshot
+        self.immutable_settings = deepcopy(
+            immutable_settings
+            if immutable_settings is not None
+            else [_immutable_settings(), _immutable_settings()]
+        )
         self.calls: list[tuple[str, str, object | None]] = []
         self.release_gets = 0
+        self.immutable_setting_gets = 0
 
     def __call__(self, method: str, path: str, token: str, payload: object | None):
         assert token == "token"
         self.calls.append((method, path, payload))
         base = "/repos/robotlearning123/gpt2agent/releases/42"
+        immutable_settings_path = "/repos/robotlearning123/gpt2agent/immutable-releases"
+        if method == "GET" and path == immutable_settings_path:
+            response = self.immutable_settings[self.immutable_setting_gets]
+            self.immutable_setting_gets += 1
+            return deepcopy(response)
         if method == "GET" and path == base:
             self.release_gets += 1
             response = deepcopy(self.release)
@@ -96,9 +114,11 @@ class _FakeGitHub:
         if method == "GET" and path == f"{base}/assets?per_page=100":
             return deepcopy(self.assets)
         if method == "PATCH" and path == base and payload == {"draft": False}:
-            self.release["draft"] = False
-            self.release["immutable"] = True
+            if not self.ambiguous_patch or self.ambiguous_patch_applies:
+                self.release["draft"] = False
+                self.release["immutable"] = True
             if self.ambiguous_patch:
+                self.ambiguous_patch = False
                 raise ValueError("ambiguous transport failure")
             return deepcopy(self.release)
         raise AssertionError(f"unexpected request: {method} {path} {payload!r}")
@@ -139,14 +159,23 @@ def test_action_is_isolated_and_does_not_put_token_on_command_line() -> None:
 def test_exact_draft_is_validated_twice_and_patched_by_numeric_id() -> None:
     expected = _expected_assets()
     api = _FakeGitHub(_release(), _assets(expected))
+    release_path = "/repos/robotlearning123/gpt2agent/releases/42"
+    assets_path = f"{release_path}/assets?per_page=100"
+    settings_path = "/repos/robotlearning123/gpt2agent/immutable-releases"
 
     assert _publish(api, expected) == "published"
 
     patch_calls = [call for call in api.calls if call[0] == "PATCH"]
-    assert patch_calls == [
-        ("PATCH", "/repos/robotlearning123/gpt2agent/releases/42", {"draft": False})
+    assert patch_calls == [("PATCH", release_path, {"draft": False})]
+    assert api.calls[:7] == [
+        ("GET", release_path, None),
+        ("GET", assets_path, None),
+        ("GET", settings_path, None),
+        ("GET", release_path, None),
+        ("GET", assets_path, None),
+        ("GET", settings_path, None),
+        ("PATCH", release_path, {"draft": False}),
     ]
-    assert api.calls.index(patch_calls[0]) > 3
     assert {method for method, _, _ in api.calls} <= {"GET", "PATCH"}
 
 
@@ -156,6 +185,67 @@ def test_exact_published_immutable_rerun_is_a_noop_success() -> None:
 
     assert _publish(api, expected) == "already-published"
     assert all(method == "GET" for method, _, _ in api.calls)
+    assert api.immutable_setting_gets == 0
+
+
+def test_disabled_immutable_setting_fails_before_patch() -> None:
+    expected = _expected_assets()
+    api = _FakeGitHub(
+        _release(),
+        _assets(expected),
+        immutable_settings=[_immutable_settings(enabled=False)],
+    )
+
+    with pytest.raises(ValueError, match="immutable-release setting"):
+        _publish(api, expected)
+
+    assert api.immutable_setting_gets == 1
+    assert all(method != "PATCH" for method, _, _ in api.calls)
+
+
+def test_immutable_setting_enabled_to_disabled_drift_fails_before_patch() -> None:
+    expected = _expected_assets()
+    api = _FakeGitHub(
+        _release(),
+        _assets(expected),
+        immutable_settings=[
+            _immutable_settings(),
+            _immutable_settings(enabled=False),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="immutable-release setting"):
+        _publish(api, expected)
+
+    assert api.immutable_setting_gets == 2
+    assert all(method != "PATCH" for method, _, _ in api.calls)
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        None,
+        [],
+        {"enabled": True},
+        {"enabled": True, "enforced_by_owner": False, "unexpected": False},
+        {"enabled": 1, "enforced_by_owner": False},
+        {"enabled": True, "enforced_by_owner": 0},
+    ],
+)
+def test_malformed_immutable_setting_response_fails_before_patch(
+    settings: object,
+) -> None:
+    expected = _expected_assets()
+    api = _FakeGitHub(
+        _release(),
+        _assets(expected),
+        immutable_settings=[settings],
+    )
+
+    with pytest.raises(ValueError, match="immutable-release setting"):
+        _publish(api, expected)
+
+    assert all(method != "PATCH" for method, _, _ in api.calls)
 
 
 def test_ambiguous_patch_is_recovered_only_by_exact_immutable_readback() -> None:
@@ -164,6 +254,28 @@ def test_ambiguous_patch_is_recovered_only_by_exact_immutable_readback() -> None
 
     assert _publish(api, expected) == "published-after-ambiguous-response"
     assert sum(method == "PATCH" for method, _, _ in api.calls) == 1
+    assert api.immutable_setting_gets == 2
+
+
+def test_ambiguous_unapplied_patch_rechecks_setting_before_retry() -> None:
+    expected = _expected_assets()
+    api = _FakeGitHub(
+        _release(),
+        _assets(expected),
+        ambiguous_patch=True,
+        ambiguous_patch_applies=False,
+        immutable_settings=[
+            _immutable_settings(),
+            _immutable_settings(),
+            _immutable_settings(enabled=False),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="immutable-release setting"):
+        _publish(api, expected)
+
+    assert sum(method == "PATCH" for method, _, _ in api.calls) == 1
+    assert api.immutable_setting_gets == 3
 
 
 def test_changed_second_snapshot_fails_before_patch() -> None:
