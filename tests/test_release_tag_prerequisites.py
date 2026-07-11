@@ -10,6 +10,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
+from scripts.verify_remote_action_pin import ActionVerificationError, _extract_pin
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TOOL_CHECK = PROJECT_ROOT / "scripts" / "verify_release_tools.py"
@@ -181,8 +185,16 @@ PY
     )
     workflow = tmp_path / "release.yml"
     workflow.write_text(
-        "uses: robotlearning123/gpt2agent/.github/actions/"
-        f"publish-exact-github-release@{ACTION_PIN}\n",
+        "name: Release\n"
+        "jobs:\n"
+        "  github-release:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - name: Validate and publish the exact draft\n"
+        "        uses: robotlearning123/gpt2agent/.github/actions/"
+        f"publish-exact-github-release@{ACTION_PIN}\n"
+        "        with:\n"
+        "          repository: example/repository\n",
         encoding="utf-8",
     )
     environment = {
@@ -227,6 +239,12 @@ def test_remote_action_pin_verifies_full_sha_and_exact_bytes(tmp_path: Path) -> 
         in events
     )
     assert result.stdout == ""
+
+
+def test_repository_release_workflow_has_one_executable_exact_action_pin() -> None:
+    workflow = PROJECT_ROOT / ".github" / "workflows" / "release.yml"
+
+    assert _extract_pin(workflow.read_bytes(), "robotlearning123/gpt2agent") == ACTION_PIN
 
 
 def test_remote_action_pin_fails_closed_for_unresolved_or_mismatched_remote(
@@ -288,3 +306,56 @@ def test_remote_action_pin_rejects_missing_multiple_or_symbolic_local_inputs(
 
         assert result.returncode != 0
         assert result.stdout == ""
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        (
+            "jobs:\n"
+            "  github-release:\n"
+            "    steps:\n"
+            "      - run: |\n"
+            "          uses: robotlearning123/gpt2agent/.github/actions/"
+            f"publish-exact-github-release@{ACTION_PIN}\n"
+        ),
+        (
+            "uses: robotlearning123/gpt2agent/.github/actions/"
+            f"publish-exact-github-release@{ACTION_PIN}\n"
+        ),
+        (
+            "jobs:\n"
+            "  decoy:\n"
+            "    steps:\n"
+            "      - name: Validate and publish the exact draft\n"
+            "        uses: robotlearning123/gpt2agent/.github/actions/"
+            f"publish-exact-github-release@{ACTION_PIN}\n"
+            "        with:\n"
+        ),
+        (
+            "jobs:\n"
+            "  github-release:\n"
+            "    if: false\n"
+            "    steps:\n"
+            "      - name: Validate and publish the exact draft\n"
+            "        uses: robotlearning123/gpt2agent/.github/actions/"
+            f"publish-exact-github-release@{ACTION_PIN}\n"
+            "        with:\n"
+        ),
+        (
+            "jobs:\n"
+            "  github-release:\n"
+            "    steps:\n"
+            "      - name: Validate and publish the exact draft\n"
+            "        if: false\n"
+            "        uses: robotlearning123/gpt2agent/.github/actions/"
+            f"publish-exact-github-release@{ACTION_PIN}\n"
+            "        with:\n"
+        ),
+    ],
+)
+def test_action_pin_extractor_rejects_non_executable_or_conditional_yaml_context(
+    source: str,
+) -> None:
+    with pytest.raises(ActionVerificationError):
+        _extract_pin(source.encode(), "robotlearning123/gpt2agent")
