@@ -419,12 +419,34 @@ def test_plan_probe_rejects_duplicate_json_keys_without_echoing_values(body: byt
     assert "plus" not in str(caught.value)
 
 
+def test_plan_probe_rejects_overflowed_json_number() -> None:
+    from scripts.verify_account_receipt import RawResponse, ReceiptError, execute_plan_probe
+
+    body = (
+        b'{"accounts":{"account":{"entitlement":{"subscription_plan":"pro",'
+        b'"has_active_subscription":true}}},"ignored_score":1e9999}'
+    )
+    url = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27"
+    response = RawResponse(
+        status=200,
+        headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+        body=body,
+        url=url,
+    )
+
+    with pytest.raises(ReceiptError, match="plan response is invalid"):
+        execute_plan_probe(requester=lambda **_request: response, auth_headers={})
+
+
 @pytest.mark.parametrize(
     "body",
     (
         b'{"models":[],"models":[{"slug":"synthetic"}]}',
         b'{"models":[{"slug":"hidden","slug":"synthetic"}]}',
         b'{"models":[{"slug":"synthetic","score":NaN}]}',
+        b'{"models":[{"slug":"synthetic","score":Infinity}]}',
+        b'{"models":[{"slug":"synthetic","score":-Infinity}]}',
+        b'{"models":[{"slug":"synthetic","score":1e9999}]}',
     ),
 )
 def test_route_shape_rejects_non_strict_json_without_echoing_values(body: bytes) -> None:
@@ -602,6 +624,12 @@ def test_auth_file_requires_owned_regular_private_bounded_token_file(
     auth.write_bytes(
         b'{"tokens":{"access_token":"eyJfirst.canary.signature",'
         b'"access_token":"eyJsecond.canary.signature"}}'
+    )
+    assert _account_token_from_file(auth, codex=True) is None
+
+    auth.write_bytes(
+        b'{"tokens":{"access_token":"eyJsynthetic.canary.signature"},'
+        b'"ignored_score":1e9999}'
     )
     assert _account_token_from_file(auth, codex=True) is None
 

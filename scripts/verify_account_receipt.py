@@ -11,6 +11,7 @@ import importlib.machinery
 import importlib.metadata
 import importlib.util
 import json
+import math
 import os
 import re
 import stat
@@ -93,11 +94,19 @@ def _reject_json_constant(_value: str) -> None:
     raise ValueError("JSON contains a non-finite number")
 
 
+def _parse_finite_json_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("JSON contains a non-finite number")
+    return parsed
+
+
 def _loads_strict_json(payload: str | bytes) -> Any:
     return json.loads(
         payload,
         object_pairs_hook=_unique_json_object,
         parse_constant=_reject_json_constant,
+        parse_float=_parse_finite_json_float,
     )
 
 
