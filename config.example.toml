@@ -1,8 +1,8 @@
 # gpt2agent configuration
 # Copy to ~/.gpt2agent/config.toml and edit as needed.
 
-# The HTTP transport is unauthenticated and proxies your full ChatGPT account.
-# Version 0.0.12 refuses non-loopback hosts. Keep HTTP local, or use stdio.
+# Version 0.0.12 supports stdio only. These fields remain for config-file
+# compatibility and are not bound by the stdio transport.
 [server]
 host = "127.0.0.1"
 port = 9000

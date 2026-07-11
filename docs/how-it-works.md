@@ -100,7 +100,6 @@ account content; their explicit tools still work when intentionally called.
 
 ## Transports
 
-stdio (default; a local subprocess of your client) or unauthenticated
-streamable-HTTP (strictly loopback-only). There is no non-loopback override.
-Native MCP Host and Origin validation rejects non-loopback DNS-rebinding
-attempts. `gpt2agent install` always wires stdio.
+stdio only: the MCP host spawns a local child process. Version 0.0.12 disables
+network transport because loopback TCP is not a per-user account boundary.
+`gpt2agent install` always wires stdio.

@@ -13,8 +13,6 @@ try:
 except ImportError:
     import tomli as tomllib  # type: ignore
 
-from mcp.server.transport_security import TransportSecuritySettings
-
 from gpt2agent.tool_contracts import tool_annotations
 from gpt2agent.tools._redact import redact
 from gpt2agent.tools._errors import SafeFastMCP as FastMCP
@@ -28,15 +26,14 @@ _CONFIG_SEARCH = [
 ]
 
 _DEFAULTS: dict[str, Any] = {
-    # Loopback by default: the HTTP transport has no authentication and proxies a
-    # full ChatGPT account, so binding all interfaces would expose the account to
-    # the LAN/WAN. Version 0.0.12 refuses every non-loopback bind.
+    # Host and port are retained for config compatibility. Version 0.0.12
+    # exposes only stdio because loopback TCP cannot isolate account access from
+    # other users and processes on the same machine.
     "server": {"host": "127.0.0.1", "port": 9000},
     "models": {"chat": "gpt-5-3"},
 }
 
-# Hosts that keep the unauthenticated HTTP transport reachable only from the
-# local machine. Remote serving requires a future authenticated transport.
+# Canonical hosts retained for safe config normalization and compatibility.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "::ffff:127.0.0.1"})
 
 # Citation metadata comes from an upstream widget payload, not from a typed API
@@ -315,33 +312,9 @@ def _canonical_loopback_host(host: object) -> str | None:
     return normalized if normalized in _LOOPBACK_HOSTS else None
 
 
-def _http_bind_decision(host: str, _legacy_allow_remote: bool = False) -> str:
-    """Classify an HTTP bind request as ``ok-loopback`` or ``refuse``.
-
-    The HTTP transport is unauthenticated and proxies a full ChatGPT account, so
-    version 0.0.12 has no non-loopback bypass. The second argument remains only
-    so older callers fail closed rather than changing call shape.
-    """
-    if _canonical_loopback_host(host) is not None:
-        return "ok-loopback"
+def _http_bind_decision(_host: str, _legacy_allow_remote: bool = False) -> str:
+    """Refuse the unauthenticated HTTP account transport on every bind."""
     return "refuse"
-
-
-def _transport_security_settings() -> TransportSecuritySettings:
-    """Return MCP SDK native DNS-rebinding protection for local HTTP."""
-    host_names = ("127.0.0.1", "localhost", "[::1]", "[::ffff:127.0.0.1]")
-    allowed_hosts = [value for host in host_names for value in (host, f"{host}:*")]
-    allowed_origins = [
-        value
-        for scheme in ("http",)
-        for host in host_names
-        for value in (f"{scheme}://{host}", f"{scheme}://{host}:*")
-    ]
-    return TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
-        allowed_hosts=allowed_hosts,
-        allowed_origins=allowed_origins,
-    )
 
 
 def load_config(path: Path | None = None) -> dict[str, Any]:
@@ -407,7 +380,6 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         host=host,
         port=int(srv.get("port", 9000)),
         log_level="WARNING",
-        transport_security=_transport_security_settings(),
     )
 
     chat_model = models.get("chat", "gpt-5-3")
@@ -635,15 +607,15 @@ def main() -> None:
     )
     install_p.add_argument(
         "--transport",
-        choices=["stdio", "http"],
+        choices=["stdio"],
         default="stdio",
-        help="MCP transport (default: stdio — preferred for Claude Code/Codex)",
+        help="MCP transport (stdio only in 0.0.12)",
     )
     install_p.add_argument(
         "--http-port",
         type=int,
         default=9000,
-        help="Port for HTTP transport (default: 9000)",
+        help="deprecated compatibility option; HTTP is disabled",
     )
     install_p.add_argument(
         "--no-skill",
@@ -670,7 +642,7 @@ def main() -> None:
     run_transport.add_argument(
         "--http",
         action="store_true",
-        help="loopback-only Streamable HTTP transport",
+        help="deprecated compatibility flag; HTTP is disabled in 0.0.12",
     )
 
     # bare flags for backward compat: gpt2agent --stdio --config ...
@@ -701,6 +673,13 @@ def main() -> None:
         )
         raise SystemExit(rc)
 
+    http = getattr(args, "http", False)
+    if http:
+        raise SystemExit(
+            "HTTP transport is disabled: loopback TCP cannot isolate your full "
+            "ChatGPT account from other local users or processes. Use --stdio."
+        )
+
     # default: run server
     cfg_path = getattr(args, "config", None)
     cfg = load_config(cfg_path)
@@ -709,36 +688,12 @@ def main() -> None:
     if getattr(args, "host", None):
         cfg["server"]["host"] = args.host
 
-    requested_host = cfg["server"]["host"]
-    port = cfg["server"]["port"]
-    http = getattr(args, "http", False)
-    canonical_host = _canonical_loopback_host(requested_host)
-    if http and canonical_host is None:
-        # The HTTP transport has no authentication and proxies a full ChatGPT
-        # account. Version 0.0.12 has no non-loopback escape hatch.
-        raise SystemExit(
-            f"Refusing non-loopback server.host {requested_host!r}: this could expose your "
-            "full ChatGPT account to the network with no auth.\n"
-            "  • Keep server.host on 127.0.0.1, localhost, or ::1.\n"
-            "  • Remote HTTP is unavailable until authenticated transport support "
-            "is implemented."
-        )
-
-    # The host is unused by stdio. Canonicalizing it to a safe loopback keeps
-    # legacy HTTP-era configs (for example host=0.0.0.0) usable without letting
-    # programmatic FastMCP construction retain an unsafe bind target.
-    host = canonical_host if http else "127.0.0.1"
-    assert host is not None
-    cfg["server"]["host"] = host
+    # Host is unused by stdio. Force a safe inert value so legacy HTTP-era
+    # configs cannot leak a non-loopback bind into programmatic construction.
+    cfg["server"]["host"] = "127.0.0.1"
 
     mcp = build_server(cfg)
-    tools = list(cfg["models"].keys())
-
-    if http:
-        print(f"gpt2agent  http://{host}:{port}/mcp  [{', '.join(tools)}]", flush=True)
-        mcp.run(transport="streamable-http")
-    else:
-        mcp.run(transport="stdio")
+    mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":

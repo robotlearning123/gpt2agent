@@ -56,11 +56,6 @@ gpt2agent install                          # auto-detect everything
 # Want only one client?
 gpt2agent install --client claude-code   # or: codex, cursor, windsurf, claude-desktop, zed
 # (VS Code & Cline: see docs/clients.md for the manual snippet)
-
-# Claude Code URL registration instead of stdio?
-gpt2agent install --client claude-code --transport http --http-port 9000
-# The installer registers the URL; run and supervise the server separately:
-gpt2agent run --http --port 9000
 ```
 
 ### Or as a Claude Code plugin
@@ -87,8 +82,8 @@ Both are idempotent and back up the prior file as `<name>.bak-gpt2agent`.
 
 After a default stdio `install`, restart Claude Code so it re-spawns the
 subprocess. Codex picks up the new server on its next invocation automatically.
-An HTTP Claude Code registration does not start or supervise a server; keep
-`gpt2agent run --http --port 9000` running separately.
+Version 0.0.12 supports stdio only; URL registration fails before changing a
+client configuration.
 
 ### Manual config (if you'd rather not run install)
 
@@ -228,8 +223,8 @@ Optional, searched in order: `~/.gpt2agent/config.toml`, `./config.toml`,
 
 ```toml
 [server]
-host = "127.0.0.1"   # loopback only; the HTTP transport is UNAUTHENTICATED
-port = 9000
+host = "127.0.0.1"   # retained for compatibility; stdio does not bind it
+port = 9000          # retained for compatibility; stdio does not bind it
 
 [models]
 chat     = "gpt-5-3"        # default for chat tool
@@ -310,16 +305,12 @@ has real consequences; please understand them before pointing it at your account
   account **rate-limited, challenged, suspended, or banned**. Use an account you
   can afford to lose, keep volume human-scale, and don't rely on it for anything
   critical. This is a reverse-engineering / research tool, not an official API.
-- **The HTTP transport is UNAUTHENTICATED.** It proxies your *entire* account —
-  read all conversations, spend Deep Research quota, overwrite custom
-  instructions, launch Codex cloud tasks. Anyone who can reach the port controls
-  your account. Therefore:
-  - **Use stdio** (the default for plain `gpt2agent run` and `gpt2agent
-    install`) for local clients like Claude Code and Codex. It is not
-    network-exposed.
-  - The server **binds `127.0.0.1` by default** and **always refuses** a
-    non-loopback HTTP bind. There is no remote override. The MCP SDK's native
-    Host and Origin checks also reject non-loopback DNS-rebinding attempts.
+- **Version 0.0.12 disables HTTP.** Loopback TCP is reachable by other users and
+  processes on the same host, so Host/Origin checks are not account
+  authentication. `--http` and URL installation fail closed before the account
+  server starts or client configuration changes. **Use stdio**, which lets the
+  MCP host own a private child process. A future network transport must add
+  strong per-launch authentication before it can be supported.
 - **Your token stays local.** It is read from `$CODEX_HOME/auth.json` (or
   `~/.codex/auth.json` by default), with `~/.gpt2agent/token.json` as the manual
   fallback. Codex manages its own auth file; gpt2agent creates or tightens the
@@ -391,26 +382,28 @@ installs, imports, builds, or executes them.
 Bootstrap the verifier from `requirements-account-gate.txt` into a new
 owner-private CPython 3.12.13 for Linux x86_64 environment outside the checkout.
 Every ancestor from that runtime to `/` must be root- or operator-owned and must
-not be group/world-writable or a symlink. The bootstrap requires the independently
-reviewed SHA-256 of the canonical Python executable; computing that value from an
-unverified ambient installation is self-attestation and is not acceptable.
+not be group/world-writable or a symlink. The operator accepts only the pinned
+archive; its reviewed executable and full-tree digests are constants rather than
+caller-provided trust assertions.
 
 There are two explicit external provenance boundaries. Hosted CI trusts the
-pinned actions/setup-python action on its isolated runner, immediately copies
+pinned `actions/setup-python` action on its isolated runner, immediately copies
 the complete 3.12.13 runtime out of the writable tool cache into an owner-private
 directory below the canonical runner home, and binds the copy to the source
-executable digest. A local operator must start from a separately reviewed full
-runtime artifact, verify its published artifact checksum, and record the
-canonical extracted executable's SHA-256 before making the private copy below.
-For v0.0.12, the reviewed local source is the
-[`actions/python-versions` `3.12.13-27650778726` release](https://github.com/actions/python-versions/releases/tag/3.12.13-27650778726),
-asset `python-3.12.13-linux-24.04-x64.tar.gz`. Its archive SHA-256 is
-`ce7d511228f095b5ea1ad5568543388870f5964688303f9ddc24ba06c336bfba`;
-after extraction, the canonical `./bin/python3.12` SHA-256 is
-`edcdaf07e49bb241cbccb0f18fdb2c8f2e6e1be36a583fce9fc703894d814238`.
-Verify the archive before extraction and both digests before setting the two
-`GPT2AGENT_TRUSTED_PYTHON_*` variables. These values authorize only that exact
-Ubuntu 24.04 x64 artifact, not an arbitrary CPython 3.12.13 installation.
+executable digest. For the local operator, v0.0.12 pins Astral's attested
+[`python-build-standalone` 20260510 release](https://github.com/astral-sh/python-build-standalone/releases/tag/20260510),
+asset `cpython-3.12.13+20260510-x86_64-unknown-linux-gnu-install_only.tar.gz`.
+The archive SHA-256 is
+`e7332b4b4bb85006deb48d251c786a04c14de104c9b3a006b33457a4a604b8bc`;
+the normalized executable SHA-256 is
+`f7014f68e3c8f180811740735cf1dd5c28be6cff84db11d0ced2a8cd039670a0`;
+and the normalized full-tree SHA-256 is
+`d3a6bd32b73612fce20dbfe1eebd33f2b6ebd1b42b13aa8b1fd1549065be2cc0`.
+This boundary trusts Astral's published build workflow and attested runner in
+addition to the upstream CPython source; it does not claim a PSF binary build.
+Set only `GPT2AGENT_TRUSTED_PYTHON_ARCHIVE` to a protected local copy of that
+exact asset. The reviewed extractor authenticates the bytes, topology, symlink
+map, executable, and complete normalized tree before use.
 The bootstrap then accepts only the reviewed nine-distribution closure, exact
 hashes, binary wheels, and the official PyPI index, and verifies every installed
 file and import origin. It emits only the trusted `site-packages` path on stdout.
@@ -438,194 +431,35 @@ OS sandbox. Keep the release branch and the exact full-SHA publication-action
 commit pushed and resolvable until the first release is fully verified; hosted
 Actions must be able to fetch that immutable action revision.
 
-The trusted release machine must provide an authenticated `gh` CLI for read-only
-operator checks, the separately reviewed governance policy, and the reviewed Pro
-account login. The coordinator prompts for the short-lived, repository-scoped
-release App installation token only after receipt creation. It never passes that
-token to Python or places it in process arguments: it immediately revalidates the
-pinned CI candidate with the operator's read token, independently re-verifies the
-receipt, builds canonical tag JSON, and lets the App create only the new annotated
-tag and ref. Never substitute the operator's user token for the App token.
+The trusted release machine must provide the separately reviewed governance
+policy, an authenticated `/usr/bin/gh`, the reviewed Pro account login, and a
+local copy of the exact pinned Astral 20260510 CPython 3.12.13 Linux x86_64
+install-only archive. The reviewed extractor pins its size, SHA-256, member
+topology, symlink map, executable SHA-256, and normalized
+`hash_runtime_tree.sh` v1 full-tree SHA-256. It extracts only into an
+owner-private disposable directory; callers cannot substitute trust hashes.
+
+Create a private evidence directory, then delegate the complete account gate and
+tag handoff to the reviewed operator. It re-executes under `env -i` and Bash
+privileged mode before parsing arguments, fetches the merged commit into a
+disposable detached worktree, rejects hidden Git index state, and executes only
+root-owned `/usr/bin/gh`, `/usr/bin/git`, and `/usr/bin/python3.12`. The release
+App token is requested only after every read-only gate passes and is never passed
+to Python or placed in process arguments.
 
 ```bash
-set -euo pipefail
-set +x
-GH_BIN=/usr/bin/gh
-GIT_BIN=/usr/bin/git
-test -x "$GH_BIN" && test ! -L "$GH_BIN"
-test -x "$GIT_BIN" && test ! -L "$GIT_BIN"
-ROOT=$("$GIT_BIN" rev-parse --show-toplevel)
-cd "$ROOT"
-"$GIT_BIN" fetch --no-tags origin +main:refs/remotes/origin/main
-: "${GPT2AGENT_RELEASE_GOVERNANCE_POLICY:?set this to the reviewed policy JSON}"
-: "${GPT2AGENT_TRUSTED_PYTHON_BASE:?set this to the canonical base extracted from the reviewed CPython 3.12.13 Linux x86_64 artifact}"
-: "${GPT2AGENT_TRUSTED_PYTHON_SHA256:?set this to the independently recorded canonical executable SHA-256}"
-case "$GPT2AGENT_TRUSTED_PYTHON_SHA256" in
-  (*[!0-9a-f]*|'') exit 1 ;;
-esac
-test "${#GPT2AGENT_TRUSTED_PYTHON_SHA256}" -eq 64
-TRUSTED_PYTHON_SOURCE_BASE=$(realpath -e -- "$GPT2AGENT_TRUSTED_PYTHON_BASE")
-TRUSTED_PYTHON_SOURCE=$(realpath -e -- \
-  "$TRUSTED_PYTHON_SOURCE_BASE/bin/python3.12")
-case "$TRUSTED_PYTHON_SOURCE" in
-  ("$TRUSTED_PYTHON_SOURCE_BASE"/*) ;;
-  (*) exit 1 ;;
-esac
-test -f "$TRUSTED_PYTHON_SOURCE" && test -x "$TRUSTED_PYTHON_SOURCE"
-SOURCE_PYTHON_SHA256=$(sha256sum -- "$TRUSTED_PYTHON_SOURCE")
-SOURCE_PYTHON_SHA256=${SOURCE_PYTHON_SHA256%% *}
-test "$SOURCE_PYTHON_SHA256" = "$GPT2AGENT_TRUSTED_PYTHON_SHA256"
-unset GH_TOKEN GITHUB_TOKEN GPT2AGENT_RELEASE_APP_TOKEN
-read -r -p "Merged release PR number: " PR_NUMBER
-RELEASE_SHA=$("$GH_BIN" pr view "$PR_NUMBER" --json mergeCommit,state \
-  --jq 'select(.state == "MERGED") | .mergeCommit.oid')
-case "$RELEASE_SHA" in (*[!0-9a-f]*|'') exit 1;; esac
-test "${#RELEASE_SHA}" -eq 40
-"$GIT_BIN" merge-base --is-ancestor "$RELEASE_SHA" origin/main
-test -z "$("$GIT_BIN" status --porcelain=v1 --untracked-files=all \
-  --ignored=matching --ignore-submodules=none)"
+install -d -m 700 "$HOME/gpt2agent-release-evidence"
 
-START_BRANCH=$("$GIT_BIN" symbolic-ref --quiet --short HEAD || true)
-START_COMMIT=$("$GIT_BIN" rev-parse HEAD)
-TRUSTED_HOME=
-RUNTIME_ROOT=
-cleanup_release_runtime() {
-  status=$?
-  trap - EXIT HUP INT TERM
-  if [ -n "$START_BRANCH" ]; then
-    "$GIT_BIN" switch -- "$START_BRANCH" >/dev/null || status=1
-  else
-    "$GIT_BIN" switch --detach "$START_COMMIT" >/dev/null || status=1
-  fi
-  if [ -n "$RUNTIME_ROOT" ]; then
-    case "$RUNTIME_ROOT" in
-      ("$TRUSTED_HOME"/.gpt2agent-account-gate.*)
-        if [ -d "$RUNTIME_ROOT" ] && [ ! -L "$RUNTIME_ROOT" ]; then
-          chmod -R u+w -- "$RUNTIME_ROOT" || status=1
-          rm -rf -- "$RUNTIME_ROOT" || status=1
-        else
-          status=1
-        fi
-        ;;
-      (*) status=1 ;;
-    esac
-  fi
-  return "$status"
-}
-trap cleanup_release_runtime EXIT
-trap 'exit 130' HUP INT TERM
-
-"$GIT_BIN" switch --detach "$RELEASE_SHA"
-test "$("$GIT_BIN" rev-parse HEAD)" = "$RELEASE_SHA"
-test -z "$("$GIT_BIN" status --porcelain=v1 --untracked-files=all \
-  --ignored=matching --ignore-submodules=none)"
-
-TRUSTED_HOME=$(realpath -e -- "$HOME")
-test "$TRUSTED_HOME" = "$HOME"
-RUNTIME_ROOT=$(mktemp -d "$TRUSTED_HOME/.gpt2agent-account-gate.XXXXXXXX")
-chmod 700 "$RUNTIME_ROOT"
-TRUSTED_PYTHON_BASE="$RUNTIME_ROOT/cpython-3.12.13-linux-x86_64"
-install -d -m 700 "$TRUSTED_PYTHON_BASE"
-(umask 077; cp -R -- "$TRUSTED_PYTHON_SOURCE_BASE/." "$TRUSTED_PYTHON_BASE/")
-chmod -R go-w -- "$TRUSTED_PYTHON_BASE"
-PYTHON_RELATIVE=${TRUSTED_PYTHON_SOURCE#"$TRUSTED_PYTHON_SOURCE_BASE"/}
-TRUSTED_PYTHON="$TRUSTED_PYTHON_BASE/$PYTHON_RELATIVE"
-test "$TRUSTED_PYTHON" = "$(realpath -e -- "$TRUSTED_PYTHON")"
-test -f "$TRUSTED_PYTHON" && test -x "$TRUSTED_PYTHON" && test ! -L "$TRUSTED_PYTHON"
-COPIED_PYTHON_SHA256=$(sha256sum -- "$TRUSTED_PYTHON")
-COPIED_PYTHON_SHA256=${COPIED_PYTHON_SHA256%% *}
-test "$COPIED_PYTHON_SHA256" = "$GPT2AGENT_TRUSTED_PYTHON_SHA256"
-VENV_PARENT="$RUNTIME_ROOT/account-runtime"
-install -d -m 700 "$VENV_PARENT"
-VENV="$VENV_PARENT/venv"
-SITE_PACKAGES=$(scripts/bootstrap_account_gate.sh \
-  --python "$TRUSTED_PYTHON" \
-  --python-sha256 "$GPT2AGENT_TRUSTED_PYTHON_SHA256" \
-  --venv "$VENV")
-VERIFIER_PYTHON="$VENV/bin/python"
-test -x "$VERIFIER_PYTHON"
-
-REPOSITORY=$("$GH_BIN" repo view --json nameWithOwner --jq .nameWithOwner)
-"$VERIFIER_PYTHON" -I -S -B scripts/audit_release_governance.py \
-  --live "$REPOSITORY" \
-  --policy "$GPT2AGENT_RELEASE_GOVERNANCE_POLICY" \
-  --gh "$GH_BIN"
-
-CANDIDATE_JSON="$RUNTIME_ROOT/candidate.json"
-GH_TOKEN="$("$GH_BIN" auth token)" "$VERIFIER_PYTHON" -I -S -B \
-  scripts/verify_main_ci.py \
-  --repository "$REPOSITORY" --commit "$RELEASE_SHA" \
-  --print-candidate-json --attempts 180 --delay 10 >"$CANDIDATE_JSON"
-candidate_field() {
-  "$VERIFIER_PYTHON" -I -S -B -c \
-    'import json,pathlib,sys; print(json.loads(pathlib.Path(sys.argv[1]).read_bytes())[sys.argv[2]])' \
-    "$CANDIDATE_JSON" "$1"
-}
-CI_RUN_ID=$(candidate_field run_id)
-CI_RUN_ATTEMPT=$(candidate_field run_attempt)
-CI_ARTIFACT_ID=$(candidate_field artifact_id)
-CI_ARTIFACT_NAME=$(candidate_field artifact_name)
-CI_ARTIFACT_DIGEST=$(candidate_field artifact_digest)
-CI_ARTIFACT_SIZE=$(candidate_field artifact_size)
-CI_ARTIFACT_EXPIRES_AT=$(candidate_field artifact_expires_at)
-
-COMMIT=$("$GIT_BIN" rev-parse HEAD)
-TREE=$("$GIT_BIN" rev-parse 'HEAD^{tree}')
-VERSION=$("$VERIFIER_PYTHON" -I -S -B -c \
-  'import pathlib,sys,tomllib; print(tomllib.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["project"]["version"])' \
-  "$ROOT/pyproject.toml")
-TAG="v$VERSION"
-"$VERIFIER_PYTHON" -I -S -B scripts/verify_release.py --tag "$TAG"
-DIST="$ROOT/../gpt2agent-$TAG-$COMMIT-main-ci-candidate"
-RECEIPT="$ROOT/../gpt2agent-$TAG-$COMMIT.account-receipt.json"
-test ! -e "$DIST" && test ! -L "$DIST"
-test ! -e "$RECEIPT" && test ! -L "$RECEIPT"
-GH_TOKEN="$("$GH_BIN" auth token)" "$GH_BIN" run download "$CI_RUN_ID" \
-  --repo "$REPOSITORY" --name "$CI_ARTIFACT_NAME" --dir "$DIST"
-
-CREATE_SUMMARY="$RUNTIME_ROOT/create-summary.txt"
-"$VERIFIER_PYTHON" -I -S -B scripts/verify_account_receipt.py create \
-  --checkout "$ROOT" --dist "$DIST" --output "$RECEIPT" \
-  --commit "$COMMIT" --tree "$TREE" --expected-plan pro \
-  --repository "$REPOSITORY" \
-  --ci-run-id "$CI_RUN_ID" --ci-run-attempt "$CI_RUN_ATTEMPT" \
-  --ci-artifact-id "$CI_ARTIFACT_ID" \
-  --ci-artifact-digest "$CI_ARTIFACT_DIGEST" \
-  --ci-artifact-size "$CI_ARTIFACT_SIZE" \
-  --ci-artifact-expires-at "$CI_ARTIFACT_EXPIRES_AT" \
-  --trusted-site-packages "$SITE_PACKAGES" >"$CREATE_SUMMARY"
-RECEIPT_SHA256=$("$VERIFIER_PYTHON" -I -S -B -c \
-  'import hashlib,pathlib,sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' \
-  "$RECEIPT")
-case "$RECEIPT_SHA256" in (*[!0-9a-f]*|'') exit 1;; esac
-test "${#RECEIPT_SHA256}" -eq 64
-VERIFY_SUMMARY="$RUNTIME_ROOT/verify-summary.txt"
-"$VERIFIER_PYTHON" -I -S -B scripts/verify_account_receipt.py verify \
-  --receipt "$RECEIPT" --checkout "$ROOT" --dist "$DIST" \
-  --commit "$COMMIT" --tree "$TREE" --sha256 "$RECEIPT_SHA256" \
-  --repository "$REPOSITORY" \
-  --ci-run-id "$CI_RUN_ID" --ci-run-attempt "$CI_RUN_ATTEMPT" \
-  --ci-artifact-id "$CI_ARTIFACT_ID" \
-  --ci-artifact-digest "$CI_ARTIFACT_DIGEST" \
-  --ci-artifact-size "$CI_ARTIFACT_SIZE" \
-  --ci-artifact-expires-at "$CI_ARTIFACT_EXPIRES_AT" >"$VERIFY_SUMMARY"
-cmp --silent "$CREATE_SUMMARY" "$VERIFY_SUMMARY"
-
-scripts/create_release_tag.sh \
-  --python "$VERIFIER_PYTHON" --gh "$GH_BIN" --git "$GIT_BIN" \
-  --governance-policy "$GPT2AGENT_RELEASE_GOVERNANCE_POLICY" \
-  --checkout "$ROOT" --dist "$DIST" \
-  --receipt "$RECEIPT" --receipt-sha256 "$RECEIPT_SHA256" \
-  --repository "$REPOSITORY" --tag "$TAG" \
-  --commit "$COMMIT" --tree "$TREE" \
-  --ci-run-id "$CI_RUN_ID" --ci-run-attempt "$CI_RUN_ATTEMPT" \
-  --ci-artifact-id "$CI_ARTIFACT_ID" \
-  --ci-artifact-digest "$CI_ARTIFACT_DIGEST" \
-  --ci-artifact-size "$CI_ARTIFACT_SIZE" \
-  --ci-artifact-expires-at "$CI_ARTIFACT_EXPIRES_AT"
-
-trap - EXIT HUP INT TERM
-cleanup_release_runtime
+scripts/run_account_release.sh \
+  --repository robotlearning123/gpt2agent \
+  --pr "$PR_NUMBER" \
+  --operator-home "$(realpath -e "$HOME")" \
+  --codex-home "$(realpath -e "${CODEX_HOME:-$HOME/.codex}")" \
+  --evidence-directory "$(realpath -e "$HOME/gpt2agent-release-evidence")" \
+  --trusted-python-archive "$(realpath -e "$GPT2AGENT_TRUSTED_PYTHON_ARCHIVE")" \
+  --governance-policy "$(realpath -e "$GPT2AGENT_RELEASE_GOVERNANCE_POLICY")" \
+  --gh /usr/bin/gh \
+  --git /usr/bin/git
 ```
 
 The release workflow (`.github/workflows/release.yml`) verifies every version
@@ -700,92 +534,13 @@ the approved local evidence store; do not upload it to Actions or the public
 GitHub Release:
 
 ```bash
-set -euo pipefail
-umask 077
-GH_BIN=/usr/bin/gh
-GIT_BIN=/usr/bin/git
-test -x "$GH_BIN" && test ! -L "$GH_BIN"
-test -x "$GIT_BIN" && test ! -L "$GIT_BIN"
-: "${GPT2AGENT_TRUSTED_PYTHON_BASE:?set this to the canonical base extracted from the reviewed CPython 3.12.13 Linux x86_64 artifact}"
-: "${GPT2AGENT_TRUSTED_PYTHON_SHA256:?set this to the independently recorded canonical executable SHA-256}"
-AUDIT_PYTHON_SOURCE_BASE=$(realpath -e -- "$GPT2AGENT_TRUSTED_PYTHON_BASE")
-AUDIT_PYTHON_SOURCE=$(realpath -e -- \
-  "$AUDIT_PYTHON_SOURCE_BASE/bin/python3.12")
-SOURCE_PYTHON_SHA256=$(sha256sum -- "$AUDIT_PYTHON_SOURCE")
-SOURCE_PYTHON_SHA256=${SOURCE_PYTHON_SHA256%% *}
-test "$SOURCE_PYTHON_SHA256" = "$GPT2AGENT_TRUSTED_PYTHON_SHA256"
-read -r -p "Release tag (for example v0.0.12): " TAG
-ROOT=$("$GIT_BIN" rev-parse --show-toplevel)
-cd "$ROOT"
-case "$TAG" in (v[0-9]*.[0-9]*.[0-9]*) ;; (*) exit 1;; esac
-AUDIT_REF=refs/release-verification/retained-receipt
-if "$GIT_BIN" show-ref --verify --quiet "$AUDIT_REF"; then exit 1; fi
-AUDIT_HOME=$(realpath -e -- "$HOME")
-test "$AUDIT_HOME" = "$HOME"
-AUDIT_ROOT=$(mktemp -d "$AUDIT_HOME/.gpt2agent-receipt-audit.XXXXXXXX")
-chmod 700 "$AUDIT_ROOT"
-cleanup_receipt_audit() {
-  status=$?
-  trap - EXIT HUP INT TERM
-  "$GIT_BIN" update-ref -d "$AUDIT_REF" >/dev/null 2>&1 || status=1
-  case "$AUDIT_ROOT" in
-    ("$AUDIT_HOME"/.gpt2agent-receipt-audit.*)
-      if [ -d "$AUDIT_ROOT" ] && [ ! -L "$AUDIT_ROOT" ]; then
-        chmod -R u+w -- "$AUDIT_ROOT" || status=1
-        rm -rf -- "$AUDIT_ROOT" || status=1
-      else
-        status=1
-      fi
-      ;;
-    (*) status=1 ;;
-  esac
-  return "$status"
-}
-trap cleanup_receipt_audit EXIT
-trap 'exit 130' HUP INT TERM
-
-AUDIT_PYTHON_BASE="$AUDIT_ROOT/cpython-3.12.13-linux-x86_64"
-install -d -m 700 "$AUDIT_PYTHON_BASE"
-(umask 077; cp -R -- "$AUDIT_PYTHON_SOURCE_BASE/." "$AUDIT_PYTHON_BASE/")
-chmod -R go-w -- "$AUDIT_PYTHON_BASE"
-PYTHON_RELATIVE=${AUDIT_PYTHON_SOURCE#"$AUDIT_PYTHON_SOURCE_BASE"/}
-AUDIT_PYTHON="$AUDIT_PYTHON_BASE/$PYTHON_RELATIVE"
-test "$AUDIT_PYTHON" = "$(realpath -e -- "$AUDIT_PYTHON")"
-COPIED_PYTHON_SHA256=$(sha256sum -- "$AUDIT_PYTHON")
-COPIED_PYTHON_SHA256=${COPIED_PYTHON_SHA256%% *}
-test "$COPIED_PYTHON_SHA256" = "$GPT2AGENT_TRUSTED_PYTHON_SHA256"
-"$AUDIT_PYTHON" -I -S -B -c \
-  'import os,sys; assert (sys.implementation.name,sys.version_info[:3],sys.platform,os.uname().machine)==("cpython",(3,12,13),"linux","x86_64")'
-
-"$GIT_BIN" fetch --force --no-tags origin "refs/tags/$TAG:$AUDIT_REF"
-test "$("$GIT_BIN" cat-file -t "$AUDIT_REF")" = tag
-COMMIT=$("$GIT_BIN" rev-parse "$AUDIT_REF^{}")
-TREE=$("$GIT_BIN" rev-parse "$AUDIT_REF^{tree}")
-RECEIPT="$ROOT/../gpt2agent-$TAG-$COMMIT.account-receipt.json"
-test -f "$RECEIPT" && test ! -L "$RECEIPT"
-test "$(stat -c '%a' "$RECEIPT")" = 600
-
-TAG_OBJECT="$AUDIT_ROOT/tag-object"
-TAG_OUTPUT="$AUDIT_ROOT/tag-output"
-TAG_VERIFIER="$AUDIT_ROOT/release_tag_metadata.py"
-"$GIT_BIN" cat-file tag "$AUDIT_REF" >"$TAG_OBJECT"
-"$GIT_BIN" show "$AUDIT_REF:scripts/release_tag_metadata.py" >"$TAG_VERIFIER"
-REPOSITORY=$("$GH_BIN" repo view --json nameWithOwner --jq .nameWithOwner)
-GITHUB_OUTPUT="$TAG_OUTPUT" "$AUDIT_PYTHON" -I -S -B "$TAG_VERIFIER" \
-  verify-tag-object --tag-object-file "$TAG_OBJECT" \
-  --repository "$REPOSITORY" --tag "$TAG" \
-  --commit "$COMMIT" --tree "$TREE"
-test "$(grep -c '^receipt_sha256=' "$TAG_OUTPUT")" -eq 1
-TAG_RECEIPT_SHA256=$(sed -n 's/^receipt_sha256=//p' "$TAG_OUTPUT")
-test "${#TAG_RECEIPT_SHA256}" -eq 64
-case "$TAG_RECEIPT_SHA256" in (*[!0-9a-f]*|'') exit 1;; esac
-LOCAL_RECEIPT_SHA256=$("$AUDIT_PYTHON" -I -S -B -c \
-  'import hashlib,pathlib,sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' \
-  "$RECEIPT")
-test "$LOCAL_RECEIPT_SHA256" = "$TAG_RECEIPT_SHA256"
-
-trap - EXIT HUP INT TERM
-cleanup_receipt_audit
+scripts/audit_retained_receipt.sh \
+  --repository robotlearning123/gpt2agent \
+  --tag v0.0.12 \
+  --operator-home "$(realpath -e "$HOME")" \
+  --evidence-directory "$(realpath -e "$HOME/gpt2agent-release-evidence")" \
+  --trusted-python-archive "$(realpath -e "$GPT2AGENT_TRUSTED_PYTHON_ARCHIVE")" \
+  --git /usr/bin/git
 ```
 
 Retain or dispose of the owned local receipt and candidate directory only under

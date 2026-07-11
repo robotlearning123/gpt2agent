@@ -82,18 +82,17 @@ def test_claude_idempotent(tmp_path: Path) -> None:
     assert cfg.read_text() == snap
 
 
-def test_claude_http_transport(tmp_path: Path) -> None:
+def test_claude_http_transport_is_rejected_before_write(tmp_path: Path) -> None:
     cfg = tmp_path / "claude.json"
-    install_claude_code(config_path=cfg, transport="http", http_port=9001)
-    data = json.loads(cfg.read_text())
-    assert data["mcpServers"]["gpt2agent"]["type"] == "url"
-    assert data["mcpServers"]["gpt2agent"]["url"] == "http://localhost:9001/mcp"
+    with pytest.raises(ValueError, match="HTTP transport is disabled"):
+        install_claude_code(config_path=cfg, transport="http", http_port=9001)
+    assert not cfg.exists()
 
 
 def test_claude_rejects_unknown_transport_before_write(tmp_path: Path) -> None:
     cfg = tmp_path / "claude.json"
 
-    with pytest.raises(ValueError, match="transport must be 'stdio' or 'http'"):
+    with pytest.raises(ValueError, match="transport must be 'stdio'"):
         install_claude_code(config_path=cfg, transport="websocket")
 
     assert not cfg.exists()
@@ -756,7 +755,7 @@ def test_install_rejects_unknown_transport_before_any_mutation(
         if path.is_file()
     }
     assert status == 1
-    assert "transport must be 'stdio' or 'http'" in captured.err
+    assert "transport must be 'stdio'" in captured.err
     assert installer_calls == []
     assert after == before
 
@@ -772,7 +771,7 @@ def test_http_install_rejects_codex_before_writing_config(
 
     captured = capsys.readouterr()
     assert status == 1
-    assert "HTTP registration is supported only for Claude Code" in captured.err
+    assert "HTTP transport is disabled" in captured.err
     assert not (codex_home / "config.toml").exists()
 
 
@@ -793,14 +792,14 @@ def test_http_install_rejects_mixed_auto_detect_before_any_write(
 
     captured = capsys.readouterr()
     assert status == 1
-    assert "unsupported detected target(s): codex" in captured.err
+    assert "HTTP transport is disabled" in captured.err
     assert not (home / ".claude.json").exists()
     assert codex_config.read_text() == 'model = "keep-me"\n'
     assert not codex_config.with_name("config.toml.bak-gpt2agent").exists()
     assert not (claude_dir / "skills").exists()
 
 
-def test_http_install_allows_claude_url_and_prints_server_command(
+def test_http_install_rejects_claude_before_writing_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     home = tmp_path / "home"
@@ -816,11 +815,7 @@ def test_http_install_allows_claude_url_and_prints_server_command(
     )
 
     captured = capsys.readouterr()
-    assert status == 0
-    data = json.loads((home / ".claude.json").read_text())
-    assert data["mcpServers"]["gpt2agent"] == {
-        "type": "url",
-        "url": "http://localhost:9123/mcp",
-    }
-    assert "gpt2agent run --http --port 9123" in captured.out
-    assert "spawns the new MCP subprocess" not in captured.out
+    assert status == 1
+    assert "HTTP transport is disabled" in captured.err
+    assert not (home / ".claude.json").exists()
+    assert "http://localhost:9123/mcp" not in captured.out

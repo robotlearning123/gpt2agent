@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import stat
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -289,6 +290,58 @@ def _create_checkout(tmp_path: Path) -> tuple[Path, str, str]:
     _git(checkout, "add", ".")
     _git(checkout, "commit", "--quiet", "-m", "fixture")
     return checkout, _git(checkout, "rev-parse", "HEAD"), _git(checkout, "rev-parse", "HEAD^{tree}")
+
+
+def test_checkout_verification_ignores_ambient_git_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts.verify_account_receipt import verify_checkout
+
+    checkout, commit, tree = _create_checkout(tmp_path)
+    attacker = tmp_path / "attacker-bin"
+    attacker.mkdir()
+    marker = tmp_path / "ambient-git-used"
+    fake_git = attacker / "git"
+    fake_git.write_text(
+        "#!/bin/sh\n"
+        f": > {shlex.quote(str(marker))}\n"
+        "exit 91\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o700)
+    monkeypatch.setenv("PATH", str(attacker))
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "attacker-git-dir"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "attacker-work-tree"))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "attacker-index"))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.fsmonitor")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "attacker-command")
+
+    assert verify_checkout(
+        checkout,
+        declared_commit=commit,
+        declared_tree=tree,
+    ) == (commit, tree)
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("flag", ("--skip-worktree", "--assume-unchanged"))
+def test_checkout_verification_rejects_hidden_index_state(
+    tmp_path: Path,
+    flag: str,
+) -> None:
+    from scripts.verify_account_receipt import ReceiptError, verify_checkout
+
+    checkout, commit, tree = _create_checkout(tmp_path)
+    _git(checkout, "update-index", flag, "source.py")
+
+    with pytest.raises(ReceiptError, match="hidden tracked state"):
+        verify_checkout(
+            checkout,
+            declared_commit=commit,
+            declared_tree=tree,
+        )
 
 
 def _create_artifacts(parent: Path) -> Path:

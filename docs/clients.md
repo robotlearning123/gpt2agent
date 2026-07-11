@@ -93,22 +93,9 @@ Add the same `mcpServers` block (see above) to Cline's settings file
 Point it at the command `gpt2agent` with args `["run", "--stdio"]`. That's all most
 hosts need.
 
-## HTTP transport (advanced, not recommended)
+## Network transport
 
-stdio is the default and safest. The HTTP transport is **unauthenticated** and
-proxies your full account, so it binds loopback only and always refuses a
-non-loopback host. There is no remote override. The server also enables native
-MCP Host and Origin validation to reject non-loopback DNS-rebinding attempts.
-See the README's **Security & risk** section.
-
-Only Claude Code URL registration is automated:
-
-```bash
-gpt2agent install --client claude-code --transport http --http-port 9000
-gpt2agent run --http --port 9000
-```
-
-The first command writes the URL entry. It does not start or supervise the
-second command. Keep the server running separately before restarting Claude
-Code. HTTP installation for Codex, Cursor, Windsurf, Claude Desktop, Zed, or a
-mixed auto-detected target set fails before any configuration is written.
+Version 0.0.12 is stdio-only. URL installation and the legacy HTTP launch flag
+fail closed because loopback TCP does not provide per-user account isolation.
+Use the spawned stdio configurations above. Network support may return only
+with request authentication or an equivalent per-user boundary.

@@ -259,7 +259,9 @@ jobs:
           ACCOUNT_GATE_PARENT="$ACCOUNT_GATE_ROOT/account-runtime"
           ACCOUNT_GATE_VENV="$ACCOUNT_GATE_PARENT/venv"
           install -d -m 700 "$ACCOUNT_GATE_PARENT"
-          SITE_PACKAGES="$(scripts/bootstrap_account_gate.sh \
+          SITE_PACKAGES="$(/usr/bin/env -i \
+            PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+            /bin/bash -p scripts/bootstrap_account_gate.sh \
             --python "$ACCOUNT_GATE_PYTHON" \
             --python-sha256 "$ACCOUNT_GATE_PYTHON_SHA256" \
             --venv "$ACCOUNT_GATE_VENV")"

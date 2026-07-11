@@ -47,29 +47,18 @@ general ChatGPT model. Both `chat` and `agent` validate their selected general
 model. A Work-only identifier from `list_work_models` is not valid on either
 path unless the same exact slug also appears in `list_models`.
 
-## HTTP is local-only
+## HTTP is disabled
 
-Streamable HTTP has no account-level authentication and now refuses every
-non-loopback bind. The legacy `GPT2AGENT_ALLOW_REMOTE` variable cannot override
-that refusal. Remove it from service files and shell profiles.
-
-Plain `gpt2agent run` now starts the default stdio transport. Existing HTTP
-service units or launch scripts that relied on plain `gpt2agent run` must add
-the explicit flag and port:
-
-```bash
-gpt2agent run --http --port 9000
-```
-
-`gpt2agent install --client claude-code --transport http --http-port 9000`
-registers that loopback URL with Claude Code only; it does not start or manage
-the server. HTTP install requests for Codex, other supported hosts, or a mixed
-auto-detected target set now fail before writing any configuration.
+Version 0.0.12 supports stdio only. Loopback TCP is visible to other users and
+processes on the same host, so a loopback bind plus Host/Origin validation is
+not account authentication. The legacy HTTP launch flag and URL installer now
+fail before server construction or configuration writes. Remove HTTP service
+units and `GPT2AGENT_ALLOW_REMOTE` from current launch configuration, then run
+`gpt2agent install` to restore a spawned stdio entry.
 
 Use stdio for Claude Code, Codex, Cursor, Windsurf, Claude Desktop, Zed, and
-other local MCP clients. If a local browser client needs streamable HTTP, bind
-`127.0.0.1`, `localhost`, or a supported loopback address. Native MCP Host and
-Origin validation rejects non-loopback DNS-rebinding attempts.
+other local MCP clients. A future network transport requires strong per-launch
+authentication or an equivalent per-user boundary.
 
 ## Raw diagnostics were removed
 
@@ -146,17 +135,16 @@ they are not presented as a supported MCP audio capability.
 The account gate must run on a trusted local machine from the clean repository
 root at the exact candidate commit. Follow the complete build-once operator
 procedure in the README. First copy CPython 3.12.13 for Linux x86_64 from a
-separately reviewed full runtime artifact into an owner-private directory below
-the canonical operator home. Verify the full artifact's published checksum
-before extraction, independently record the canonical executable SHA-256, and
-pass that reviewed artifact checksum binding to
-`scripts/bootstrap_account_gate.sh`; calculating it from an unverified ambient
-Python is not provenance. Every runtime ancestor to `/` must be owned by root or
-the operator and must not be group/world-writable or a symlink. Hosted CI uses
-the same private-copy contract, with its pinned `actions/setup-python` action and
-isolated runner as the explicit external provenance authority. The reviewed hash
-lock allows only the exact nine-distribution account-gate closure, binary wheels,
-and the official PyPI index; the verifier then checks every installed
+the exact Astral 20260510 install-only archive pinned in the README. Set
+`GPT2AGENT_TRUSTED_PYTHON_ARCHIVE` to a protected local copy; do not provide
+runtime hashes from the operator environment. The reviewed extractor pins the
+archive size and SHA-256, topology, symlink map, executable SHA-256, and complete
+normalized tree SHA-256, then extracts into an owner-private disposable
+directory. Every runtime ancestor to `/` must be owned by root or the operator
+and must not be group/world-writable or a symlink. Hosted CI retains its distinct
+pinned `actions/setup-python` and isolated-runner provenance boundary. The
+reviewed hash lock allows only the exact nine-distribution account-gate closure,
+binary wheels, and the official PyPI index; the verifier then checks every installed
 distribution, file, owner/mode, import origin, and runtime path under
 `python -I -S -B`.
 
@@ -262,10 +250,12 @@ being audited. The command emits deterministic JSON and exits nonzero if the
 policy or exact trusted `gh` path is missing or invalid, any required control is
 absent, or the live snapshot cannot be validated.
 
-After the workflow is green, verify the raw annotated tag object with the
-tagged `release_tag_metadata.py`, compare its canonical `receipt_sha256` output
-with a fresh hash of the retained mode-0600 local receipt, and keep the receipt
-only in the approved local evidence store. Do not upload it to Actions or the
-public GitHub Release. The public tag and release-evidence asset carry only its
-digest and exact artifact handoff; they do not expose the shape-only account
-probe records.
+After the workflow is green, run `scripts/audit_retained_receipt.sh` with the
+repository, tag, protected evidence directory, pinned runtime archive, and
+`/usr/bin/git`. It fetches the public annotated tag into a disposable bare
+repository, executes only the tagged verifiers under the authenticated runtime,
+and compares the tag's canonical `receipt_sha256` with the retained mode-0600
+receipt. Keep that receipt only in the approved local evidence store. Do not
+upload it to Actions or the public GitHub Release. The public tag and
+release-evidence asset carry only its digest and exact artifact handoff; they do
+not expose the shape-only account probe records.

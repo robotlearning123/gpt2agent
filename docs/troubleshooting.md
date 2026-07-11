@@ -62,12 +62,11 @@ rejected effort. A Work-only slug from `list_work_models` remains invalid for
 `chat` or the configured `agent` model unless the exact slug also appears in the
 general catalog. Leave `thinking_effort` unset to use the model default.
 
-### HTTP refuses a non-loopback host
+### HTTP transport is disabled
 
-This is intentional. The streamable HTTP transport has no authentication and no
-remote override. Use `gpt2agent run --stdio` for local MCP clients, or bind a
-supported loopback host for a local browser client. Native Host/Origin checks
-also reject non-loopback DNS-rebinding requests.
+This is intentional in 0.0.12. Loopback TCP cannot isolate the account from
+other users and processes on the same host. Use `gpt2agent run --stdio` or rerun
+`gpt2agent install` to restore the spawned stdio configuration.
 
 ### image gen / code interpreter / canvas returns plain text
 

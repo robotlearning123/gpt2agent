@@ -182,6 +182,7 @@ esac
     receipt.write_text("{}\n", encoding="utf-8")
     policy = tmp_path / "reviewed-policy.json"
     policy.write_text("{}\n", encoding="utf-8")
+    irreversible_state = tmp_path / "irreversible-state"
     command = [
         str(COORDINATOR),
         "--python",
@@ -200,6 +201,8 @@ esac
         str(receipt),
         "--receipt-sha256",
         RECEIPT_SHA256,
+        "--irreversible-state-file",
+        str(irreversible_state),
         "--repository",
         "robotlearning123/gpt2agent",
         "--tag",
@@ -322,6 +325,9 @@ def test_coordinator_closes_governance_action_and_tag_sequence(tmp_path: Path) -
         event for event in events if event.startswith(("python-", "git-env"))
     )
     assert poison == []
+    assert (tmp_path / "irreversible-state").read_text(encoding="utf-8") == (
+        f"attempted refs/tags/v0.0.12 object={TAG_OBJECT_SHA} commit={COMMIT}\n"
+    )
 
 
 def test_app_token_calls_ignore_path_and_ambient_gh_or_git_environment(tmp_path: Path) -> None:
@@ -363,6 +369,7 @@ def test_pre_mutation_failures_never_create_a_tag_ref(
     assert result["returncode"] != "0"
     assert not any(event.startswith("gh-tag") for event in events)
     assert not any(event.startswith("gh-ref") for event in events)
+    assert not (tmp_path / "irreversible-state").exists()
     if mode.startswith("action-"):
         assert not any(event.startswith("python-ci") for event in events)
 
@@ -401,6 +408,7 @@ def test_post_ref_absence_or_mismatch_emits_irreversible_recovery_error(
     assert any(event.startswith("gh-ref") for event in events)
     assert any(event.startswith("git-fetch") for event in events)
     assert "IRREVERSIBLE POST-REF STATE" in result["stderr"]
+    assert (tmp_path / "irreversible-state").is_file()
     rendered = "\n".join(events + [result["stdout"], result["stderr"]])
     assert "update-ref refs/tags" not in rendered
     assert "git push" not in rendered
@@ -465,6 +473,28 @@ def test_coordinator_source_never_updates_or_deletes_a_remote_ref() -> None:
     assert "--method PATCH" not in source
 
 
+def test_coordinator_ignores_bash_startup_environment(tmp_path: Path) -> None:
+    marker = tmp_path / "bash-env-ran"
+    bash_env = tmp_path / "bash-env"
+    bash_env.write_text(
+        f": > {shlex.quote(str(marker))}\n",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["BASH_ENV"] = str(bash_env)
+
+    result = subprocess.run(
+        [str(COORDINATOR)],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert not marker.exists()
+
+
 @pytest.mark.parametrize("timeout", ("", "0", "901", "-1", "1.5", "not-a-number"))
 def test_coordinator_rejects_unbounded_or_malformed_token_timeout(
     tmp_path: Path,
@@ -493,4 +523,5 @@ def test_signal_after_ref_attempt_reports_irreversible_state_and_cleans_scratch(
     assert result["returncode"] == "130"
     assert any(event.startswith("gh-ref") for event in events)
     assert "IRREVERSIBLE POST-REF STATE" in result["stderr"]
+    assert (tmp_path / "irreversible-state").is_file()
     assert list(tmp_path.glob("gpt2agent-release-tag.*")) == []

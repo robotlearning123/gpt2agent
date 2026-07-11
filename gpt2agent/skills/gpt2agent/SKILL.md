@@ -183,8 +183,8 @@ Config file locations (checked in order):
 Key settings:
 ```toml
 [server]
-host = "127.0.0.1"   # loopback only; HTTP transport is unauthenticated
-port = 9000
+host = "127.0.0.1"   # retained for compatibility; stdio does not bind
+port = 9000          # retained for compatibility; stdio does not bind
 
 [models]
 chat = "gpt-5-3"
@@ -210,7 +210,7 @@ should run serially.
 | DR connector unavailable | Enable Deep Research at chatgpt.com > Settings > Connectors |
 | "memory_add not available" | Use `memory_create_via_chat` instead (REST POST returns 405) |
 | `contract_changed` | Private response no longer satisfies the bounded adapter; update and inspect sanitized evidence |
-| HTTP remote bind refused | Expected: use stdio or a loopback-only local HTTP client |
+| HTTP transport disabled | Expected in 0.0.12: use stdio |
 | Invalid `thinking_effort` | Call `list_models`; use an effort advertised by that exact general model or leave it unset |
 
 ## Detailed Reference

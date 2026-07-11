@@ -16,10 +16,10 @@ volume human-scale, and don't depend on it for anything critical. See the README
 
 ### Why stdio instead of HTTP?
 
-stdio runs the server as a local subprocess of your client — nothing is exposed on
-the network. The HTTP transport has **no authentication** and proxies your entire
-account, so it is strictly loopback-only with no remote override. Native MCP Host
-and Origin checks also reject non-loopback DNS-rebinding attempts. Prefer stdio.
+stdio runs the server as a child process of your client, with no listening TCP
+port. Version 0.0.12 disables HTTP because loopback sockets remain reachable by
+other users and processes on the host; Host/Origin checks do not authenticate
+the account owner.
 
 ### Plus vs Pro — what's the difference?
 

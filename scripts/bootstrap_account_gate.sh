@@ -1,5 +1,9 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 set -euo pipefail
+
+PATH=/usr/bin:/bin
+export PATH
+hash -r
 
 umask 077
 
