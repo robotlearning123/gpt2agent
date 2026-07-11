@@ -41,15 +41,16 @@ not bugs:
   serialized within one server process. Independently running gpt2agent
   processes do not share that lock and can still race a read-modify-write.
 - **Private account gates run locally.** Release account gates run only
-  on a trusted local machine. Cookies, bearer tokens, raw responses, and
-  unsanitized receipts must never be uploaded to hosted CI. Hosted CI receives
-  only a sanitized receipt's SHA-256. After the workflow creates the GitHub
-  Release, the release owner manually publishes the exact closed-schema receipt
-  and verifies the downloaded asset against the annotated-tag digest. That
-  digest is a byte commitment and post-publish audit link, not pre-publish
-  validation of the absent receipt. Safe publication also requires independent
-  live tag-creation and protected-environment approval controls, with self-review
-  and administrator bypass disabled; without them, do not tag or publish.
+  on a trusted local machine. The verifier owns the bearer and direct bounded
+  `curl_cffi` transport; downloaded wheel/sdist candidates remain inert during
+  that live gate. Candidate imports and adapter execution happen only in the
+  credential-free main-CI package job against a closed synthetic corpus, or in
+  an OS-isolated no-auth environment. Cookies, bearer tokens, raw responses,
+  unsanitized receipts, and the sanitized receipt itself must never be uploaded
+  to hosted CI or a public release. Hosted automation receives only its SHA-256
+  commitment. Safe publication also requires independent live tag-creation and
+  protected-environment approval controls, with self-review and administrator
+  bypass disabled; without them, do not tag or publish.
 
 In-scope reports we want to hear about: token/secret leakage in logs or errors,
 ways to bypass loopback or Host/Origin transport checks, injection that makes a

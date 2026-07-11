@@ -1,0 +1,383 @@
+{
+  "schema_version": "1",
+  "cases": [
+    {
+      "id": "chat-model-rich",
+      "category": "chat_models",
+      "input": {
+        "models": [
+          {
+            "slug": "gpt-synthetic",
+            "title": "General",
+            "description": "Safe fixture",
+            "max_tokens": 128,
+            "reasoning_type": "reasoning",
+            "configurable_thinking_effort": true,
+            "default_thinking_effort": "medium",
+            "thinking_efforts": [{"thinking_effort": "low", "label": "Low"}],
+            "tags": ["fast"],
+            "capabilities": {"tools": true},
+            "enabled_tools": ["python"],
+            "product_features_keys": ["canvas"]
+          }
+        ]
+      },
+      "expected": {
+        "status": "accepted",
+        "value": [
+          {
+            "slug": "gpt-synthetic",
+            "title": "General",
+            "description": "Safe fixture",
+            "max_tokens": 128,
+            "reasoning_type": "reasoning",
+            "configurable_thinking_effort": true,
+            "default_thinking_effort": "medium",
+            "thinking_efforts": [{"thinking_effort": "low", "label": "Low"}],
+            "tags": ["fast"],
+            "capabilities": {"tools": true},
+            "enabled_tools": ["python"],
+            "product_features_keys": ["canvas"]
+          }
+        ]
+      }
+    },
+    {
+      "id": "chat-model-invalid-token-count",
+      "category": "chat_models",
+      "input": {"models": [{"slug": "gpt-synthetic", "max_tokens": "unbounded"}]},
+      "expected": {"status": "rejected"}
+    },
+    {
+      "id": "work-model-minimal",
+      "category": "work_models",
+      "input": {"models": [{"slug": "work-synthetic"}]},
+      "expected": {
+        "status": "accepted",
+        "value": [
+          {
+            "surface": "work",
+            "slug": "work-synthetic",
+            "title": null,
+            "max_tokens": null,
+            "reasoning_type": null,
+            "configurable_thinking_effort": null,
+            "default_thinking_effort": null,
+            "thinking_efforts": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "apps-mixed-catalog",
+      "category": "apps",
+      "input": {
+        "apps": [
+          "connector_search",
+          {"id": "asdk_app_demo", "enabled": true, "is_connected": false},
+          {"id": "invalid", "enabled": "yes"},
+          null
+        ]
+      },
+      "expected": {
+        "status": "accepted",
+        "value": [
+          {
+            "id": "connector_search",
+            "type": "official_connector",
+            "enabled": null,
+            "connected": null
+          },
+          {
+            "id": "asdk_app_demo",
+            "type": "third_party_sdk",
+            "enabled": true,
+            "connected": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "plugins-root-array",
+      "category": "plugins",
+      "input": [{"id": "plugin-root"}],
+      "expected": {
+        "status": "accepted",
+        "value": {
+          "items": [
+            {
+              "id": "plugin-root",
+              "name": null,
+              "marketplace_name": null,
+              "display_name": null,
+              "version": null,
+              "enabled": null,
+              "scope": null,
+              "status": null,
+              "installation_policy": null,
+              "release_version": null,
+              "skill_names": null,
+              "disabled_skill_names": null,
+              "app_ids": null,
+              "app_template_ids": null,
+              "canonical_connector_ids": null,
+              "mcp_server_keys": null,
+              "capability_names": null
+            }
+          ],
+          "cursor": null
+        }
+      }
+    },
+    {
+      "id": "plugins-paged-envelope",
+      "category": "plugins",
+      "input": {
+        "plugins": [{"id": "plugin-page", "release": {"version": "1.0"}}],
+        "pagination": {"next_page_token": "next-page"}
+      },
+      "expected": {
+        "status": "accepted",
+        "value": {
+          "items": [
+            {
+              "id": "plugin-page",
+              "name": null,
+              "marketplace_name": null,
+              "display_name": null,
+              "version": null,
+              "enabled": null,
+              "scope": null,
+              "status": null,
+              "installation_policy": null,
+              "release_version": "1.0",
+              "skill_names": null,
+              "disabled_skill_names": null,
+              "app_ids": null,
+              "app_template_ids": null,
+              "canonical_connector_ids": null,
+              "mcp_server_keys": null,
+              "capability_names": null
+            }
+          ],
+          "cursor": "next-page"
+        }
+      }
+    },
+    {
+      "id": "installed-plugins-nested",
+      "category": "installed_plugins",
+      "input": {
+        "plugins": {
+          "results": [
+            {
+              "id": "installed-plugin",
+              "marketplace": {"name": "Market"},
+              "apps": [{"id": "app-one"}],
+              "skills": [{"name": "skill-one", "enabled": false}]
+            }
+          ],
+          "page": {"has_more": false}
+        }
+      },
+      "expected": {
+        "status": "accepted",
+        "value": {
+          "items": [
+            {
+              "id": "installed-plugin",
+              "name": null,
+              "marketplace_name": "Market",
+              "display_name": null,
+              "version": null,
+              "enabled": null,
+              "scope": null,
+              "status": null,
+              "installation_policy": null,
+              "release_version": null,
+              "skill_names": ["skill-one"],
+              "disabled_skill_names": ["skill-one"],
+              "app_ids": ["app-one"],
+              "app_template_ids": null,
+              "canonical_connector_ids": null,
+              "mcp_server_keys": null,
+              "capability_names": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "installed-plugins-list-empty",
+      "category": "installed_plugins",
+      "input": {"plugins": []},
+      "expected": {"status": "accepted", "value": {"items": []}}
+    },
+    {
+      "id": "background-job-minimal",
+      "category": "background_jobs",
+      "input": {"tasks": [{"task_id": "job-one"}]},
+      "expected": {
+        "status": "accepted",
+        "value": [
+          {
+            "task_id": "job-one",
+            "title": "",
+            "status": null,
+            "created_at": null,
+            "updated_at": null,
+            "prompt": "",
+            "conversation_id": null,
+            "image_gen_message": false,
+            "interruptions_disabled": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "background-job-legacy-id-rejected",
+      "category": "background_jobs",
+      "input": {"tasks": [{"id": "legacy-only"}]},
+      "expected": {"status": "rejected"}
+    },
+    {
+      "id": "scheduled-page-variant",
+      "category": "scheduled_automations",
+      "input": {
+        "items": [
+          {
+            "id": "schedule-one",
+            "updated_at": "2026-07-10T00:00:00Z",
+            "next_run_times": ["2026-07-11T00:00:00Z", {"ignored": true}],
+            "is_enabled": true,
+            "target_time_utc": "12:00"
+          }
+        ],
+        "cursor": null
+      },
+      "expected": {
+        "status": "accepted",
+        "value": {
+          "items": [
+            {
+              "id": "schedule-one",
+              "updated_at": "2026-07-10T00:00:00Z",
+              "next_run_times": ["2026-07-11T00:00:00Z"],
+              "is_enabled": true,
+              "target_time_utc": "12:00"
+            }
+          ],
+          "cursor": null
+        }
+      }
+    },
+    {
+      "id": "sites-access-disabled",
+      "category": "sites_access",
+      "input": {
+        "enabled": false,
+        "custom_domains_enabled": true,
+        "requires_workspace_slug": false
+      },
+      "expected": {
+        "status": "accepted",
+        "value": {
+          "enabled": false,
+          "custom_domains_enabled": true,
+          "requires_workspace_slug": false
+        }
+      }
+    },
+    {
+      "id": "sites-access-invalid-flag",
+      "category": "sites_access",
+      "input": {"enabled": "false"},
+      "expected": {"status": "rejected"}
+    },
+    {
+      "id": "site-catalog-rich",
+      "category": "site_catalog",
+      "input": {
+        "items": [
+          {
+            "id": "site-one",
+            "title": "Synthetic Site",
+            "slug": "synthetic-site",
+            "status": "published",
+            "updated_at": "2026-07-10T00:00:00Z",
+            "disabled_by": null,
+            "sharing": {"access_mode": "private", "user_count": 2, "group_count": 1},
+            "live_url": "",
+            "preview_url": "https://example.invalid/preview",
+            "screenshot_url": null
+          }
+        ],
+        "cursor": null
+      },
+      "expected": {
+        "status": "accepted",
+        "value": {
+          "items": [
+            {
+              "id": "site-one",
+              "title": "Synthetic Site",
+              "slug": "synthetic-site",
+              "status": "published",
+              "updated_at": "2026-07-10T00:00:00Z",
+              "disabled_by": null,
+              "sharing": {"access_mode": "private", "user_count": 2, "group_count": 1},
+              "has_live_url": false,
+              "has_preview": true,
+              "has_screenshot": false
+            }
+          ],
+          "cursor": null
+        }
+      }
+    },
+    {
+      "id": "custom-gpt-sidebar",
+      "category": "custom_gpts",
+      "input": {
+        "items": [{"gizmo": {"name": "Synthetic GPT", "short_url": "g-synthetic"}}]
+      },
+      "expected": {
+        "status": "accepted",
+        "value": [{"name": "Synthetic GPT", "short_url": "g-synthetic"}]
+      }
+    },
+    {
+      "id": "codex-environment-envelope",
+      "category": "codex",
+      "input": {
+        "environments": [
+          {
+            "id": "env-one",
+            "label": "Synthetic",
+            "workspace_dir": "/workspace",
+            "agent_network_access": false,
+            "repos": [{"name": "one"}, {"name": "two"}]
+          }
+        ]
+      },
+      "expected": {
+        "status": "accepted",
+        "value": [
+          {
+            "id": "env-one",
+            "label": "Synthetic",
+            "workspace_dir": "/workspace",
+            "agent_network_access": false,
+            "repo_count": 2
+          }
+        ]
+      }
+    },
+    {
+      "id": "codex-root-array-empty",
+      "category": "codex",
+      "input": [],
+      "expected": {"status": "accepted", "value": []}
+    }
+  ]
+}

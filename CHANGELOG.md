@@ -123,11 +123,13 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
   sources, emits only redacted summaries, retains evidence for 30 days, and does
   not pretend to verify a private account adapter.
 - The private account gate runs only on a trusted local machine against the
-  exact candidate commit. It measures the active Pro entitlement instead of
-  trusting a caller label, and its local sanitized receipt reports
-  empty/nonempty shape classes without exact account collection counts. Cookies
-  and bearer tokens are never uploaded; the sanitized receipt remains separate
-  from hosted CI.
+  exact candidate commit. Its verifier-owned bounded transport reads the bearer
+  directly and measures the active Pro entitlement instead of trusting a caller
+  label; candidate wheel/sdist bytes are never installed, imported, or executed
+  on that credential host. Main CI runs one closed synthetic adapter corpus
+  against both package formats and requires identical output. The sanitized
+  receipt keeps live shape classes separate from fixed offline adapter counts,
+  is freshness-bounded before tagging, and remains local.
 - The read-only governance audit binds the release-tag App, Required-checks App,
   and independent PyPI gate to an explicit reviewed policy. Tag creation and
   no-bypass tag immutability are audited as separate rules, and main-branch
@@ -136,12 +138,11 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
 - An annotated release tag must contain exactly one
   `account-receipt-sha256: <64 lowercase hex>` line. Release evidence binds that
   digest to the tag object, source commit/tree, workflow identity, and exact
-  wheel/sdist hashes. A clean PyPI install canary must pass before the GitHub
-  Release is created; the release owner then manually attaches the exact
-  sanitized receipt and verifies the downloaded asset against the tag digest.
-  The digest is a commitment and post-publish audit link, not hosted
-  pre-publish validation of the receipt. Independent restricted tag creation
-  and protected-environment approval remain required release controls.
+  wheel/sdist hashes. The release workflow publishes the main-CI-tested bytes
+  without importing, installing, or rerunning package smoke, then verifies the
+  public filenames and hashes. The receipt is never attached; its digest is the
+  public commitment. Independent restricted tag creation and
+  protected-environment approval remain required release controls.
 - GitHub Release notes are extracted by the same exact-version CHANGELOG parser
   used by release metadata verification, so regex-like version near-matches
   cannot select another section.

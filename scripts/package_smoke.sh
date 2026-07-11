@@ -9,6 +9,9 @@ fi
 DIST_DIR=$1
 PROJECT_VERSION=$2
 DIST_VERSION=$3
+SCRIPT_ROOT=$(cd "$(dirname "$0")" && pwd)
+CORPUS_SCRIPT="$SCRIPT_ROOT/verify_installed_adapter_corpus.py"
+CORPUS_FIXTURE="$SCRIPT_ROOT/../tests/fixtures/installed_adapter_corpus.v1.json"
 
 if [ ! -d "$DIST_DIR" ]; then
   echo "distribution directory does not exist: $DIST_DIR" >&2
@@ -37,20 +40,59 @@ fi
 WHEEL=${WHEELS[0]}
 SDIST=${SDISTS[0]}
 
+hash_dist() {
+  python - "$WHEEL" "$SDIST" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+for value in sys.argv[1:]:
+    path = pathlib.Path(value)
+    print(path.name, hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_size)
+PY
+}
+
+DIST_HASHES_BEFORE=$(hash_dist)
+
 TMP_ROOT=$(mktemp -d)
 trap 'rm -rf "$TMP_ROOT"' EXIT
+
+run_scrubbed() {
+  local PRIVATE_HOME=$1
+  shift
+  mkdir -p "$PRIVATE_HOME" "$PRIVATE_HOME/tmp"
+  chmod 700 "$PRIVATE_HOME" "$PRIVATE_HOME/tmp"
+  env -i \
+    HOME="$PRIVATE_HOME" \
+    USERPROFILE="$PRIVATE_HOME" \
+    TEMP="$PRIVATE_HOME/tmp" \
+    TMP="$PRIVATE_HOME/tmp" \
+    TMPDIR="$PRIVATE_HOME/tmp" \
+    PATH="/usr/bin:/bin" \
+    LANG="C.UTF-8" \
+    LC_ALL="C.UTF-8" \
+    PIP_CONFIG_FILE=/dev/null \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONNOUSERSITE=1 \
+    PYTHONUTF8=1 \
+    "$@"
+}
 
 check_installed_package() {
   local VENV_ROOT=$1
   local CHECK_ROOT=$2
   local FORBIDDEN_SOURCE=$3
+  local PRIVATE_HOME=$4
 
   mkdir -p "$CHECK_ROOT"
   (
     cd "$CHECK_ROOT"
-    test "$("$VENV_ROOT/bin/gpt2agent" --version)" = "gpt2agent $PROJECT_VERSION"
-    test "$("$VENV_ROOT/bin/python" -m gpt2agent --version)" = "gpt2agent $PROJECT_VERSION"
-    "$VENV_ROOT/bin/python" - "$DIST_VERSION" "$FORBIDDEN_SOURCE" <<'PY'
+    test "$(run_scrubbed "$PRIVATE_HOME" "$VENV_ROOT/bin/gpt2agent" --version)" = \
+      "gpt2agent $PROJECT_VERSION"
+    test "$(run_scrubbed "$PRIVATE_HOME" "$VENV_ROOT/bin/python" -m gpt2agent --version)" = \
+      "gpt2agent $PROJECT_VERSION"
+    run_scrubbed "$PRIVATE_HOME" "$VENV_ROOT/bin/python" - \
+      "$DIST_VERSION" "$FORBIDDEN_SOURCE" <<'PY'
 from importlib import import_module
 from importlib.metadata import version
 from importlib.resources import files
@@ -110,12 +152,19 @@ PY
 
 python -m venv "$TMP_ROOT/wheel-venv"
 "$TMP_ROOT/wheel-venv/bin/python" -m pip install --upgrade pip
-"$TMP_ROOT/wheel-venv/bin/python" -m pip install "$WHEEL"
-"$TMP_ROOT/wheel-venv/bin/python" -m pip check
-check_installed_package "$TMP_ROOT/wheel-venv" "$TMP_ROOT/wheel-check" ""
+run_scrubbed "$TMP_ROOT/wheel-home" \
+  "$TMP_ROOT/wheel-venv/bin/python" -m pip install "$WHEEL"
+run_scrubbed "$TMP_ROOT/wheel-home" "$TMP_ROOT/wheel-venv/bin/python" -m pip check
+check_installed_package \
+  "$TMP_ROOT/wheel-venv" "$TMP_ROOT/wheel-check" "" "$TMP_ROOT/wheel-home"
+WHEEL_CORPUS="$TMP_ROOT/wheel-corpus.json"
+run_scrubbed "$TMP_ROOT/wheel-home" \
+  "$TMP_ROOT/wheel-venv/bin/python" "$CORPUS_SCRIPT" \
+  --fixture "$CORPUS_FIXTURE" --output "$WHEEL_CORPUS"
 
 mkdir -p "$TMP_ROOT/home"
-HOME="$TMP_ROOT/home" "$TMP_ROOT/wheel-venv/bin/gpt2agent" install --client claude-code
+run_scrubbed "$TMP_ROOT/home" \
+  "$TMP_ROOT/wheel-venv/bin/gpt2agent" install --client claude-code
 test -f "$TMP_ROOT/home/.claude/skills/deep-research/SKILL.md"
 if find "$TMP_ROOT/home/.claude/skills" -type f \( -name '*.pyc' -o -name '*.pyo' \) \
   -print -quit | grep -q .; then
@@ -139,11 +188,22 @@ test -f "$SDIST_ROOT/tests/fixtures/heavy_dr_widget_state.json"
 
 python -m venv "$TMP_ROOT/sdist-venv"
 "$TMP_ROOT/sdist-venv/bin/python" -m pip install --upgrade pip
-"$TMP_ROOT/sdist-venv/bin/python" -m pip install "$SDIST" pytest pytest-asyncio
-"$TMP_ROOT/sdist-venv/bin/python" -m pip check
-check_installed_package "$TMP_ROOT/sdist-venv" "$TMP_ROOT/sdist-check" "$SDIST_ROOT"
+run_scrubbed "$TMP_ROOT/sdist-home" \
+  "$TMP_ROOT/sdist-venv/bin/python" -m pip install "$SDIST" pytest pytest-asyncio
+run_scrubbed "$TMP_ROOT/sdist-home" "$TMP_ROOT/sdist-venv/bin/python" -m pip check
+check_installed_package "$TMP_ROOT/sdist-venv" "$TMP_ROOT/sdist-check" "$SDIST_ROOT" \
+  "$TMP_ROOT/sdist-home"
+SDIST_CORPUS="$TMP_ROOT/sdist-corpus.json"
+run_scrubbed "$TMP_ROOT/sdist-home" \
+  "$TMP_ROOT/sdist-venv/bin/python" "$CORPUS_SCRIPT" \
+  --fixture "$CORPUS_FIXTURE" --output "$SDIST_CORPUS"
+cmp -s "$WHEEL_CORPUS" "$SDIST_CORPUS"
 (
   cd "$SDIST_ROOT"
-  SKIP_LIVE=1 "$TMP_ROOT/sdist-venv/bin/python" -m pytest -q \
+  run_scrubbed "$TMP_ROOT/sdist-home" \
+    env SKIP_LIVE=1 "$TMP_ROOT/sdist-venv/bin/python" -m pytest -q \
     tests/test_heavy_dr_parser.py
 )
+
+DIST_HASHES_AFTER=$(hash_dist)
+test "$DIST_HASHES_BEFORE" = "$DIST_HASHES_AFTER"

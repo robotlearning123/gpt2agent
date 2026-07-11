@@ -151,24 +151,27 @@ and pass the returned run ID, producing attempt, artifact ID, REST digest, size,
 and expiry to both account-receipt commands. Give the downloaded distribution
 and receipt new sibling paths outside the checkout.
 
-The command separately checks both exact main-CI distributions, probes from the
-installed wheel environment, measures the active account entitlement against
-the expected Pro plan, and writes a mode-0600 canonical receipt. Its redacted
-shape evidence records empty/nonempty classes without exact account collection
-counts. Never upload a browser cookie, bearer token, raw response, or
-unsanitized account payload to GitHub Actions. Put the exact eight lines emitted
-by the create command in the annotated tag message:
+Main CI's credential-free package job installs both exact distributions and
+runs the same closed synthetic adapter corpus against each, requiring identical
+canonical results and unchanged distribution hashes. The local command treats
+those wheel/sdist files as inert bytes. Its own reviewed `curl_cffi` transport
+loads one owner-only bearer, measures the active account entitlement against the
+expected Pro plan, performs only the exact bounded GET allowlist, and writes a
+mode-0600 canonical receipt. Redacted live evidence records empty/nonempty
+classes without exact account collection counts; fixed adapter counts represent
+the separate main-CI corpus. Never upload a browser cookie, bearer token, raw
+response, unsanitized account payload, or the receipt itself to GitHub Actions.
+Put the exact eight lines emitted by the create command in the annotated tag
+message:
 
-Build/install children receive a positive-allowlist
-runtime/locale/certificate environment; credential-bearing proxy variables are
-not forwarded. The live probe gets a separate mode-restricted
-credential-discovery home containing only the selected ChatGPT access token, so
-normal environment and home-directory lookup cannot discover unrelated operator
-GitHub, release, publish, SSH, and cloud credentials. Child `TEMP`/`TMP`/`TMPDIR`
-paths are also private per-step directories rather than inherited operator
-paths. This is not an OS filesystem sandbox. The reviewed installed candidate
-still receives that ChatGPT bearer for its current live adapter; this is not an
-account-auth isolation boundary.
+The trusted transport disables environment proxy discovery and automatic
+redirects, uses fixed timeouts and TLS verification, and caps response bodies at
+4 MiB. It never imports or invokes the candidate package. Run package smoke only
+in credential-free CI or an OS-isolated no-auth container/VM; private `HOME` and
+an empty environment are useful hygiene but are not an OS sandbox. Create and
+verify the receipt immediately: either command rejects evidence older than
+30 minutes, a live probe lasting over 10 minutes, or a completion timestamp more
+than one minute in the future.
 
 ```text
 account-receipt-sha256: <64 lowercase hex>
@@ -184,19 +187,19 @@ account-ci-artifact-expires-at: <UTC timestamp>
 The hosted release workflow validates the pinned run and candidate live with a
 small execution headroom, downloads by immutable artifact ID, reconstructs the
 account artifact-set digest, and never rebuilds. It publishes those same bytes
-through PyPI trusted publishing, verifies published hashes, installs the exact
-PyPI version in a clean canary environment, and creates the GitHub Release only
-after the canary passes. The release evidence asset carries the full pinned
-candidate identity and artifact-set digest.
+through PyPI trusted publishing and verifies published hashes without importing,
+installing, or rerunning package smoke in the release job. Required main CI is
+the sole packaged-artifact execution gate. The release evidence asset carries
+the full pinned candidate identity and artifact-set digest.
 
 Before tagging, an expired, deleted, replaced, or near-expiry candidate requires
 a full main-CI rerun and a new account gate. Immediately before tag creation,
 the README operator command re-fetches the complete pinned run artifact list,
 requires at least one hour of retention headroom, and rejects any newer
 candidate-producing attempt. After tagging, artifact loss is a hard release
-blocker; do not rebuild or move the version tag. Historical receipt verification
-remains valid after normal Actions retention expiry when the exact distribution
-bytes and recorded metadata have been retained.
+blocker; do not rebuild or move the version tag. The full receipt verifier is a
+fresh pre-tag gate, not a replay mechanism. Long-term audit verifies retained
+receipt bytes against the immutable annotated-tag SHA-256 commitment.
 
 The digest is only a commitment to the local receipt bytes and a post-publish
 audit link. Hosted automation cannot validate a receipt it does not receive

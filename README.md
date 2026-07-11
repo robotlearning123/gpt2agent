@@ -381,17 +381,24 @@ PEP 440 spelling (`X.Y.ZaN`, `X.Y.ZbN`, or `X.Y.ZrcN`).
 
 After the release PR is merged, run the private account gate on a trusted local
 machine against its exact merge SHA. Main CI builds the wheel and sdist once and
-retains them under an attempt-specific, immutable artifact ID. The gate downloads
-that exact candidate, separately checks both distributions, probes through the
-installed wheel environment, writes one closed-schema sanitized receipt, and
-binds it to the source commit/tree, full CI workflow identity, and exact artifact
-bytes. It measures the authenticated account's active Pro
+retains them under an attempt-specific, immutable artifact ID. In its
+credential-free package job, main CI installs both formats, runs the same closed
+synthetic adapter corpus against each, requires byte-identical corpus results,
+and verifies that the distribution hashes do not change. The local account gate
+downloads that exact candidate but treats both files as inert bytes: it never
+installs, imports, builds, or executes them. A verifier-owned `curl_cffi` session
+loads the reviewed local bearer and performs only the fixed live GET probes. The
+gate writes one closed-schema sanitized receipt bound to the source commit/tree,
+full CI workflow identity, and exact artifact bytes. It measures the authenticated
+account's active Pro
 entitlement; `--expected-plan pro` is a fail-closed expectation, not a caller
 assertion. The local sanitized receipt keeps only empty/nonempty shape classes,
-never exact account collection counts. Never upload cookies, bearer tokens, raw
-responses, or unsanitized account payloads to hosted CI. Use new sibling paths
-outside the checkout so the exact source stays clean, then have the policy-bound
-release App create only the intended annotated tag. The trusted release
+never exact account collection counts. Its fixed `11/11/11/0` adapter counts are
+independent evidence from that required main-CI corpus, not self-attestation by
+the live probe. Never upload cookies, bearer tokens, raw responses, or
+unsanitized account payloads to hosted CI. Use new sibling paths outside the
+checkout so the exact source stays clean, then have the policy-bound release App
+create only the intended annotated tag. The trusted release
 environment must provide an authenticated `gh` CLI for read-only operator
 checks, the reviewed local governance policy, and the reviewed Pro account
 login. Acquire the short-lived installation token for the policy-bound release
@@ -399,17 +406,15 @@ App, scoped to this repository with Contents write access, only after the
 account gate and final pinned-candidate revalidation. Never substitute the
 operator's user token for the App token:
 
-The verifier gives build/install children only an allowlisted
-runtime/locale/certificate environment; proxy variables are deliberately not
-forwarded because proxy URLs can carry credentials. The live probe gets an
-isolated credential-discovery home containing only the selected ChatGPT access
-token, and every child uses a private temporary directory instead of ambient
-`TEMP`/`TMP`/`TMPDIR` paths. This prevents normal environment and home-directory
-discovery of unrelated GitHub, release, publish, SSH, and cloud credentials, but
-it is not an OS filesystem sandbox. The current live probe still exposes that
-ChatGPT bearer to the exact reviewed installed candidate; this is not an
-account-auth isolation boundary, and trusted-transport/offline-candidate
-hardening remains separate work.
+The trusted verifier reads one owner-only regular auth file, keeps the bearer in
+process, disables environment proxy discovery and automatic redirects, and
+accepts only the exact reviewed `chatgpt.com` routes with bounded metadata,
+4 MiB response bodies, fixed timeouts, and TLS verification. Candidate package
+smoke must run only in credential-free CI or an OS-isolated container/VM with no
+account auth or private mounts. A scrubbed environment and private `HOME` improve
+CI hygiene but are not an OS sandbox. Receipt creation and pre-tag verification
+also reject a probe older than 30 minutes, a probe lasting more than 10 minutes,
+or a completion time more than one minute in the future.
 
 ```bash
 set -euo pipefail
@@ -544,12 +549,13 @@ handoff identity to the tag object, source commit/tree, release workflow, and
 exact wheel/sdist hashes.
 
 The workflow never rebuilds after the account gate. It downloads the exact
-account-tested main-CI artifact by numeric ID, reconstructs its artifact-set
-digest, runs Twine and clean-install tests, publishes those same bytes to PyPI
-via OIDC trusted publishing, verifies the
-published filenames and hashes, and installs that exact PyPI version in a clean
-canary environment. The GitHub Release is created only after the canary passes;
-its initial assets include the distributions and `release-workflow-artifacts.json`.
+account-bound main-CI artifact by numeric ID, reconstructs its artifact-set
+digest, and publishes those same bytes to PyPI via OIDC trusted publishing. It
+does not install or import the candidate and does not rerun `package_smoke.sh`;
+the required credential-free main-CI package job is the sole packaged-artifact
+execution gate. The workflow verifies published filenames and hashes before
+creating the GitHub Release, whose initial assets include the distributions and
+`release-workflow-artifacts.json`.
 
 The annotated-tag SHA-256 is a commitment to the local receipt bytes. Hosted
 automation validates the tag-bound artifact identity and set digest, but it

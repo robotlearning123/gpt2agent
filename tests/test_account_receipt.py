@@ -4,34 +4,10 @@ from __future__ import annotations
 
 import json
 import subprocess
-from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-
-
-_INJECTED_CHILD_SECRETS = {
-    "GPT2AGENT_RELEASE_APP_TOKEN": "SYNTHETIC_RELEASE_APP_TOKEN",
-    "GH_TOKEN": "SYNTHETIC_GH_TOKEN",
-    "GITHUB_TOKEN": "SYNTHETIC_GITHUB_TOKEN",
-    "TWINE_PASSWORD": "SYNTHETIC_TWINE_PASSWORD",
-    "UV_PUBLISH_TOKEN": "SYNTHETIC_UV_PUBLISH_TOKEN",
-    "AWS_SECRET_ACCESS_KEY": "SYNTHETIC_AWS_SECRET",
-    "AZURE_CLIENT_SECRET": "SYNTHETIC_AZURE_SECRET",
-    "GOOGLE_APPLICATION_CREDENTIALS": "/synthetic/google-credentials.json",
-    "SSH_AUTH_SOCK": "/synthetic/ssh-agent.sock",
-    "KUBECONFIG": "/synthetic/kubeconfig",
-    "HTTP_PROXY": "http://operator:secret@proxy.example.invalid:8080",
-    "HTTPS_PROXY": "https://operator:secret@proxy.example.invalid:8443",
-    "ALL_PROXY": "socks5://operator:secret@proxy.example.invalid:1080",
-    "NO_PROXY": "SYNTHETIC_NETWORK_SECRET",
-    "GENERIC_INJECTED_SECRET": "SYNTHETIC_GENERIC_SECRET",
-}
-_INJECTED_CHILD_TEMP_DIRS = {
-    "TEMP": "/operator/tmp/temp",
-    "TMP": "/operator/tmp/tmp",
-    "TMPDIR": "/operator/tmp/tmpdir",
-}
 
 
 def test_request_policy_accepts_only_the_normative_get_allowlist() -> None:
@@ -287,318 +263,6 @@ def test_probe_sequence_is_fixed_and_sites_false_skips_only_the_site_catalog() -
     assert secret not in json.dumps(records, sort_keys=True)
 
 
-@pytest.mark.parametrize(
-    ("category", "models"),
-    (
-        ("chat_models", [{"slug": "model-a", "max_tokens": "unbounded"}]),
-        (
-            "work_models",
-            [{"slug": "model-a", "configurable_thinking_effort": "false"}],
-        ),
-        ("chat_models", [{"slug": f"model-{index}"} for index in range(257)]),
-    ),
-)
-def test_runtime_adapter_checks_reject_model_payloads_that_pass_route_shape(
-    category: str,
-    models: list[dict],
-) -> None:
-    from scripts.verify_account_receipt import (
-        RawResponse,
-        ReceiptError,
-        execute_probe,
-        expected_probe,
-        installed_runtime_adapter_checks,
-    )
-
-    probe = expected_probe(category)
-    body = json.dumps({"models": models}).encode()
-    response = RawResponse(
-        status=200,
-        headers={"Content-Type": "application/json"},
-        body=body,
-        url=(
-            "https://chatgpt.com/backend-api/models?history_and_training_disabled=false"
-            if category == "chat_models"
-            else "https://chatgpt.com/backend-api/tpp/models/"
-        ),
-    )
-
-    # The route-only shape deliberately accepts these payloads. The release
-    # gate must additionally execute the candidate wheel's exact adapters.
-    assert (
-        execute_probe(
-            probe,
-            requester=lambda **_request: response,
-            auth_headers={"Authorization": "Bearer SYNTHETIC"},
-        ).status
-        == "ok"
-    )
-    with pytest.raises(ReceiptError, match="runtime adapter"):
-        execute_probe(
-            probe,
-            requester=lambda **_request: response,
-            auth_headers={"Authorization": "Bearer SYNTHETIC"},
-            adapter_checks=installed_runtime_adapter_checks(),
-        )
-
-
-def test_runtime_adapter_uses_normalized_app_count() -> None:
-    from scripts.verify_account_receipt import (
-        RawResponse,
-        execute_probe,
-        expected_probe,
-        installed_runtime_adapter_checks,
-    )
-
-    body = json.dumps(
-        {
-            "apps": [
-                {"id": "connector_invalid", "enabled": "yes"},
-                None,
-                "connector_valid",
-            ]
-        }
-    ).encode()
-    response = RawResponse(
-        status=200,
-        headers={"Content-Type": "application/json"},
-        body=body,
-        url="https://chatgpt.com/backend-api/apps/list",
-    )
-
-    outcome = execute_probe(
-        expected_probe("apps"),
-        requester=lambda **_request: response,
-        auth_headers={"Authorization": "Bearer SYNTHETIC"},
-        adapter_checks=installed_runtime_adapter_checks(),
-    )
-
-    assert outcome.item_count == 1
-    assert outcome.shape == "valid_nonempty"
-
-
-@pytest.mark.parametrize(
-    ("category", "payload"),
-    (
-        ("background_jobs", {"tasks": [{"id": "legacy-only-id"}]}),
-    ),
-)
-def test_runtime_adapter_rejects_loose_legacy_shapes(
-    category: str,
-    payload: dict,
-) -> None:
-    from scripts.verify_account_receipt import (
-        RawResponse,
-        ReceiptError,
-        execute_probe,
-        expected_probe,
-        installed_runtime_adapter_checks,
-    )
-
-    probe = expected_probe(category)
-    body = json.dumps(payload).encode()
-    response = RawResponse(
-        status=200,
-        headers={"Content-Type": "application/json"},
-        body=body,
-        url=f"https://chatgpt.com{probe.path}?limit=1"
-        if category == "background_jobs"
-        else f"https://chatgpt.com{probe.path}",
-    )
-
-    with pytest.raises(ReceiptError, match="runtime adapter"):
-        execute_probe(
-            probe,
-            requester=lambda **_request: response,
-            auth_headers={"Authorization": "Bearer SYNTHETIC"},
-            adapter_checks=installed_runtime_adapter_checks(),
-        )
-
-
-def test_runtime_adapter_evidence_is_fixed_count_only_and_handles_sites_skip() -> None:
-    from scripts.verify_account_receipt import (
-        installed_runtime_adapter_checks,
-        run_probe_sequence,
-    )
-
-    secret = "SYNTHETIC-ADAPTER-CONTENT-3bda"
-    checks = installed_runtime_adapter_checks()
-
-    def requester(**request):
-        from scripts.verify_account_receipt import probe_from_url
-
-        probe = probe_from_url(request["url"])
-        return _response_for(
-            probe.category,
-            request["url"],
-            secret,
-            sites_enabled=False,
-        )
-
-    records = run_probe_sequence(
-        requester=requester,
-        auth_headers={"Authorization": f"Bearer {secret}"},
-        adapter_checks=checks,
-    )
-    evidence = checks.evidence(records)
-
-    assert evidence == {
-        "adapters_declared": 11,
-        "adapters_exercised": 10,
-        "adapters_passed": 10,
-        "adapters_not_requested": 1,
-    }
-    assert secret not in json.dumps(evidence, sort_keys=True)
-
-
-def test_installed_live_probe_runs_runtime_adapter_before_writing(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    import importlib.metadata as importlib_metadata
-
-    import gpt2agent.backend as backend_module
-    from scripts.verify_account_receipt import (
-        _PACKAGE_VERSION,
-        ReceiptError,
-        run_installed_live_probe,
-    )
-
-    class Response:
-        status_code = 200
-        headers = {"Content-Type": "application/json"}
-
-        def __init__(self, url: str) -> None:
-            self.url = url
-
-        def iter_content(self, chunk_size: int):
-            del chunk_size
-            yield json.dumps({"models": [{"slug": "model-a", "max_tokens": "unbounded"}]}).encode()
-
-        def close(self) -> None:
-            pass
-
-    class Session:
-        def get(self, url: str, **_kwargs):
-            return Response(url)
-
-        def close(self) -> None:
-            pass
-
-    class Client:
-        def __init__(self) -> None:
-            self._session = Session()
-
-        def request_headers(self) -> dict[str, str]:
-            return {"Authorization": "Bearer SYNTHETIC"}
-
-        def get(self, path: str) -> dict:
-            assert path == "/backend-api/accounts/check/v4-2023-04-27"
-            return {
-                "accounts": {
-                    "synthetic": {
-                        "entitlement": {
-                            "subscription_plan": "pro",
-                            "has_active_subscription": True,
-                        }
-                    }
-                }
-            }
-
-    monkeypatch.setattr(backend_module, "BackendClient", Client)
-    monkeypatch.setattr(importlib_metadata, "version", lambda _name: _PACKAGE_VERSION)
-    output = tmp_path / "probe.json"
-
-    with pytest.raises(ReceiptError, match="runtime adapter"):
-        run_installed_live_probe(output, "pro")
-    assert not output.exists()
-
-
-def test_installed_live_probe_rejects_mismatched_measured_plan_before_account_probes(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    import importlib.metadata as importlib_metadata
-
-    import gpt2agent.backend as backend_module
-    import scripts.verify_account_receipt as receipt_module
-    from scripts.verify_account_receipt import ReceiptError, run_installed_live_probe
-
-    class Session:
-        def close(self) -> None:
-            pass
-
-    class Client:
-        def __init__(self) -> None:
-            self._session = Session()
-
-        def get(self, path: str) -> dict:
-            assert path == "/backend-api/accounts/check/v4-2023-04-27"
-            return {
-                "accounts": {
-                    "synthetic": {
-                        "entitlement": {
-                            "subscription_plan": "plus",
-                            "has_active_subscription": True,
-                        }
-                    }
-                }
-            }
-
-        def request_headers(self) -> dict[str, str]:
-            raise AssertionError("shape probes must not run for the wrong plan")
-
-    monkeypatch.setattr(backend_module, "BackendClient", Client)
-    monkeypatch.setattr(
-        importlib_metadata,
-        "version",
-        lambda _name: receipt_module._PACKAGE_VERSION,
-    )
-    output = tmp_path / "probe.json"
-
-    with pytest.raises(ReceiptError, match="plan"):
-        run_installed_live_probe(output, "pro")
-    assert not output.exists()
-
-
-def test_installed_probe_payload_requires_coherent_adapter_evidence() -> None:
-    from scripts.verify_account_receipt import ReceiptError, _validate_probe_payload
-
-    payload = {
-        "schema_version": "4",
-        "package_version": "0.0.12",
-        "plan_class": "pro",
-        "started_at": "2026-07-10T13:17:00Z",
-        "completed_at": "2026-07-10T13:17:42Z",
-        "adapter_status": "passed",
-        "adapter_counts": {
-            "adapters_declared": 11,
-            "adapters_exercised": 11,
-            "adapters_passed": 11,
-            "adapters_not_requested": 0,
-        },
-        "shape_results": _all_valid_records("SYNTHETIC-ACCOUNT-CONTENT"),
-    }
-
-    assert _validate_probe_payload(payload) == payload
-    for field, value in (
-        ("adapter_status", "not_checked"),
-        (
-            "adapter_counts",
-            {
-                "adapters_declared": 11,
-                "adapters_exercised": 10,
-                "adapters_passed": 10,
-                "adapters_not_requested": 1,
-            },
-        ),
-    ):
-        poisoned = dict(payload)
-        poisoned[field] = value
-        with pytest.raises(ReceiptError, match="adapter"):
-            _validate_probe_payload(poisoned)
-
-
 def _git(checkout: Path, *args: str) -> str:
     return subprocess.run(
         ["git", *args],
@@ -685,11 +349,13 @@ def _create_receipt_fixture(tmp_path: Path, *, secret: str = "SYNTHETIC-SECRET")
         artifact_size="31415",
         artifact_expires_at="2099-07-10T13:17:42Z",
     )
+    completed = datetime.now(timezone.utc)
+    started = completed - timedelta(seconds=1)
     receipt = build_receipt(
         package_version="0.0.12",
         plan_class="pro",
-        started_at="2026-07-10T13:17:00Z",
-        completed_at="2026-07-10T13:17:42Z",
+        started_at=started.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        completed_at=completed.isoformat(timespec="seconds").replace("+00:00", "Z"),
         source_commit=commit,
         source_tree=tree,
         local_candidate_artifacts=artifacts,
@@ -729,7 +395,7 @@ def test_receipt_is_closed_canonical_secret_free_and_sha256_bound(tmp_path: Path
     assert receipt["schema_version"] == "4"
     assert receipt["verifier"] == {
         "name": "gpt2agent-account-receipt",
-        "version": "4",
+        "version": "5",
     }
     assert receipt["adapter_status"] == "passed"
     assert {
@@ -873,7 +539,7 @@ def test_verify_receipt_invalidates_later_artifact_or_source_change(tmp_path: Pa
         )
 
 
-def test_historical_receipt_verification_survives_actions_artifact_expiry(
+def test_fresh_receipt_verification_rejects_actions_artifact_expiry(
     tmp_path: Path,
 ) -> None:
     from scripts.verify_account_receipt import verify_receipt_file, write_receipt
@@ -886,7 +552,7 @@ def test_historical_receipt_verification_survives_actions_artifact_expiry(
     historical_receipt = tmp_path / "historical-account-receipt.json"
     digest = write_receipt(historical_receipt, receipt)
 
-    assert (
+    with pytest.raises(ValueError, match="expired"):
         verify_receipt_file(
             historical_receipt,
             checkout=checkout,
@@ -902,8 +568,47 @@ def test_historical_receipt_verification_survives_actions_artifact_expiry(
             ci_artifact_size="31415",
             ci_artifact_expires_at=expired_at,
         )
-        == digest
-    )
+
+
+@pytest.mark.parametrize("timing", ("stale", "future", "too-long"))
+def test_verify_receipt_rejects_replayed_or_implausible_timestamps(
+    tmp_path: Path,
+    timing: str,
+) -> None:
+    from scripts.verify_account_receipt import ReceiptError, verify_receipt_file, write_receipt
+
+    checkout, dist, commit, tree, receipt, _path, _digest = _create_receipt_fixture(tmp_path)
+    now = datetime.now(timezone.utc)
+    if timing == "stale":
+        completed = now - timedelta(minutes=31)
+        started = completed - timedelta(seconds=1)
+    elif timing == "future":
+        completed = now + timedelta(minutes=2)
+        started = completed - timedelta(seconds=1)
+    else:
+        completed = now
+        started = completed - timedelta(minutes=11)
+    receipt["started_at"] = started.isoformat(timespec="seconds").replace("+00:00", "Z")
+    receipt["completed_at"] = completed.isoformat(timespec="seconds").replace("+00:00", "Z")
+    path = tmp_path / f"{timing}-receipt.json"
+    digest = write_receipt(path, receipt)
+
+    with pytest.raises(ReceiptError, match="freshness"):
+        verify_receipt_file(
+            path,
+            checkout=checkout,
+            dist=dist,
+            declared_commit=commit,
+            declared_tree=tree,
+            expected_sha256=digest,
+            ci_repository="robotlearning123/gpt2agent",
+            ci_run_id="12345",
+            ci_run_attempt="2",
+            ci_artifact_id="67890",
+            ci_artifact_digest="sha256:" + "a" * 64,
+            ci_artifact_size="31415",
+            ci_artifact_expires_at="2099-07-10T13:17:42Z",
+        )
 
 
 def test_verify_receipt_rejects_noncanonical_or_wrong_digest_without_value_leak(
@@ -966,22 +671,17 @@ def test_create_gate_tests_existing_main_ci_artifacts_before_probe(tmp_path: Pat
     output = tmp_path / "created-account-receipt.json"
     events: list[str] = []
 
-    @contextmanager
-    def installer(_dist: Path, _artifacts: dict, _version: str):
-        events.extend(("install-wheel", "install-sdist"))
-        yield Path("/synthetic/wheel/python")
-
-    def probe_runner(_python: Path, expected_plan: str) -> dict:
-        events.append("probe")
+    def probe_runner(expected_plan: str) -> dict:
+        events.append("trusted-probe")
         assert expected_plan == "pro"
+        completed = datetime.now(timezone.utc)
+        started = completed - timedelta(seconds=1)
         return {
             "schema_version": "4",
             "package_version": "0.0.12",
             "plan_class": "pro",
-            "started_at": "2026-07-10T13:17:00Z",
-            "completed_at": "2026-07-10T13:17:42Z",
-            "adapter_status": "passed",
-            "adapter_counts": _all_adapter_counts(),
+            "started_at": started.isoformat(timespec="seconds").replace("+00:00", "Z"),
+            "completed_at": completed.isoformat(timespec="seconds").replace("+00:00", "Z"),
             "shape_results": _all_valid_records("SYNTHETIC-SECRET-IN-PROBE"),
         }
 
@@ -1000,8 +700,7 @@ def test_create_gate_tests_existing_main_ci_artifacts_before_probe(tmp_path: Pat
             ci_artifact_digest="sha256:" + "a" * 64,
             ci_artifact_size="31415",
             ci_artifact_expires_at="2099-07-10T13:17:42Z",
-            installation_context=installer,
-            probe_runner=probe_runner,
+            trusted_probe_runner=probe_runner,
         )
     assert events == []
 
@@ -1019,11 +718,10 @@ def test_create_gate_tests_existing_main_ci_artifacts_before_probe(tmp_path: Pat
         ci_artifact_digest="sha256:" + "a" * 64,
         ci_artifact_size="31415",
         ci_artifact_expires_at="2099-07-10T13:17:42Z",
-        installation_context=installer,
-        probe_runner=probe_runner,
+        trusted_probe_runner=probe_runner,
     )
 
-    assert events == ["install-wheel", "install-sdist", "probe"]
+    assert events == ["trusted-probe"]
     receipt = json.loads(output.read_text(encoding="utf-8"))
     assert output.read_bytes() == canonical_json(receipt)
     assert len(digest) == 64
@@ -1129,267 +827,12 @@ def test_account_artifact_binding_requires_pretag_retention_headroom(
         )
 
 
-def test_candidate_subprocess_env_is_a_positive_allowlist(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    from scripts.verify_account_receipt import _subprocess_env
-
-    for name, value in _INJECTED_CHILD_SECRETS.items():
-        monkeypatch.setenv(name, value)
-    for name, value in _INJECTED_CHILD_TEMP_DIRS.items():
-        monkeypatch.setenv(name, value)
-    monkeypatch.setenv("PATH", "/synthetic/bin")
-    monkeypatch.setenv("LANG", "en_US.UTF-8")
-    monkeypatch.setenv("SSL_CERT_FILE", "/synthetic/ca.pem")
-    monkeypatch.setenv("HOME", "/operator/home")
-    monkeypatch.setenv("CODEX_HOME", "/operator/codex")
-    isolated_home = tmp_path / "isolated-home"
-    isolated_home.mkdir(mode=0o700)
-
-    env = _subprocess_env(isolated_home=isolated_home)
-
-    assert env["HOME"] == str(isolated_home)
-    assert env["PATH"] == "/synthetic/bin"
-    assert env["LANG"] == "en_US.UTF-8"
-    assert env["SSL_CERT_FILE"] == "/synthetic/ca.pem"
-    child_temp = isolated_home / "tmp"
-    assert {env[name] for name in _INJECTED_CHILD_TEMP_DIRS} == {str(child_temp)}
-    assert child_temp.stat().st_mode & 0o777 == 0o700
-    assert "CODEX_HOME" not in env
-    assert _INJECTED_CHILD_SECRETS.keys().isdisjoint(env)
-    allowed = {
-        "COMSPEC",
-        "CURL_CA_BUNDLE",
-        "HOME",
-        "LANG",
-        "LANGUAGE",
-        "PATH",
-        "PATHEXT",
-        "PIP_CONFIG_FILE",
-        "PYTHONIOENCODING",
-        "PYTHONNOUSERSITE",
-        "PYTHONUTF8",
-        "REQUESTS_CA_BUNDLE",
-        "SSL_CERT_DIR",
-        "SSL_CERT_FILE",
-        "SYSTEMROOT",
-        "TEMP",
-        "TMP",
-        "TMPDIR",
-        "TZ",
-        "USERPROFILE",
-        "WINDIR",
-    }
-    assert all(
-        name.upper() in allowed or name.upper().startswith("LC_") for name in env
-    )
-
-
-def test_install_context_runs_isolated_wheel_and_sdist_checks_before_yield(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    import scripts.verify_account_receipt as receipt_module
-
-    dist = tmp_path / "dist"
-    dist.mkdir()
-    wheel = dist / "gpt2agent-0.0.12-py3-none-any.whl"
-    sdist = dist / "gpt2agent-0.0.12.tar.gz"
-    wheel.write_bytes(b"wheel")
-    sdist.write_bytes(b"sdist")
-    artifacts = {
-        "build_origin": "main_ci_package_artifact",
-        "source": {"commit": "a" * 40, "tree": "b" * 40},
-        "workflow": {
-            "artifact_digest": "sha256:" + "a" * 64,
-            "artifact_expires_at": "2099-07-10T13:17:42Z",
-            "artifact_id": 67890,
-            "artifact_name": "release-candidate-" + "a" * 40 + "-12345-2",
-            "artifact_size": 31415,
-            "event": "push",
-            "job": "package",
-            "ref": "refs/heads/main",
-            "repository": "robotlearning123/gpt2agent",
-            "run_attempt": 2,
-            "run_id": 12345,
-            "workflow_file": ".github/workflows/ci.yml",
-        },
-        "wheel": {"filename": wheel.name, "sha256": "c" * 64, "size_bytes": 5},
-        "sdist": {"filename": sdist.name, "sha256": "d" * 64, "size_bytes": 5},
-    }
-    commands: list[tuple[str, ...]] = []
-    child_envs: list[dict[str, str]] = []
-
-    for name, value in _INJECTED_CHILD_SECRETS.items():
-        monkeypatch.setenv(name, value)
-    monkeypatch.setenv("HOME", str(tmp_path / "operator-home"))
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "operator-codex"))
-
-    def fake_command(argv, *, cwd, env):
-        del cwd
-        commands.append(tuple(str(value) for value in argv))
-        child_envs.append(dict(env))
-
-    monkeypatch.setattr(receipt_module, "_run_command", fake_command)
-    with receipt_module.installed_candidate_context(
-        dist,
-        artifacts,
-        "0.0.12",
-        temp_parent=tmp_path,
-    ) as wheel_python:
-        commands_before_yield = list(commands)
-        assert wheel_python.name in {"python", "python.exe"}
-
-    flattened = [" ".join(command) for command in commands_before_yield]
-    assert any(str(wheel) in command and "pip install" in command for command in flattened)
-    assert any(str(sdist) in command and "pip install" in command for command in flattened)
-    assert flattened.index(next(item for item in flattened if str(wheel) in item)) < len(flattened)
-    assert flattened.index(next(item for item in flattened if str(sdist) in item)) < len(flattened)
-    assert child_envs
-    assert all(
-        _INJECTED_CHILD_SECRETS.keys().isdisjoint(env) for env in child_envs
-    )
-    assert all("CODEX_HOME" not in env for env in child_envs)
-    assert all(env["HOME"] != str(tmp_path / "operator-home") for env in child_envs)
-    assert all(
-        {env[name] for name in _INJECTED_CHILD_TEMP_DIRS}
-        == {str(Path(env["HOME"]) / "tmp")}
-        for env in child_envs
-    )
-    assert all(not Path(env["HOME"]).exists() for env in child_envs)
-
-
-def test_installed_probe_gets_only_isolated_minimal_account_auth(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    import scripts.verify_account_receipt as receipt_module
-
-    operator_home = tmp_path / "operator-home"
-    operator_codex = tmp_path / "operator-codex"
-    operator_codex.mkdir(parents=True)
-    operator_home.mkdir()
-    access_token = "eyJsynthetic.header.signature"
-    (operator_codex / "auth.json").write_text(
-        json.dumps(
-            {
-                "tokens": {
-                    "access_token": access_token,
-                    "refresh_token": "SYNTHETIC_REFRESH_TOKEN",
-                },
-                "OPENAI_API_KEY": "SYNTHETIC_OPENAI_API_KEY",
-            }
-        ),
-        encoding="utf-8",
-    )
-    for relative in (".ssh/id_ed25519", ".aws/credentials", ".config/gh/hosts.yml"):
-        path = operator_home / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("SYNTHETIC_OPERATOR_CREDENTIAL", encoding="utf-8")
-    monkeypatch.setenv("HOME", str(operator_home))
-    monkeypatch.setenv("CODEX_HOME", str(operator_codex))
-    for name, value in _INJECTED_CHILD_SECRETS.items():
-        monkeypatch.setenv(name, value)
-
-    captured: dict[str, object] = {}
-
-    def fake_command(argv, *, cwd, env):
-        del argv, cwd
-        child_env = dict(env)
-        isolated_home = Path(child_env["HOME"])
-        isolated_codex = Path(child_env["CODEX_HOME"])
-        auth_file = isolated_codex / "auth.json"
-        captured.update(
-            {
-                "env": child_env,
-                "home": isolated_home,
-                "codex": isolated_codex,
-                "home_mode": isolated_home.stat().st_mode & 0o777,
-                "codex_mode": isolated_codex.stat().st_mode & 0o777,
-                "temp_mode": Path(child_env["TMPDIR"]).stat().st_mode & 0o777,
-                "auth_mode": auth_file.stat().st_mode & 0o777,
-                "auth": json.loads(auth_file.read_text(encoding="utf-8")),
-                "files": sorted(
-                    str(path.relative_to(isolated_home))
-                    for path in isolated_home.rglob("*")
-                    if path.is_file()
-                ),
-            }
-        )
-
-    monkeypatch.setattr(receipt_module, "_run_command", fake_command)
-    monkeypatch.setattr(
-        receipt_module,
-        "_read_probe_payload",
-        lambda _path: {"synthetic": "validated"},
-    )
-
-    assert receipt_module.probe_installed_candidate(
-        Path("/synthetic/wheel/python"), "pro"
-    ) == {"synthetic": "validated"}
-    child_env = captured["env"]
-    assert isinstance(child_env, dict)
-    assert captured["home"] != operator_home
-    assert captured["codex"] != operator_codex
-    assert captured["home_mode"] == 0o700
-    assert captured["codex_mode"] == 0o700
-    assert captured["temp_mode"] == 0o700
-    assert captured["auth_mode"] == 0o600
-    assert captured["auth"] == {"tokens": {"access_token": access_token}}
-    assert captured["files"] == ["codex/auth.json"]
-    assert _INJECTED_CHILD_SECRETS.keys().isdisjoint(child_env)
-    assert {child_env[name] for name in _INJECTED_CHILD_TEMP_DIRS} == {
-        str(Path(child_env["HOME"]) / "tmp")
-    }
-    assert not Path(captured["home"]).exists()
-
-
-def test_build_distributions_removes_only_its_owned_source_residue(
-    tmp_path: Path, monkeypatch
-) -> None:
-    import scripts.verify_account_receipt as receipt_module
-
-    checkout, _commit, _tree = _create_checkout(tmp_path)
-    dist = tmp_path / "candidate-dist"
-    captured_env: dict[str, str] = {}
-    for name, value in _INJECTED_CHILD_SECRETS.items():
-        monkeypatch.setenv(name, value)
-    monkeypatch.setenv("HOME", str(tmp_path / "operator-home"))
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "operator-codex"))
-
-    def fake_command(argv, *, cwd, env):
-        del argv
-        assert cwd == checkout.resolve()
-        captured_env.update(env)
-        (checkout / "build").mkdir()
-        (checkout / "build" / "intermediate").write_text("owned", encoding="utf-8")
-        (checkout / "gpt2agent.egg-info").mkdir()
-        (checkout / "gpt2agent.egg-info" / "SOURCES.txt").write_text("owned", encoding="utf-8")
-        (dist / "gpt2agent-0.0.12-py3-none-any.whl").write_bytes(b"wheel")
-        (dist / "gpt2agent-0.0.12.tar.gz").write_bytes(b"sdist")
-
-    monkeypatch.setattr(receipt_module, "_run_command", fake_command)
-
-    receipt_module.build_distributions(checkout, dist)
-
-    assert dist.is_dir()
-    assert not (checkout / "build").exists()
-    assert not (checkout / "gpt2agent.egg-info").exists()
-    assert _INJECTED_CHILD_SECRETS.keys().isdisjoint(captured_env)
-    assert "CODEX_HOME" not in captured_env
-    assert captured_env["HOME"] != str(tmp_path / "operator-home")
-    assert {captured_env[name] for name in _INJECTED_CHILD_TEMP_DIRS} == {
-        str(Path(captured_env["HOME"]) / "tmp")
-    }
-    assert not Path(captured_env["HOME"]).exists()
-
-
 def test_streaming_requester_stops_at_declared_oversize_and_closes_response() -> None:
     from scripts.verify_account_receipt import (
         MAX_RESPONSE_BYTES,
         CurlCffiRequester,
         ReceiptError,
+        _trusted_headers,
     )
 
     secret = "SYNTHETIC-TRANSPORT-SECRET-9f11"
@@ -1420,11 +863,13 @@ def test_streaming_requester_stops_at_declared_oversize_and_closes_response() ->
             return response
 
     requester = CurlCffiRequester(Session())
+    headers = _trusted_headers("eyJsynthetic.header.signature")
+    headers["X-OpenAI-Target-Path"] = "/backend-api/apps/list"
     with pytest.raises(ReceiptError) as caught:
         requester(
             method="GET",
             url=response.url,
-            headers={"Authorization": f"Bearer {secret}"},
+            headers=headers,
             timeout=20,
             max_bytes=MAX_RESPONSE_BYTES,
         )

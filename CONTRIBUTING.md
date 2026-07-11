@@ -86,9 +86,11 @@ tokens or credentials.
 Account-backed release checks run only on a trusted local machine against the
 exact candidate commit. Never place browser cookies, bearer tokens, or raw
 account payloads in Actions, PRs, logs, or repository artifacts. Hosted CI sees
-only the sanitized receipt's SHA-256. After the tagged workflow creates the
-GitHub Release, the release owner manually attaches the exact closed-schema
-receipt and verifies the downloaded asset against the annotated-tag digest. See
+only the sanitized receipt's SHA-256; the receipt remains in the approved local
+evidence store and is never attached to the public release. The trusted verifier
+owns the bearer and live transport while candidate distributions remain inert.
+The closed adapter corpus executes candidates only in credential-free main CI
+or an OS-isolated environment with no account auth. See
 [the 0.0.12 migration guide](docs/migration-0.0.12.md#release-operators).
 Before creating a release tag, run
 `python scripts/audit_release_governance.py --live OWNER/REPO --policy POLICY.json`;

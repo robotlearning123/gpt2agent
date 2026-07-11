@@ -5,15 +5,16 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
-import shutil
+import stat
 import subprocess
 import sys
-import tempfile
+import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass, field as dataclass_field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
@@ -21,6 +22,8 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlparse
 
 
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_RESPONSE_HEADERS = 128
+MAX_RESPONSE_HEADER_BYTES = 64 * 1024
 MAX_REDIRECTS = 3
 REQUEST_TIMEOUT_SECONDS = 20
 _ACCOUNT_ORIGIN = "https://chatgpt.com"
@@ -28,10 +31,14 @@ _MAX_ITEMS = 10_000
 _MAX_RECEIPT_BYTES = 1024 * 1024
 _MAX_AUTH_BYTES = 1024 * 1024
 _PRETAG_ARTIFACT_HEADROOM = timedelta(hours=72)
+_MAX_LIVE_RECEIPT_AGE = timedelta(minutes=30)
+_MAX_LIVE_PROBE_DURATION = timedelta(minutes=10)
+_MAX_FUTURE_CLOCK_SKEW = timedelta(minutes=1)
 _PACKAGE_VERSION = "0.0.12"
 _SCHEMA_VERSION = "4"
 _VERIFIER_NAME = "gpt2agent-account-receipt"
-_VERIFIER_VERSION = "4"
+_VERIFIER_VERSION = "5"
+_MAX_TOKEN_BYTES = 16 * 1024
 _HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 _REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
@@ -40,23 +47,12 @@ _ARTIFACT_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _ACCESS_TOKEN = re.compile(
     r"eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\Z"
 )
-_CHILD_ENV_ALLOWLIST = frozenset(
-    {
-        "COMSPEC",
-        "CURL_CA_BUNDLE",
-        "LANG",
-        "LANGUAGE",
-        "PATH",
-        "PATHEXT",
-        "PYTHONIOENCODING",
-        "PYTHONUTF8",
-        "REQUESTS_CA_BUNDLE",
-        "SSL_CERT_DIR",
-        "SSL_CERT_FILE",
-        "SYSTEMROOT",
-        "TZ",
-        "WINDIR",
-    }
+_CLIENT_VERSION = "prod-be885abbfcfe7b1f511e88b3003d9ee44757fbad"
+_CLIENT_BUILD = "5955942"
+_CHROME_131_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
 )
 
 
@@ -103,77 +99,6 @@ _RUNTIME_ADAPTER_CATEGORIES = (
     "custom_gpts",
     "codex",
 )
-
-
-@dataclass
-class RuntimeAdapterChecks:
-    """Exercise fixed installed-package adapters without retaining their output."""
-
-    validators: Mapping[str, Callable[[Any], Any]]
-    _exercised: set[str] = dataclass_field(default_factory=set, init=False, repr=False)
-    _passed: set[str] = dataclass_field(default_factory=set, init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        if set(self.validators) != set(_RUNTIME_ADAPTER_CATEGORIES) or any(
-            not callable(validator) for validator in self.validators.values()
-        ):
-            raise ReceiptError("installed runtime adapter set is invalid")
-
-    def validate(self, category: str, value: Any) -> _ShapeCheck | None:
-        validator = self.validators.get(category)
-        if validator is None:
-            return None
-        if category in self._exercised:
-            raise ReceiptError("installed runtime adapter was exercised more than once")
-        self._exercised.add(category)
-        try:
-            normalized = validator(value)
-            if category == "sites_access":
-                if not isinstance(normalized, dict):
-                    raise TypeError("object adapter returned a non-object")
-                result = _ShapeCheck(
-                    "valid_object",
-                    None,
-                    continue_site_catalog=(
-                        normalized.get("enabled") is not False
-                        if category == "sites_access"
-                        else None
-                    ),
-                )
-            else:
-                if isinstance(normalized, list):
-                    items = normalized
-                elif isinstance(normalized, dict) and isinstance(normalized.get("items"), list):
-                    items = normalized["items"]
-                else:
-                    raise TypeError("collection adapter returned an invalid projection")
-                result = _ShapeCheck(
-                    "valid_nonempty" if items else "valid_empty",
-                    len(items),
-                )
-        except Exception:
-            raise ReceiptError("installed runtime adapter rejected account response") from None
-        self._passed.add(category)
-        return result
-
-    def evidence(self, shape_results: list[dict[str, Any]]) -> dict[str, int]:
-        """Return only fixed aggregate fields after checking complete coverage."""
-        results = _validate_shape_results(shape_results)
-        not_requested = {
-            record["route_category"]
-            for record in results
-            if record["status"] == "not_requested"
-            and record["route_category"] in _RUNTIME_ADAPTER_CATEGORIES
-        }
-        expected_exercised = set(_RUNTIME_ADAPTER_CATEGORIES) - not_requested
-        if self._exercised != expected_exercised or self._passed != expected_exercised:
-            raise ReceiptError("installed runtime adapter coverage is incomplete")
-        return {
-            "adapters_declared": len(_RUNTIME_ADAPTER_CATEGORIES),
-            "adapters_exercised": len(self._exercised),
-            "adapters_passed": len(self._passed),
-            "adapters_not_requested": len(not_requested),
-        }
 
 
 @dataclass(frozen=True)
@@ -224,8 +149,14 @@ PROBES = (
     ProbeSpec("projects_candidate", "/backend-api/projects"),
 )
 
+PLAN_PROBE = ProbeSpec(
+    "plan_entitlement",
+    "/backend-api/accounts/check/v4-2023-04-27",
+)
+
 _PROBE_BY_CATEGORY = {probe.category: probe for probe in PROBES}
-_PROBE_BY_REQUEST = {(probe.path, probe.query): probe for probe in PROBES}
+_REQUEST_PROBES = (PLAN_PROBE, *PROBES)
+_PROBE_BY_REQUEST = {(probe.path, probe.query): probe for probe in _REQUEST_PROBES}
 _DENIED_PATH_MARKERS = (
     "voice",
     "realtime",
@@ -321,10 +252,40 @@ def _header(headers: Mapping[str, str], name: str) -> str | None:
     return None
 
 
-def _validate_response_size(response: RawResponse) -> None:
+def _bounded_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    if not isinstance(headers, Mapping):
+        raise ReceiptError("account response metadata is malformed")
+    result: dict[str, str] = {}
+    normalized_names: set[str] = set()
+    total_bytes = 0
+    try:
+        for index, (key, value) in enumerate(headers.items()):
+            if (
+                index >= MAX_RESPONSE_HEADERS
+                or not isinstance(key, str)
+                or not isinstance(value, str)
+            ):
+                raise ReceiptError("account response metadata is malformed")
+            normalized = key.lower()
+            if not key or normalized in normalized_names:
+                raise ReceiptError("account response metadata is malformed")
+            normalized_names.add(normalized)
+            total_bytes += len(key.encode("utf-8")) + len(value.encode("utf-8")) + 4
+            if total_bytes > MAX_RESPONSE_HEADER_BYTES:
+                raise ReceiptError("account response metadata is malformed")
+            result[key] = value
+    except ReceiptError:
+        raise
+    except Exception:
+        raise ReceiptError("account response metadata is malformed") from None
+    return result
+
+
+def _validate_response_size(response: RawResponse) -> dict[str, str]:
     if not isinstance(response.body, bytes):
         raise ReceiptError("account response body is malformed")
-    declared = _header(response.headers, "Content-Length")
+    headers = _bounded_response_headers(response.headers)
+    declared = _header(headers, "Content-Length")
     if declared is not None:
         try:
             announced = int(declared)
@@ -336,6 +297,7 @@ def _validate_response_size(response: RawResponse) -> None:
             raise ReceiptError("account response exceeds 4 MiB")
     if len(response.body) > MAX_RESPONSE_BYTES:
         raise ReceiptError("account response exceeds 4 MiB")
+    return headers
 
 
 def _items_shape(items: Any, item_validator: Callable[[Any], bool]) -> _ShapeCheck:
@@ -471,66 +433,9 @@ _SHAPE_VALIDATORS: dict[str, Callable[[Any], _ShapeCheck]] = {
 }
 
 
-def installed_runtime_adapter_checks() -> RuntimeAdapterChecks:
-    """Load exact adapter functions from the candidate package in this interpreter."""
-    try:
-        from gpt2agent.model_catalog import (
-            normalize_general_models,
-            normalize_work_models,
-        )
-        from gpt2agent.tools.apps import normalize_apps
-        from gpt2agent.tools.automations import normalize_scheduled_page
-        from gpt2agent.tools.codex import normalize_codex_environments
-        from gpt2agent.tools.conversations import normalize_background_tasks
-        from gpt2agent.tools.gpts import normalize_custom_gpts
-        from gpt2agent.tools.plugins import (
-            normalize_installed_plugins,
-            normalize_plugin_catalog,
-        )
-        from gpt2agent.tools.sites import normalize_sites_access, normalize_sites_page
-    except Exception:
-        raise ReceiptError("installed runtime adapters could not be imported") from None
-
-    def general_models(data: Any) -> Any:
-        return normalize_general_models(data["models"])
-
-    def work_models(data: Any) -> Any:
-        return normalize_work_models(data["models"])
-
-    def plugin_catalog(data: Any) -> Any:
-        return normalize_plugin_catalog(data, limit=1, cursor=None)
-
-    def background_jobs(data: Any) -> Any:
-        return normalize_background_tasks(data, limit=1)
-
-    def site_catalog(data: Any) -> Any:
-        page = normalize_sites_page(data)
-        if len(page["items"]) > 1:
-            raise ValueError("site page exceeds the probed limit")
-        return page
-
-    return RuntimeAdapterChecks(
-        {
-            "chat_models": general_models,
-            "work_models": work_models,
-            "apps": normalize_apps,
-            "plugins": plugin_catalog,
-            "installed_plugins": normalize_installed_plugins,
-            "background_jobs": background_jobs,
-            "scheduled_automations": normalize_scheduled_page,
-            "sites_access": normalize_sites_access,
-            "site_catalog": site_catalog,
-            "custom_gpts": normalize_custom_gpts,
-            "codex": normalize_codex_environments,
-        }
-    )
-
-
 def _decode_and_check_shape(
     probe: ProbeSpec,
     response: RawResponse,
-    *,
-    adapter_checks: RuntimeAdapterChecks | None = None,
 ) -> _ShapeCheck:
     content_type = (_header(response.headers, "Content-Type") or "").split(";", 1)[0].lower()
     if content_type != "application/json":
@@ -539,10 +444,6 @@ def _decode_and_check_shape(
         data = json.loads(response.body)
     except (UnicodeDecodeError, json.JSONDecodeError):
         raise ReceiptError("account response is not valid JSON") from None
-    if adapter_checks is not None:
-        adapted = adapter_checks.validate(probe.category, data)
-        if adapted is not None:
-            return adapted
     try:
         validator = _SHAPE_VALIDATORS[probe.category]
         return validator(data)
@@ -550,14 +451,13 @@ def _decode_and_check_shape(
         raise ReceiptError("account response contract requires review") from None
 
 
-def execute_probe(
+def _fetch_probe_response(
     probe: ProbeSpec,
     *,
     requester: Callable[..., RawResponse],
     auth_headers: Mapping[str, str],
-    adapter_checks: RuntimeAdapterChecks | None = None,
-) -> ProbeOutcome:
-    """Issue one bounded request and return a value-only-free outcome."""
+) -> RawResponse:
+    """Fetch one reviewed route with bounded exact-route redirects."""
     reviewed = validate_probe_request("GET", probe.path, dict(probe.query))
     if reviewed.category != probe.category:
         raise ReceiptError("account probe is not permitted")
@@ -589,25 +489,45 @@ def execute_probe(
             raise ReceiptError("account response origin is not permitted") from None
         if observed_probe.category != reviewed.category:
             raise ReceiptError("account response route is not permitted")
-        _validate_response_size(response)
+        response_headers = _validate_response_size(response)
+        response = RawResponse(
+            status=response.status,
+            headers=response_headers,
+            body=response.body,
+            url=response.url,
+        )
 
-        if response.status in {301, 302, 303, 307, 308}:
-            if redirects >= MAX_REDIRECTS:
-                raise ReceiptError("account redirect limit exceeded")
-            location = _header(response.headers, "Location")
-            if location is None:
-                raise ReceiptError("account redirect is malformed")
-            try:
-                next_url = urljoin(current_url, location)
-                redirected_probe = probe_from_url(next_url)
-            except ReceiptError:
-                raise ReceiptError("account redirect is not permitted") from None
-            if redirected_probe.category != reviewed.category:
-                raise ReceiptError("account redirect is not permitted")
-            current_url = next_url
-            redirects += 1
-            continue
-        break
+        if response.status not in {301, 302, 303, 307, 308}:
+            return response
+        if redirects >= MAX_REDIRECTS:
+            raise ReceiptError("account redirect limit exceeded")
+        location = _header(response.headers, "Location")
+        if location is None:
+            raise ReceiptError("account redirect is malformed")
+        try:
+            next_url = urljoin(current_url, location)
+            redirected_probe = probe_from_url(next_url)
+        except ReceiptError:
+            raise ReceiptError("account redirect is not permitted") from None
+        if redirected_probe.category != reviewed.category:
+            raise ReceiptError("account redirect is not permitted")
+        current_url = next_url
+        redirects += 1
+
+
+def execute_probe(
+    probe: ProbeSpec,
+    *,
+    requester: Callable[..., RawResponse],
+    auth_headers: Mapping[str, str],
+) -> ProbeOutcome:
+    """Issue one bounded request and return a value-only-free outcome."""
+    reviewed = validate_probe_request("GET", probe.path, dict(probe.query))
+    response = _fetch_probe_response(
+        reviewed,
+        requester=requester,
+        auth_headers=auth_headers,
+    )
 
     if reviewed.category == "projects_candidate":
         if response.status not in {404, 405}:
@@ -622,11 +542,7 @@ def execute_probe(
     if not 200 <= response.status < 300:
         raise ReceiptError("account route did not satisfy the live gate")
 
-    checked = _decode_and_check_shape(
-        reviewed,
-        response,
-        adapter_checks=adapter_checks,
-    )
+    checked = _decode_and_check_shape(reviewed, response)
     status = (
         "unavailable"
         if reviewed.category == "sites_access" and checked.continue_site_catalog is False
@@ -646,7 +562,6 @@ def run_probe_sequence(
     *,
     requester: Callable[..., RawResponse],
     auth_headers: Mapping[str, str],
-    adapter_checks: RuntimeAdapterChecks | None = None,
 ) -> list[dict[str, Any]]:
     """Run the reviewed table serially, with only the Sites conditional."""
     records: list[dict[str, Any]] = []
@@ -667,12 +582,59 @@ def run_probe_sequence(
             probe,
             requester=requester,
             auth_headers=auth_headers,
-            adapter_checks=adapter_checks,
         )
         records.append(outcome.receipt_record())
         if probe.category == "sites_access":
             continue_site_catalog = outcome.continue_site_catalog is not False
     return records
+
+
+def parse_active_pro_entitlement(value: Any) -> str:
+    """Accept exactly one unambiguous active Pro entitlement."""
+    if not isinstance(value, dict):
+        raise ReceiptError("authenticated account plan is invalid")
+    accounts = value.get("accounts")
+    if not isinstance(accounts, dict) or not accounts or len(accounts) > 100:
+        raise ReceiptError("authenticated account plan is invalid")
+    active_plans: list[str] = []
+    for account in accounts.values():
+        if not isinstance(account, dict):
+            raise ReceiptError("authenticated account plan is invalid")
+        entitlement = account.get("entitlement")
+        if not isinstance(entitlement, dict):
+            raise ReceiptError("authenticated account plan is invalid")
+        plan = entitlement.get("subscription_plan")
+        active = entitlement.get("has_active_subscription")
+        if not isinstance(plan, str) or not plan or len(plan) > 128 or not isinstance(active, bool):
+            raise ReceiptError("authenticated account plan is invalid")
+        if active:
+            active_plans.append(plan)
+    if len(active_plans) != 1 or active_plans[0] not in {"pro", "chatgptpro"}:
+        raise ReceiptError("authenticated account plan does not match the release gate")
+    return "pro"
+
+
+def execute_plan_probe(
+    *,
+    requester: Callable[..., RawResponse],
+    auth_headers: Mapping[str, str],
+) -> str:
+    """Measure the fixed entitlement route without retaining account values."""
+    response = _fetch_probe_response(
+        PLAN_PROBE,
+        requester=requester,
+        auth_headers=auth_headers,
+    )
+    if not 200 <= response.status < 300:
+        raise ReceiptError("authenticated account plan could not be measured")
+    content_type = (_header(response.headers, "Content-Type") or "").split(";", 1)[0].lower()
+    if content_type != "application/json":
+        raise ReceiptError("authenticated account plan response is invalid")
+    try:
+        payload = json.loads(response.body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ReceiptError("authenticated account plan response is invalid") from None
+    return parse_active_pro_entitlement(payload)
 
 
 def canonical_json(value: Any) -> bytes:
@@ -894,6 +856,24 @@ def _timestamp(value: Any) -> datetime:
     if parsed.tzinfo != timezone.utc:
         raise ReceiptError("receipt timestamp is invalid")
     return parsed
+
+
+def _utc_datetime_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _validate_pretag_freshness(value: Mapping[str, Any]) -> None:
+    """Reject replayed or clock-implausible live evidence before tagging."""
+    started = _timestamp(value.get("started_at"))
+    completed = _timestamp(value.get("completed_at"))
+    now = _utc_datetime_now()
+    if (
+        completed < started
+        or completed - started > _MAX_LIVE_PROBE_DURATION
+        or completed > now + _MAX_FUTURE_CLOCK_SKEW
+        or now - completed > _MAX_LIVE_RECEIPT_AGE
+    ):
+        raise ReceiptError("account receipt freshness is invalid")
 
 
 def _exact_keys(value: Any, expected: set[str]) -> dict[str, Any]:
@@ -1131,27 +1111,26 @@ def _validate_adapter_counts(
     }
     counts = _exact_keys(value, fields)
     if any(isinstance(count, bool) or not isinstance(count, int) for count in counts.values()):
-        raise ReceiptError("installed runtime adapter counts are invalid")
-    results = (
+        raise ReceiptError("offline runtime adapter counts are invalid")
+    if public:
         _validate_public_shape_results(shape_results)
-        if public
-        else _validate_shape_results(shape_results)
-    )
-    not_requested = sum(
-        record["status"] == "not_requested"
-        and record["route_category"] in _RUNTIME_ADAPTER_CATEGORIES
-        for record in results
-    )
-    exercised = len(_RUNTIME_ADAPTER_CATEGORIES) - not_requested
-    expected = {
-        "adapters_declared": len(_RUNTIME_ADAPTER_CATEGORIES),
-        "adapters_exercised": exercised,
-        "adapters_passed": exercised,
-        "adapters_not_requested": not_requested,
-    }
+    else:
+        _validate_shape_results(shape_results)
+    expected = _offline_adapter_counts()
     if counts != expected:
-        raise ReceiptError("installed runtime adapter counts are invalid")
+        raise ReceiptError("offline runtime adapter counts are invalid")
     return counts
+
+
+def _offline_adapter_counts() -> dict[str, int]:
+    """Return the fixed main-CI corpus evidence represented by schema v4."""
+    declared = len(_RUNTIME_ADAPTER_CATEGORIES)
+    return {
+        "adapters_declared": declared,
+        "adapters_exercised": declared,
+        "adapters_passed": declared,
+        "adapters_not_requested": 0,
+    }
 
 
 def validate_receipt(receipt: Any) -> None:
@@ -1325,6 +1304,7 @@ def verify_receipt_file(
     digest = hashlib.sha256(payload).hexdigest()
     if digest != expected_sha256:
         raise ReceiptError("account receipt digest does not match")
+    _validate_pretag_freshness(receipt)
     commit = _require_oid(declared_commit)
     tree = _require_oid(declared_tree)
     if receipt["source"] != {"commit": commit, "tree": tree}:
@@ -1343,86 +1323,45 @@ def verify_receipt_file(
         artifact_digest=ci_artifact_digest,
         artifact_size=ci_artifact_size,
         artifact_expires_at=ci_artifact_expires_at,
-        require_unexpired=False,
     )
     if receipt["local_candidate_artifacts"] != current_artifacts:
         raise ReceiptError("candidate artifact bytes do not match the account receipt")
     return digest
 
 
-def _run_command(
-    argv: list[str] | tuple[str, ...],
-    *,
-    cwd: Path,
-    env: Mapping[str, str],
-) -> None:
-    """Run a release step while deliberately discarding potentially sensitive output."""
-    try:
-        result = subprocess.run(
-            [str(value) for value in argv],
-            cwd=cwd,
-            env=dict(env),
-            check=False,
-            capture_output=True,
-            timeout=15 * 60,
-        )
-    except (OSError, subprocess.SubprocessError):
-        raise ReceiptError("local release subprocess failed") from None
-    if result.returncode != 0:
-        raise ReceiptError("local release subprocess failed")
-
-
-def _subprocess_env(
-    *,
-    isolated_home: Path | None = None,
-    isolated_codex_home: Path | None = None,
-) -> dict[str, str]:
-    """Build a minimal child environment without operator credentials."""
-    env = {
-        name: value
-        for name, value in os.environ.items()
-        if name.upper() in _CHILD_ENV_ALLOWLIST or name.upper().startswith("LC_")
-    }
-    env["PIP_CONFIG_FILE"] = os.devnull
-    env["PYTHONNOUSERSITE"] = "1"
-    if isolated_home is not None:
-        home = Path(isolated_home)
-        try:
-            if home.is_symlink() or not home.is_dir():
-                raise OSError
-            child_temp = home / "tmp"
-            child_temp.mkdir(mode=0o700)
-        except OSError:
-            raise ReceiptError("isolated child temp could not be created") from None
-        env["HOME"] = str(home)
-        env["USERPROFILE"] = str(home)
-        for name in ("TEMP", "TMP", "TMPDIR"):
-            env[name] = str(child_temp)
-    if isolated_codex_home is not None:
-        if isolated_home is None:
-            raise ReceiptError("isolated account auth requires an isolated home")
-        codex_home = Path(isolated_codex_home)
-        try:
-            codex_home.resolve(strict=False).relative_to(
-                Path(isolated_home).resolve(strict=False)
-            )
-        except (OSError, ValueError):
-            raise ReceiptError("isolated account auth path is invalid") from None
-        env["CODEX_HOME"] = str(codex_home)
-    return env
-
-
 def _account_token_from_file(path: Path, *, codex: bool) -> str | None:
-    if path.is_symlink() or not path.is_file():
-        return None
+    path = Path(path)
+    descriptor = -1
     try:
-        with path.open("rb") as stream:
+        if path.is_symlink():
+            return None
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path, flags)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size < 1
+            or metadata.st_size > _MAX_AUTH_BYTES
+            or (os.name == "posix" and metadata.st_uid != os.getuid())
+            or (os.name == "posix" and stat.S_IMODE(metadata.st_mode) & 0o077)
+        ):
+            return None
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = -1
             raw = stream.read(_MAX_AUTH_BYTES + 1)
         if len(raw) > _MAX_AUTH_BYTES:
             return None
         value = json.loads(raw)
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
     if not isinstance(value, dict):
         return None
     tokens = value.get("tokens")
@@ -1432,7 +1371,11 @@ def _account_token_from_file(path: Path, *, codex: bool) -> str | None:
         if codex
         else value.get("token") or value.get("access_token") or nested
     )
-    if not isinstance(token, str) or _ACCESS_TOKEN.fullmatch(token) is None:
+    if (
+        not isinstance(token, str)
+        or len(token.encode("utf-8")) > _MAX_TOKEN_BYTES
+        or _ACCESS_TOKEN.fullmatch(token) is None
+    ):
         return None
     return token
 
@@ -1459,195 +1402,8 @@ def _reviewed_account_access_token() -> str:
     return token
 
 
-def _provision_isolated_account_auth(isolated_home: Path) -> Path:
-    """Copy only the selected ChatGPT access token into a private child home."""
-    home = Path(isolated_home)
-    codex_home = home / "codex"
-    try:
-        home.chmod(0o700)
-        codex_home.mkdir(mode=0o700)
-        codex_home.chmod(0o700)
-        auth_path = codex_home / "auth.json"
-        descriptor = os.open(auth_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            try:
-                os.fchmod(descriptor, 0o600)
-            except (OSError, AttributeError):
-                pass
-            payload = json.dumps(
-                {"tokens": {"access_token": _reviewed_account_access_token()}},
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            with os.fdopen(descriptor, "wb") as stream:
-                descriptor = -1
-                stream.write(payload)
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-    except ReceiptError:
-        raise
-    except OSError:
-        raise ReceiptError("isolated account auth could not be provisioned") from None
-    return codex_home
-
-
-def _remove_owned_build_residue(checkout: Path) -> None:
-    """Remove only paths a clean setuptools build is allowed to create."""
-    for relative in ("build", "gpt2agent.egg-info"):
-        path = checkout / relative
-        try:
-            if path.is_symlink() or path.is_file():
-                path.unlink()
-            elif path.is_dir():
-                shutil.rmtree(path)
-        except OSError:
-            raise ReceiptError("owned build residue could not be removed") from None
-
-
-def build_distributions(checkout: Path, dist: Path) -> None:
-    """Build one fresh wheel/sdist set from the already-verified checkout."""
-    checkout = Path(checkout).resolve()
-    dist = Path(dist)
-    if dist.exists() or dist.is_symlink() or not dist.parent.is_dir():
-        raise ReceiptError("candidate artifact output must not already exist")
-    try:
-        dist.mkdir(mode=0o700)
-    except OSError:
-        raise ReceiptError("candidate artifact output could not be created") from None
-    try:
-        try:
-            with tempfile.TemporaryDirectory(prefix="gpt2agent-account-build-") as temp_name:
-                home = Path(temp_name) / "home"
-                home.mkdir(mode=0o700)
-                _run_command(
-                    [sys.executable, "-m", "build", "--outdir", str(dist.resolve())],
-                    cwd=checkout,
-                    env=_subprocess_env(isolated_home=home),
-                )
-        finally:
-            _remove_owned_build_residue(checkout)
-    except ReceiptError:
-        shutil.rmtree(dist, ignore_errors=True)
-        raise
-
-
-def _venv_python(venv: Path) -> Path:
-    if os.name == "nt":
-        return venv / "Scripts" / "python.exe"
-    return venv / "bin" / "python"
-
-
-@contextmanager
-def installed_candidate_context(
-    dist: Path,
-    artifacts: dict[str, Any],
-    package_version: str,
-    *,
-    temp_parent: Path | None = None,
-) -> Iterator[Path]:
-    """Install and check both artifacts before yielding the wheel interpreter."""
-    if package_version != _PACKAGE_VERSION:
-        raise ReceiptError("candidate package version is invalid")
-    source = _exact_keys(artifacts.get("source"), {"commit", "tree"})
-    source = {"commit": _require_oid(source["commit"]), "tree": _require_oid(source["tree"])}
-    _validate_artifact_record(
-        artifacts,
-        package_version=package_version,
-        source=source,
-    )
-    dist = Path(dist).resolve()
-    wheel = dist / artifacts["wheel"]["filename"]
-    sdist = dist / artifacts["sdist"]["filename"]
-    if any(path.is_symlink() or not path.is_file() for path in (wheel, sdist)):
-        raise ReceiptError("candidate artifacts must be regular files")
-
-    parent = Path(temp_parent).resolve() if temp_parent is not None else None
-    if parent is not None and not parent.is_dir():
-        raise ReceiptError("temporary installation parent is invalid")
-    with tempfile.TemporaryDirectory(
-        prefix="gpt2agent-account-gate-",
-        dir=str(parent) if parent is not None else None,
-    ) as temp_name:
-        temp_root = Path(temp_name)
-        home = temp_root / "home"
-        home.mkdir(mode=0o700)
-        env = _subprocess_env(isolated_home=home)
-        wheel_venv = temp_root / "wheel-venv"
-        sdist_venv = temp_root / "sdist-venv"
-        wheel_python = _venv_python(wheel_venv)
-        sdist_python = _venv_python(sdist_venv)
-
-        _run_command([sys.executable, "-m", "venv", str(wheel_venv)], cwd=temp_root, env=env)
-        _run_command(
-            [
-                str(wheel_python),
-                "-m",
-                "pip",
-                "install",
-                "--disable-pip-version-check",
-                "--no-input",
-                str(wheel),
-            ],
-            cwd=temp_root,
-            env=env,
-        )
-        _run_command(
-            [str(wheel_python), "-m", "pip", "check"],
-            cwd=temp_root,
-            env=env,
-        )
-        _run_command(
-            [
-                str(wheel_python),
-                "-c",
-                (
-                    "from importlib.metadata import version; import gpt2agent; "
-                    f"assert version('gpt2agent') == '{package_version}'; "
-                    f"assert gpt2agent.__version__ == '{package_version}'"
-                ),
-            ],
-            cwd=temp_root,
-            env=env,
-        )
-
-        _run_command([sys.executable, "-m", "venv", str(sdist_venv)], cwd=temp_root, env=env)
-        _run_command(
-            [
-                str(sdist_python),
-                "-m",
-                "pip",
-                "install",
-                "--disable-pip-version-check",
-                "--no-input",
-                str(sdist),
-            ],
-            cwd=temp_root,
-            env=env,
-        )
-        _run_command(
-            [str(sdist_python), "-m", "pip", "check"],
-            cwd=temp_root,
-            env=env,
-        )
-        _run_command(
-            [
-                str(sdist_python),
-                "-c",
-                (
-                    "from importlib.metadata import version; import gpt2agent; "
-                    f"assert version('gpt2agent') == '{package_version}'; "
-                    f"assert gpt2agent.__version__ == '{package_version}'"
-                ),
-            ],
-            cwd=temp_root,
-            env=env,
-        )
-        yield wheel_python
-
-
 class CurlCffiRequester:
-    """Streaming, no-auto-redirect requester backed by the installed package session."""
+    """Streaming, no-auto-redirect requester owned by the trusted verifier."""
 
     def __init__(self, session: Any) -> None:
         self._session = session
@@ -1663,23 +1419,65 @@ class CurlCffiRequester:
     ) -> RawResponse:
         if method != "GET" or timeout != REQUEST_TIMEOUT_SECONDS or max_bytes != MAX_RESPONSE_BYTES:
             raise ReceiptError("account transport request is not permitted")
-        probe_from_url(url)
+        probe = probe_from_url(url)
+        expected_header_names = {
+            "Accept",
+            "Authorization",
+            "OAI-Client-Build-Number",
+            "OAI-Client-Version",
+            "OAI-Device-Id",
+            "OAI-Language",
+            "OAI-Session-Id",
+            "Origin",
+            "Referer",
+            "User-Agent",
+            "X-OpenAI-Target-Path",
+        }
+        try:
+            header_snapshot = dict(headers)
+            device_id = uuid.UUID(header_snapshot["OAI-Device-Id"])
+            session_id = uuid.UUID(header_snapshot["OAI-Session-Id"])
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise ReceiptError("account transport headers are invalid") from None
+        authorization = header_snapshot.get("Authorization")
+        if (
+            set(header_snapshot) != expected_header_names
+            or not isinstance(authorization, str)
+            or not authorization.startswith("Bearer ")
+            or len(authorization.removeprefix("Bearer ").encode("utf-8")) > _MAX_TOKEN_BYTES
+            or _ACCESS_TOKEN.fullmatch(authorization.removeprefix("Bearer ")) is None
+            or device_id.version != 4
+            or session_id.version != 4
+            or str(device_id) != header_snapshot["OAI-Device-Id"]
+            or str(session_id) != header_snapshot["OAI-Session-Id"]
+            or header_snapshot["Accept"] != "*/*"
+            or header_snapshot["OAI-Client-Build-Number"] != _CLIENT_BUILD
+            or header_snapshot["OAI-Client-Version"] != _CLIENT_VERSION
+            or header_snapshot["OAI-Language"] != "en-US"
+            or header_snapshot["Origin"] != _ACCOUNT_ORIGIN
+            or header_snapshot["Referer"] != f"{_ACCOUNT_ORIGIN}/"
+            or header_snapshot["User-Agent"] != _CHROME_131_UA
+            or header_snapshot["X-OpenAI-Target-Path"] != probe.path
+        ):
+            raise ReceiptError("account transport headers are invalid")
         try:
             response = self._session.get(
                 url,
-                headers=dict(headers),
+                headers=header_snapshot,
                 timeout=timeout,
                 allow_redirects=False,
+                max_redirects=0,
+                proxy="",
+                verify=True,
                 stream=True,
+                discard_cookies=True,
+                default_headers=False,
+                accept_encoding=None,
             )
         except Exception:
             raise ReceiptError("account probe transport failed") from None
         try:
-            raw_headers = getattr(response, "headers", {})
-            try:
-                response_headers = {str(key): str(value) for key, value in raw_headers.items()}
-            except Exception:
-                raise ReceiptError("account response metadata is malformed") from None
+            response_headers = _bounded_response_headers(getattr(response, "headers", {}))
             declared = _header(response_headers, "Content-Length")
             if declared is not None:
                 try:
@@ -1721,11 +1519,113 @@ class CurlCffiRequester:
                 pass
 
 
+def _dependency_origin_is_trusted(origin: Path, forbidden_roots: tuple[Path, ...]) -> bool:
+    if not origin.is_absolute() or origin.is_symlink():
+        return False
+    try:
+        resolved = origin.resolve(strict=True)
+    except OSError:
+        return False
+    if not resolved.is_file():
+        return False
+    for root in forbidden_roots:
+        try:
+            resolved.relative_to(Path(root).resolve(strict=True))
+        except (OSError, ValueError):
+            continue
+        return False
+    return True
+
+
+@contextmanager
+def trusted_curl_cffi_requester(
+    *,
+    forbidden_roots: tuple[Path, ...] = (),
+    session_factory: Callable[..., Any] | None = None,
+) -> Iterator[CurlCffiRequester]:
+    """Create one verifier-owned session from a non-candidate dependency."""
+    spec = importlib.util.find_spec("curl_cffi")
+    if spec is None or spec.origin is None:
+        raise ReceiptError("trusted account transport is unavailable")
+    origin = Path(spec.origin)
+    if not _dependency_origin_is_trusted(origin, forbidden_roots):
+        raise ReceiptError("trusted account transport origin is invalid")
+    try:
+        import curl_cffi as curl_cffi_module
+        from curl_cffi import CurlOpt, requests as curl_requests
+    except Exception:
+        raise ReceiptError("trusted account transport is unavailable") from None
+    module_origin = getattr(curl_cffi_module, "__file__", None)
+    if (
+        module_origin is None
+        or not _dependency_origin_is_trusted(Path(module_origin), forbidden_roots)
+        or Path(module_origin).resolve(strict=True) != origin.resolve(strict=True)
+    ):
+        raise ReceiptError("trusted account transport origin is invalid")
+    requests_origin = getattr(curl_requests, "__file__", None)
+    if requests_origin is None or not _dependency_origin_is_trusted(
+        Path(requests_origin), forbidden_roots
+    ):
+        raise ReceiptError("trusted account transport origin is invalid")
+    try:
+        Path(requests_origin).resolve(strict=True).relative_to(origin.resolve(strict=True).parent)
+    except (OSError, ValueError):
+        raise ReceiptError("trusted account transport origin is invalid") from None
+
+    factory = curl_requests.Session if session_factory is None else session_factory
+    session = None
+    try:
+        session = factory(
+            impersonate="chrome131",
+            verify=True,
+            trust_env=False,
+            default_headers=False,
+            curl_options={CurlOpt.MAXFILESIZE_LARGE: MAX_RESPONSE_BYTES},
+        )
+        if (
+            getattr(session, "trust_env", None) is not False
+            or getattr(session, "default_headers", None) is not False
+        ):
+            raise ReceiptError("trusted account transport session policy is invalid")
+        yield CurlCffiRequester(session)
+    except ReceiptError:
+        raise
+    except Exception:
+        raise ReceiptError("trusted account transport is unavailable") from None
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+
+def _trusted_headers(token: str) -> dict[str, str]:
+    if (
+        not isinstance(token, str)
+        or len(token.encode("utf-8")) > _MAX_TOKEN_BYTES
+        or _ACCESS_TOKEN.fullmatch(token) is None
+    ):
+        raise ReceiptError("reviewed ChatGPT account auth material is unavailable")
+    return {
+        "Accept": "*/*",
+        "Authorization": f"Bearer {token}",
+        "OAI-Client-Build-Number": _CLIENT_BUILD,
+        "OAI-Client-Version": _CLIENT_VERSION,
+        "OAI-Device-Id": str(uuid.uuid4()),
+        "OAI-Language": "en-US",
+        "OAI-Session-Id": str(uuid.uuid4()),
+        "Origin": _ACCOUNT_ORIGIN,
+        "Referer": f"{_ACCOUNT_ORIGIN}/",
+        "User-Agent": _CHROME_131_UA,
+    }
+
+
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return _utc_datetime_now().isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def _validate_probe_payload(value: Any) -> dict[str, Any]:
+def _validate_live_probe_payload(value: Any) -> dict[str, Any]:
     payload = _exact_keys(
         value,
         {
@@ -1734,8 +1634,6 @@ def _validate_probe_payload(value: Any) -> dict[str, Any]:
             "plan_class",
             "started_at",
             "completed_at",
-            "adapter_status",
-            "adapter_counts",
             "shape_results",
         },
     )
@@ -1744,119 +1642,59 @@ def _validate_probe_payload(value: Any) -> dict[str, Any]:
         or payload["package_version"] != _PACKAGE_VERSION
         or payload["plan_class"] != "pro"
     ):
-        raise ReceiptError("installed account probe payload is invalid")
+        raise ReceiptError("trusted account probe payload is invalid")
     started = _timestamp(payload["started_at"])
     completed = _timestamp(payload["completed_at"])
     if completed < started:
-        raise ReceiptError("installed account probe payload is invalid")
-    shape_results = _validate_shape_results(payload["shape_results"])
-    if payload["adapter_status"] != "passed":
-        raise ReceiptError("installed runtime adapter status is invalid")
-    _validate_adapter_counts(payload["adapter_counts"], shape_results)
+        raise ReceiptError("trusted account probe payload is invalid")
+    _validate_shape_results(payload["shape_results"])
     return payload
 
 
-def _write_probe_payload(path: Path, payload: dict[str, Any]) -> None:
-    _validate_probe_payload(payload)
-    try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(canonical_json(payload))
-    except OSError:
-        raise ReceiptError("installed account probe output failed") from None
-
-
-def run_installed_live_probe(output: Path, expected_plan: str) -> None:
-    """Run inside the wheel venv; persist only the sanitized intermediate payload."""
+def run_trusted_live_probe(
+    expected_plan: str,
+    *,
+    token_loader: Callable[[], str] = _reviewed_account_access_token,
+    requester_context: Callable[..., Any] = trusted_curl_cffi_requester,
+    forbidden_roots: tuple[Path, ...] = (),
+) -> dict[str, Any]:
+    """Run the verifier-owned live route checks without candidate code."""
     if expected_plan != "pro":
         raise ReceiptError("live gate requires the reviewed Pro plan class")
     try:
-        from importlib.metadata import version
-
-        import gpt2agent
-        from gpt2agent.backend import BackendClient
-        from gpt2agent.setup import detect_plan
+        token = token_loader()
+    except ReceiptError:
+        raise
     except Exception:
-        raise ReceiptError("installed account candidate could not be imported") from None
-    if version("gpt2agent") != _PACKAGE_VERSION or gpt2agent.__version__ != _PACKAGE_VERSION:
-        raise ReceiptError("installed account candidate version is invalid")
-
+        raise ReceiptError("reviewed ChatGPT account auth material is unavailable") from None
+    auth_headers = _trusted_headers(token)
     started_at = _utc_now()
-    client = BackendClient()
     try:
-        try:
-            observed_plan = detect_plan(client)
-        except Exception:
-            raise ReceiptError("authenticated account plan could not be measured") from None
-        if observed_plan != expected_plan:
-            raise ReceiptError("authenticated account plan does not match the release gate")
-        auth_headers = client.request_headers()
-        adapter_checks = installed_runtime_adapter_checks()
-        records = run_probe_sequence(
-            requester=CurlCffiRequester(client._session),
-            auth_headers=auth_headers,
-            adapter_checks=adapter_checks,
-        )
-        adapter_counts = adapter_checks.evidence(records)
-    finally:
-        try:
-            client._session.close()
-        except Exception:
-            pass
-    payload = {
-        "schema_version": _SCHEMA_VERSION,
-        "package_version": _PACKAGE_VERSION,
-        "plan_class": observed_plan,
-        "started_at": started_at,
-        "completed_at": _utc_now(),
-        "adapter_status": "passed",
-        "adapter_counts": adapter_counts,
-        "shape_results": records,
-    }
-    _write_probe_payload(Path(output), payload)
-
-
-def _read_probe_payload(path: Path) -> dict[str, Any]:
-    if path.is_symlink() or not path.is_file():
-        raise ReceiptError("installed account probe produced no evidence")
-    try:
-        if path.stat().st_size > _MAX_RECEIPT_BYTES:
-            raise ReceiptError("installed account probe evidence is too large")
-        raw = path.read_bytes()
-        payload = json.loads(raw)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        raise ReceiptError("installed account probe evidence is invalid") from None
-    if canonical_json(payload) != raw:
-        raise ReceiptError("installed account probe evidence is not canonical")
-    return _validate_probe_payload(payload)
-
-
-def probe_installed_candidate(wheel_python: Path, expected_plan: str) -> dict[str, Any]:
-    """Re-exec this verifier with imports isolated to the installed wheel."""
-    script = Path(__file__).resolve(strict=True)
-    with tempfile.TemporaryDirectory(prefix="gpt2agent-account-probe-") as temp_name:
-        temp_root = Path(temp_name)
-        home = temp_root / "home"
-        home.mkdir(mode=0o700)
-        codex_home = _provision_isolated_account_auth(home)
-        output = temp_root / "probe.json"
-        _run_command(
-            [
-                str(wheel_python),
-                str(script),
-                "_probe",
-                "--output",
-                str(output),
-                "--expected-plan",
-                expected_plan,
-            ],
-            cwd=temp_root,
-            env=_subprocess_env(
-                isolated_home=home,
-                isolated_codex_home=codex_home,
-            ),
-        )
-        return _read_probe_payload(output)
+        with requester_context(forbidden_roots=forbidden_roots) as requester:
+            observed_plan = execute_plan_probe(
+                requester=requester,
+                auth_headers=auth_headers,
+            )
+            if observed_plan != expected_plan:
+                raise ReceiptError("authenticated account plan does not match the release gate")
+            records = run_probe_sequence(
+                requester=requester,
+                auth_headers=auth_headers,
+            )
+    except ReceiptError:
+        raise
+    except Exception:
+        raise ReceiptError("trusted account transport failed") from None
+    return _validate_live_probe_payload(
+        {
+            "schema_version": _SCHEMA_VERSION,
+            "package_version": _PACKAGE_VERSION,
+            "plan_class": observed_plan,
+            "started_at": started_at,
+            "completed_at": _utc_now(),
+            "shape_results": records,
+        }
+    )
 
 
 def _outside_checkout(path: Path, checkout: Path) -> bool:
@@ -1894,10 +1732,9 @@ def run_create_gate(
     ci_artifact_digest: str,
     ci_artifact_size: str,
     ci_artifact_expires_at: str,
-    installation_context: Callable[..., Any] = installed_candidate_context,
-    probe_runner: Callable[[Path, str], dict[str, Any]] = probe_installed_candidate,
+    trusted_probe_runner: Callable[[str], dict[str, Any]] | None = None,
 ) -> str:
-    """Install, probe, re-bind, and attest one exact main-CI artifact set."""
+    """Probe with trusted code, then attest one inert main-CI artifact set."""
     checkout = Path(checkout)
     dist = Path(dist)
     output = Path(output)
@@ -1928,8 +1765,15 @@ def run_create_gate(
         artifact_size=ci_artifact_size,
         artifact_expires_at=ci_artifact_expires_at,
     )
-    with installation_context(dist, artifacts, package_version) as wheel_python:
-        payload = _validate_probe_payload(probe_runner(wheel_python, expected_plan))
+    if trusted_probe_runner is None:
+        payload = run_trusted_live_probe(
+            expected_plan,
+            forbidden_roots=(checkout, dist),
+        )
+    else:
+        payload = trusted_probe_runner(expected_plan)
+    payload = _validate_live_probe_payload(payload)
+    _validate_pretag_freshness(payload)
 
     verify_checkout(checkout, declared_commit=commit, declared_tree=tree)
     final_artifacts = collect_local_candidate_artifacts(
@@ -1955,8 +1799,8 @@ def run_create_gate(
         source_commit=commit,
         source_tree=tree,
         local_candidate_artifacts=artifacts,
-        adapter_status=payload["adapter_status"],
-        adapter_counts=payload["adapter_counts"],
+        adapter_status="passed",
+        adapter_counts=_offline_adapter_counts(),
         shape_results=payload["shape_results"],
     )
     return write_receipt(output, receipt)
@@ -1995,9 +1839,6 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--ci-artifact-size", required=True)
     verify.add_argument("--ci-artifact-expires-at", required=True)
 
-    internal = commands.add_parser("_probe", help=argparse.SUPPRESS)
-    internal.add_argument("--output", type=Path, required=True)
-    internal.add_argument("--expected-plan", choices=("pro",), required=True)
     return parser
 
 
@@ -2054,8 +1895,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"account-ci-artifact-digest: {args.ci_artifact_digest}")
             print(f"account-ci-artifact-size: {args.ci_artifact_size}")
             print(f"account-ci-artifact-expires-at: {args.ci_artifact_expires_at}")
-        else:
-            run_installed_live_probe(args.output, args.expected_plan)
     except Exception:
         print("account receipt gate failed", file=sys.stderr)
         return 1
