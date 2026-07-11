@@ -1195,3 +1195,31 @@ def test_heavy_dr_poll_propagates_nonretryable_http_failure() -> None:
     assert caught.value.code == "login_required"
     assert caught.value.retryable is False
     assert backend.calls == 1
+
+
+def test_heavy_dr_poll_propagates_contract_failure() -> None:
+    class _Backend:
+        calls = 0
+
+        def get(self, *_: Any, **__: Any) -> dict:
+            self.calls += 1
+            raise BackendContractError(
+                "heavy_deep_research", "conversation response exceeds the size limit"
+            )
+
+    backend = _Backend()
+    client = sse_mod.ConversationClient(backend)  # type: ignore[arg-type]
+
+    async def _poll() -> list[dict]:
+        return [
+            event
+            async for event in client._poll_dr_completion(
+                "PRIVATE_CONVERSATION_ID", interval=0, max_wait=0.01
+            )
+        ]
+
+    with pytest.raises(BackendContractError) as caught:
+        asyncio.run(_poll())
+
+    assert caught.value.code == "contract_changed"
+    assert backend.calls == 1

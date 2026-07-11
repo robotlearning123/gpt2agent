@@ -3318,6 +3318,8 @@ class ConversationClient:
                 if exc.status_code == 429:
                     await asyncio.sleep(max(interval * 2, 300.0))
                 continue
+            except BackendContractError:
+                raise
             except Exception:
                 _log.warning("DR poll request failed — continuing")
                 continue
