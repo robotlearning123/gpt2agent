@@ -18,6 +18,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from gpt2agent._secure_file import atomic_replace_bytes
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10
@@ -76,18 +78,9 @@ def _backup(path: Path) -> Path | None:
         mode = path.stat().st_mode & 0o777
     except OSError:
         mode = 0o600
-    # Create at 0o600 (never wider than needed) then match the source mode.
-    fd = os.open(str(bak), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        try:
-            os.chmod(bak, mode)
-        except OSError:
-            pass  # non-POSIX filesystem
-    except BaseException:
-        bak.unlink(missing_ok=True)
-        raise
+    # Write a random sibling and replace the backup path.  In particular, do
+    # not open a pre-planted ``.bak-gpt2agent`` symlink and truncate its target.
+    atomic_replace_bytes(bak, data, mode=mode)
     return bak
 
 
@@ -105,24 +98,12 @@ def _atomic_write(path: Path, content: str) -> None:
         # target. Write through to the target instead.
         path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + f".tmp-{os.getpid()}")
-    # Open the temp file at 0o600 up front so a secret-bearing config is never
-    # briefly world-readable under a permissive umask between write and chmod.
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-        try:
-            # Preserve an existing file's mode; new files stay 0o600.
-            if path.exists():
-                os.chmod(tmp, path.stat().st_mode)
-        except OSError:
-            # Best-effort — Windows / non-POSIX filesystems may reject chmod.
-            pass
-        tmp.replace(path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+        # Preserve an existing file's mode; new files stay 0o600.
+        mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
+    except OSError:
+        mode = 0o600
+    atomic_replace_bytes(path, content.encode(), mode=mode)
 
 
 def _stdio_entry() -> dict[str, Any]:
