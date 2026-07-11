@@ -43,6 +43,7 @@ _SCHEMA_VERSION = "4"
 _VERIFIER_NAME = "gpt2agent-account-receipt"
 _VERIFIER_VERSION = "6"
 _GIT = Path("/usr/bin/git")
+_MAX_GIT_BINDING_BYTES = 4096
 _MAX_TOKEN_BYTES = 16 * 1024
 _HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
@@ -734,7 +735,99 @@ def _trusted_git() -> Path:
     return _GIT
 
 
-def _git_output(checkout: Path, *args: str) -> str:
+def _protected_git_directory(path: Path) -> Path:
+    try:
+        metadata = path.lstat()
+        resolved = path.resolve(strict=True)
+    except OSError:
+        raise ReceiptError("checkout Git administration binding is invalid") from None
+    if (
+        resolved != path
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid not in {0, os.getuid()}
+        or metadata.st_mode & 0o022
+    ):
+        raise ReceiptError("checkout Git administration binding is invalid")
+    return resolved
+
+
+def _read_git_binding_line(path: Path, *, prefix: bytes = b"") -> str:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid not in {0, os.getuid()}
+            or metadata.st_mode & 0o022
+            or metadata.st_nlink != 1
+            or metadata.st_size < len(prefix) + 2
+            or metadata.st_size > _MAX_GIT_BINDING_BYTES
+        ):
+            raise ReceiptError("checkout Git administration binding is invalid")
+        with os.fdopen(descriptor, "rb", closefd=True) as stream:
+            descriptor = -1
+            payload = stream.read(_MAX_GIT_BINDING_BYTES + 1)
+    except OSError:
+        raise ReceiptError("checkout Git administration binding is invalid") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if (
+        len(payload) > _MAX_GIT_BINDING_BYTES
+        or not payload.startswith(prefix)
+        or not payload.endswith(b"\n")
+        or payload.count(b"\n") != 1
+        or b"\x00" in payload
+        or b"\r" in payload
+    ):
+        raise ReceiptError("checkout Git administration binding is invalid")
+    value = os.fsdecode(payload[len(prefix) : -1])
+    if not value:
+        raise ReceiptError("checkout Git administration binding is invalid")
+    return value
+
+
+def _checkout_git_directory(checkout: Path) -> Path:
+    """Resolve a clone directory or reciprocal linked-worktree gitfile binding."""
+    marker = checkout / ".git"
+    try:
+        metadata = marker.lstat()
+    except OSError:
+        raise ReceiptError("checkout Git administration binding is invalid") from None
+    if stat.S_ISLNK(metadata.st_mode):
+        raise ReceiptError("checkout Git administration binding is invalid")
+    if stat.S_ISDIR(metadata.st_mode):
+        return _protected_git_directory(marker)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ReceiptError("checkout Git administration binding is invalid")
+
+    target_text = _read_git_binding_line(marker, prefix=b"gitdir: ")
+    target = Path(target_text)
+    if not target.is_absolute():
+        raise ReceiptError("checkout Git administration binding is invalid")
+    git_directory = _protected_git_directory(target)
+    if git_directory != target:
+        raise ReceiptError("checkout Git administration binding is invalid")
+
+    backlink_text = _read_git_binding_line(git_directory / "gitdir")
+    backlink = Path(backlink_text)
+    try:
+        resolved_backlink = backlink.resolve(strict=True)
+    except OSError:
+        raise ReceiptError("checkout Git administration binding is invalid") from None
+    if not backlink.is_absolute() or backlink != resolved_backlink or backlink != marker:
+        raise ReceiptError("checkout Git administration binding is invalid")
+    return git_directory
+
+
+def _git_output(
+    checkout: Path,
+    *args: str,
+    git_directory: Path | None = None,
+    pin_work_tree: bool = True,
+) -> str:
     environment = {
         "GIT_CONFIG_GLOBAL": "/dev/null",
         "GIT_CONFIG_NOSYSTEM": "1",
@@ -755,7 +848,8 @@ def _git_output(checkout: Path, *args: str) -> str:
                 "core.hooksPath=/dev/null",
                 "-C",
                 str(checkout),
-                f"--work-tree={checkout}",
+                *((f"--git-dir={git_directory}",) if git_directory is not None else ()),
+                *((f"--work-tree={checkout}",) if pin_work_tree else ()),
                 *args,
             ],
             env=environment,
@@ -787,21 +881,39 @@ def verify_checkout(
         resolved = checkout.resolve(strict=True)
     except OSError:
         raise ReceiptError("checkout is not a regular directory") from None
-    root_text = _git_output(resolved, "rev-parse", "--show-toplevel")
+    git_directory = _checkout_git_directory(resolved)
+    discovered_git_directory_text = _git_output(
+        resolved,
+        "rev-parse",
+        "--absolute-git-dir",
+        pin_work_tree=False,
+    )
+    try:
+        discovered_git_directory = Path(discovered_git_directory_text).resolve(strict=True)
+    except OSError:
+        raise ReceiptError("checkout Git administration binding is invalid") from None
+    if discovered_git_directory != git_directory:
+        raise ReceiptError("checkout Git administration binding is invalid")
+    root_text = _git_output(
+        resolved,
+        "rev-parse",
+        "--show-toplevel",
+        git_directory=git_directory,
+    )
     try:
         root = Path(root_text).resolve(strict=True)
     except OSError:
         raise ReceiptError("checkout Git root is invalid") from None
     if root != resolved:
         raise ReceiptError("checkout must name the repository root")
-    index_state = _git_output(resolved, "ls-files", "-v")
+    index_state = _git_output(resolved, "ls-files", "-v", git_directory=git_directory)
     if any(
         len(line) >= 2
         and line[1] == " "
         and (line[0] == "S" or "a" <= line[0] <= "z")
         for line in index_state.splitlines()
     ):
-        raise ReceiptError("checkout must be clean")
+        raise ReceiptError("checkout must be clean: index contains hidden tracked state")
     status = _git_output(
         resolved,
         "status",
@@ -809,14 +921,17 @@ def verify_checkout(
         "--untracked-files=all",
         "--ignored=matching",
         "--ignore-submodules=none",
+        git_directory=git_directory,
     )
     if status:
         raise ReceiptError("checkout must be clean")
-    index_entries = _git_output(resolved, "ls-files", "-v", "-z").split("\x00")
-    if any(entry and not entry.startswith("H ") for entry in index_entries):
-        raise ReceiptError("checkout index contains hidden tracked state")
-    actual_commit = _git_output(resolved, "rev-parse", "HEAD")
-    actual_tree = _git_output(resolved, "rev-parse", "HEAD^{tree}")
+    actual_commit = _git_output(resolved, "rev-parse", "HEAD", git_directory=git_directory)
+    actual_tree = _git_output(
+        resolved,
+        "rev-parse",
+        "HEAD^{tree}",
+        git_directory=git_directory,
+    )
     if actual_commit != commit or actual_tree != tree:
         raise ReceiptError("checkout does not match the declared source")
     return actual_commit, actual_tree

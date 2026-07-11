@@ -345,6 +345,12 @@ def test_checkout_verification_rejects_hidden_index_state(
         )
 
 
+def _copy_checkout_tree(checkout: Path, destination: Path) -> None:
+    destination.mkdir()
+    for name in (".gitignore", "pyproject.toml", "source.py"):
+        (destination / name).write_bytes((checkout / name).read_bytes())
+
+
 def _create_artifacts(parent: Path) -> Path:
     dist = parent / "candidate-dist"
     dist.mkdir()
@@ -748,6 +754,95 @@ def test_checkout_git_inspection_rejects_noncanonical_git(
             declared_commit=commit,
             declared_tree=tree,
         )
+
+
+def test_checkout_validation_rejects_nested_exact_tree_without_git_binding(
+    tmp_path: Path,
+) -> None:
+    from scripts.verify_account_receipt import ReceiptError, verify_checkout
+
+    checkout, commit, tree = _create_checkout(tmp_path)
+    nested_snapshot = checkout / "snapshot"
+    _copy_checkout_tree(checkout, nested_snapshot)
+
+    with pytest.raises(ReceiptError, match="Git administration binding"):
+        verify_checkout(
+            nested_snapshot,
+            declared_commit=commit,
+            declared_tree=tree,
+        )
+
+
+@pytest.mark.parametrize("binding", ("symlink", "unbound-gitfile"))
+def test_checkout_validation_rejects_forged_git_binding(
+    tmp_path: Path,
+    binding: str,
+) -> None:
+    from scripts.verify_account_receipt import ReceiptError, verify_checkout
+
+    checkout, commit, tree = _create_checkout(tmp_path)
+    nested_snapshot = checkout / "snapshot"
+    _copy_checkout_tree(checkout, nested_snapshot)
+    marker = nested_snapshot / ".git"
+    if binding == "symlink":
+        marker.symlink_to(checkout / ".git", target_is_directory=True)
+    else:
+        marker.write_text(f"gitdir: {checkout / '.git'}\n", encoding="utf-8")
+
+    with pytest.raises(ReceiptError, match="Git administration binding"):
+        verify_checkout(
+            nested_snapshot,
+            declared_commit=commit,
+            declared_tree=tree,
+        )
+
+
+def test_checkout_validation_accepts_normal_clone_and_linked_worktree(tmp_path: Path) -> None:
+    from scripts.verify_account_receipt import verify_checkout
+
+    checkout, commit, tree = _create_checkout(tmp_path)
+    linked = tmp_path / "linked"
+    _git(checkout, "worktree", "add", "--quiet", "--detach", str(linked), commit)
+
+    assert verify_checkout(checkout, declared_commit=commit, declared_tree=tree) == (
+        commit,
+        tree,
+    )
+    assert verify_checkout(linked, declared_commit=commit, declared_tree=tree) == (
+        commit,
+        tree,
+    )
+
+
+def test_checkout_validation_rejects_linked_worktree_with_wrong_admin_backlink(
+    tmp_path: Path,
+) -> None:
+    from scripts.verify_account_receipt import ReceiptError, verify_checkout
+
+    checkout, commit, tree = _create_checkout(tmp_path)
+    linked = tmp_path / "linked"
+    _git(checkout, "worktree", "add", "--quiet", "--detach", str(linked), commit)
+    marker = linked / ".git"
+    git_dir = Path(marker.read_text(encoding="utf-8").removeprefix("gitdir: ").strip())
+    (git_dir / "gitdir").write_text(f"{tmp_path / 'wrong' / '.git'}\n", encoding="utf-8")
+
+    with pytest.raises(ReceiptError, match="Git administration binding"):
+        verify_checkout(linked, declared_commit=commit, declared_tree=tree)
+
+
+def test_checkout_validation_ignores_hostile_local_core_worktree(tmp_path: Path) -> None:
+    from scripts.verify_account_receipt import verify_checkout
+
+    checkout, commit, tree = _create_checkout(tmp_path)
+    redirected = tmp_path / "redirected"
+    redirected.mkdir()
+    _git(checkout, "config", "core.worktree", str(redirected))
+    assert Path(_git(checkout, "rev-parse", "--show-toplevel")) == redirected
+
+    assert verify_checkout(checkout, declared_commit=commit, declared_tree=tree) == (
+        commit,
+        tree,
+    )
 
 
 @pytest.mark.parametrize("flag", ("--assume-unchanged", "--skip-worktree"))

@@ -38,6 +38,138 @@ def _write_executable(path: Path, source: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
+def _real_git(checkout: Path, *args: str) -> str:
+    return subprocess.run(
+        ["/usr/bin/git", "-C", str(checkout), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _create_real_checkout(tmp_path: Path) -> tuple[Path, str, str]:
+    checkout = tmp_path / "real-checkout"
+    checkout.mkdir()
+    _real_git(checkout, "init", "--quiet")
+    _real_git(checkout, "config", "user.name", "Release Tests")
+    _real_git(checkout, "config", "user.email", "release-tests@example.invalid")
+    (checkout / ".gitignore").write_text("dist/\n", encoding="utf-8")
+    (checkout / "reviewed.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _real_git(checkout, "add", ".")
+    _real_git(checkout, "commit", "--quiet", "-m", "fixture")
+    return (
+        checkout,
+        _real_git(checkout, "rev-parse", "HEAD"),
+        _real_git(checkout, "rev-parse", "HEAD^{tree}"),
+    )
+
+
+def _copy_real_checkout_tree(checkout: Path, destination: Path) -> None:
+    destination.mkdir()
+    for name in (".gitignore", "reviewed.py"):
+        (destination / name).write_bytes((checkout / name).read_bytes())
+
+
+def _run_real_checkout_probe(
+    tmp_path: Path,
+    checkout: Path,
+    commit: str,
+    tree: str,
+) -> subprocess.CompletedProcess[str]:
+    stat_probe = subprocess.run(
+        ["/usr/bin/stat", "--format=%u", str(checkout)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if stat_probe.returncode != 0:
+        pytest.skip("release coordinator requires GNU stat")
+
+    support = tmp_path / f"shell-probe-{checkout.name}"
+    support.mkdir()
+    fake_python = support / "python"
+    fake_gh = support / "gh"
+    _write_executable(fake_python, "#!/bin/sh\nexit 97\n")
+    _write_executable(fake_gh, "#!/bin/sh\nexit 98\n")
+    policy = support / "policy.json"
+    receipt = support / "receipt.json"
+    dist = support / "dist"
+    policy.write_text("{}\n", encoding="utf-8")
+    receipt.write_text("{}\n", encoding="utf-8")
+    dist.mkdir()
+
+    source = COORDINATOR.read_text(encoding="utf-8")
+    exact_guard = "if [[ $GH_BIN != /usr/bin/gh || $GIT_BIN != /usr/bin/git ]]; then usage; fi"
+    tool_checks = (
+        'require_root_protected_tool "$GH_BIN" gh\n'
+        'require_root_protected_tool "$GIT_BIN" git'
+    )
+    first_boundary = (
+        "verify_checkout_state\n\n"
+        'run_python_clean "$CHECKOUT/scripts/verify_release_tools.py"'
+    )
+    assert source.count(exact_guard) == 1
+    assert source.count(tool_checks) == 1
+    assert source.count(first_boundary) == 1
+    source = source.replace(exact_guard, ": # test-only injected tools", 1)
+    source = source.replace(tool_checks, ": # test-only trusted tools", 1)
+    source = source.replace(
+        first_boundary,
+        "verify_checkout_state\nexit 0\n\n"
+        'run_python_clean "$CHECKOUT/scripts/verify_release_tools.py"',
+        1,
+    )
+    probe = support / "checkout-probe.sh"
+    _write_executable(probe, source)
+    command = [
+        str(probe),
+        "--python",
+        str(fake_python),
+        "--gh",
+        str(fake_gh),
+        "--git",
+        "/usr/bin/git",
+        "--governance-policy",
+        str(policy),
+        "--checkout",
+        str(checkout),
+        "--dist",
+        str(dist),
+        "--receipt",
+        str(receipt),
+        "--receipt-sha256",
+        RECEIPT_SHA256,
+        "--repository",
+        "robotlearning123/gpt2agent",
+        "--tag",
+        "v0.0.12",
+        "--commit",
+        commit,
+        "--tree",
+        tree,
+        "--ci-run-id",
+        "12345",
+        "--ci-run-attempt",
+        "2",
+        "--ci-artifact-id",
+        "67890",
+        "--ci-artifact-digest",
+        ARTIFACT_DIGEST,
+        "--ci-artifact-size",
+        "31415",
+        "--ci-artifact-expires-at",
+        "2099-07-10T13:17:42Z",
+    ]
+    return subprocess.run(
+        command,
+        cwd=PROJECT_ROOT,
+        env={"HOME": str(tmp_path), "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def _make_harness(tmp_path: Path) -> tuple[list[str], dict[str, str], list[str]]:
     trusted_bin = tmp_path / "trusted-bin"
     poison_bin = tmp_path / "poison-bin"
@@ -167,7 +299,8 @@ for ((index = 0; index < ${{#arguments[@]}}; index++)); do
     CHECKOUT_PINNED=1
   fi
 done
-if (( CHECKOUT_SELECTED == 1 && CHECKOUT_PINNED == 0 )); then
+if (( CHECKOUT_SELECTED == 1 && CHECKOUT_PINNED == 0 )) && \
+  [[ " $* " != *' rev-parse --absolute-git-dir '* ]]; then
   printf '%s\n' 'git-checkout-unpinned' >> "$EVENT_LOG"
 fi
 printf 'git-env token=%s dir=%s worktree=%s ssh=%s path=%s global=%s nosystem=%s system=%s\n' "${{GH_TOKEN-unset}}" "${{GIT_DIR-unset}}" "${{GIT_WORK_TREE-unset}}" "${{GIT_SSH_COMMAND-unset}}" "${{PATH-unset}}" "${{GIT_CONFIG_GLOBAL-unset}}" "${{GIT_CONFIG_NOSYSTEM-unset}}" "${{GIT_CONFIG_SYSTEM-unset}}" >> "$EVENT_LOG"
@@ -184,6 +317,10 @@ case "$*" in
     ;;
   *'merge-base --is-ancestor 15f56b2c16c5923e81df9428c69256237a004c20 refs/remotes/origin/main'*)
     if [ "${{FAKE_MODE-}}" = action-not-on-main ]; then exit 1; fi
+    ;;
+  *'rev-parse --absolute-git-dir'*)
+    printf '%s\n' 'git-checkout-admin' >> "$EVENT_LOG"
+    printf '%s\n' "$CHECKOUT/.git"
     ;;
   *'rev-parse --show-toplevel'*)
     printf '%s\n' 'git-checkout-root' >> "$EVENT_LOG"
@@ -205,7 +342,8 @@ case "$*" in
   *'rev-parse HEAD'*)
     checks=$(/usr/bin/grep -c '^git-checkout-head$' "$EVENT_LOG" || true)
     printf '%s\n' 'git-checkout-head' >> "$EVENT_LOG"
-    if [ "${{FAKE_MODE-}}" = checkout-drift ] && [ "$checks" -gt 0 ]; then
+    if [[ "${{FAKE_MODE-}}" = checkout-drift && $checks -gt 0 ]] || \
+      [[ "${{FAKE_MODE-}}" = checkout-third-drift && $checks -gt 1 ]]; then
       printf '%s\n' '{MISMATCH_SHA}'
     else
       printf '%s\n' '{COMMIT}'
@@ -242,6 +380,7 @@ esac
     checkout = tmp_path / "checkout"
     dist = tmp_path / "dist"
     checkout.mkdir()
+    (checkout / ".git").mkdir()
     dist.mkdir()
     receipt = tmp_path / "receipt.json"
     receipt.write_text("{}\n", encoding="utf-8")
@@ -385,6 +524,79 @@ def _run_harness(
     )
 
 
+def test_real_shell_checkout_rejects_nested_exact_tree_without_git_binding(
+    tmp_path: Path,
+) -> None:
+    checkout, commit, tree = _create_real_checkout(tmp_path)
+    nested_snapshot = checkout / "snapshot"
+    _copy_real_checkout_tree(checkout, nested_snapshot)
+
+    result = _run_real_checkout_probe(tmp_path, nested_snapshot, commit, tree)
+
+    assert result.returncode != 0
+    assert "Git administration binding" in result.stderr
+
+
+@pytest.mark.parametrize("binding", ("symlink", "unbound-gitfile"))
+def test_real_shell_checkout_rejects_forged_git_binding(
+    tmp_path: Path,
+    binding: str,
+) -> None:
+    checkout, commit, tree = _create_real_checkout(tmp_path)
+    nested_snapshot = checkout / "snapshot"
+    _copy_real_checkout_tree(checkout, nested_snapshot)
+    marker = nested_snapshot / ".git"
+    if binding == "symlink":
+        marker.symlink_to(checkout / ".git", target_is_directory=True)
+    else:
+        marker.write_text(f"gitdir: {checkout / '.git'}\n", encoding="utf-8")
+
+    result = _run_real_checkout_probe(tmp_path, nested_snapshot, commit, tree)
+
+    assert result.returncode != 0
+    assert "Git administration binding" in result.stderr
+
+
+def test_real_shell_checkout_accepts_normal_clone_and_linked_worktree(tmp_path: Path) -> None:
+    checkout, commit, tree = _create_real_checkout(tmp_path)
+    linked = tmp_path / "linked"
+    _real_git(checkout, "worktree", "add", "--quiet", "--detach", str(linked), commit)
+
+    clone_result = _run_real_checkout_probe(tmp_path, checkout, commit, tree)
+    linked_result = _run_real_checkout_probe(tmp_path, linked, commit, tree)
+
+    assert clone_result.returncode == 0, clone_result.stderr
+    assert linked_result.returncode == 0, linked_result.stderr
+
+
+def test_real_shell_checkout_rejects_linked_worktree_with_wrong_admin_backlink(
+    tmp_path: Path,
+) -> None:
+    checkout, commit, tree = _create_real_checkout(tmp_path)
+    linked = tmp_path / "linked"
+    _real_git(checkout, "worktree", "add", "--quiet", "--detach", str(linked), commit)
+    marker = linked / ".git"
+    git_dir = Path(marker.read_text(encoding="utf-8").removeprefix("gitdir: ").strip())
+    (git_dir / "gitdir").write_text(f"{tmp_path / 'wrong' / '.git'}\n", encoding="utf-8")
+
+    result = _run_real_checkout_probe(tmp_path, linked, commit, tree)
+
+    assert result.returncode != 0
+    assert "Git administration binding" in result.stderr
+
+
+def test_real_shell_checkout_ignores_hostile_local_core_worktree(tmp_path: Path) -> None:
+    checkout, commit, tree = _create_real_checkout(tmp_path)
+    redirected = tmp_path / "redirected"
+    redirected.mkdir()
+    _real_git(checkout, "config", "core.worktree", str(redirected))
+    assert Path(_real_git(checkout, "rev-parse", "--show-toplevel")) == redirected
+
+    result = _run_real_checkout_probe(tmp_path, checkout, commit, tree)
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_coordinator_closes_governance_action_and_tag_sequence(tmp_path: Path) -> None:
     events, result, poison = _run_harness(tmp_path)
 
@@ -452,6 +664,10 @@ def test_every_git_call_disables_executable_local_config(tmp_path: Path) -> None
     assert result["returncode"] == "0", result["stderr"]
     assert "git-missing-safe-config" not in events
     assert "git-checkout-unpinned" not in events
+    admin_checks = [index for index, event in enumerate(events) if event == "git-checkout-admin"]
+    root_checks = [index for index, event in enumerate(events) if event == "git-checkout-root"]
+    assert len(admin_checks) == len(root_checks) == 3
+    assert all(admin < root for admin, root in zip(admin_checks, root_checks, strict=True))
     git_environments = [event for event in events if event.startswith("git-env")]
     assert git_environments
     assert all(
@@ -556,6 +772,16 @@ def test_checkout_identity_and_cleanliness_are_rechecked_before_ref_mutation(
     assert result["returncode"] != "0"
     assert sum(event == "git-checkout-head" for event in events) >= 2
     assert not any(event.startswith("gh-ref") for event in events)
+
+
+def test_third_checkout_drift_stops_after_tag_object_before_ref_post(tmp_path: Path) -> None:
+    events, result, _ = _run_harness(tmp_path, mode="checkout-third-drift")
+
+    assert result["returncode"] != "0"
+    assert sum(event == "git-checkout-head" for event in events) == 3
+    assert f"gh-tag token={APP_TOKEN}" in events
+    assert not any(event.startswith("gh-ref") for event in events)
+    assert "release checkout commit does not match" in result["stderr"]
 
 
 @pytest.mark.parametrize("mode", ("core-worktree-redirect", "assume-unchanged", "skip-worktree"))

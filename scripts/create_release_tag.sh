@@ -174,12 +174,106 @@ run_git() {
     "$GIT_BIN" -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
 }
 
+checkout_binding_error() {
+  echo "release checkout Git administration binding is invalid" >&2
+  exit 1
+}
+
+require_protected_git_directory() {
+  local path=$1 canonical owner mode
+  if [[ ! -d $path || -L $path ]]; then
+    checkout_binding_error
+  fi
+  canonical=$(canonical_directory "$path")
+  if [[ $canonical != "$path" ]]; then
+    checkout_binding_error
+  fi
+  read -r owner mode < <(/usr/bin/stat --format='%u %a' -- "$path")
+  if [[ ($owner != 0 && $owner != "$CHECKOUT_UID") || \
+    ! $mode =~ ^[0-7]{3,4}$ ]] || (( (8#$mode & 0022) != 0 )); then
+    checkout_binding_error
+  fi
+}
+
+read_protected_git_binding_line() {
+  local path=$1 output_name=$2 owner mode links size descriptor line remainder
+  if [[ ! -f $path || -L $path ]]; then
+    checkout_binding_error
+  fi
+  read -r owner mode links size < <(
+    /usr/bin/stat --format='%u %a %h %s' -- "$path"
+  )
+  if [[ ($owner != 0 && $owner != "$CHECKOUT_UID") || \
+    ! $mode =~ ^[0-7]{3,4}$ || ! $links =~ ^[0-9]+$ || \
+    ! $size =~ ^[0-9]+$ ]] || \
+    (( (8#$mode & 0022) != 0 || links != 1 || size < 2 || size > 4096 )); then
+    checkout_binding_error
+  fi
+  exec {descriptor}< "$path" || checkout_binding_error
+  line=
+  if ! IFS= read -r line <&"$descriptor"; then
+    exec {descriptor}<&-
+    checkout_binding_error
+  fi
+  remainder=
+  if IFS= read -r remainder <&"$descriptor" || [[ -n $remainder ]]; then
+    exec {descriptor}<&-
+    checkout_binding_error
+  fi
+  exec {descriptor}<&-
+  if (( size != ${#line} + 1 )) || [[ $line == *$'\r'* ]]; then
+    checkout_binding_error
+  fi
+  printf -v "$output_name" '%s' "$line"
+}
+
+resolve_checkout_git_directory() {
+  local marker="$CHECKOUT/.git" marker_line target backlink discovered
+  # A clone owns a .git directory. A linked worktree owns a one-line .git
+  # gitfile whose canonical administration directory points back to that file.
+  if [[ -L $marker ]]; then
+    checkout_binding_error
+  fi
+  if [[ -d $marker ]]; then
+    require_protected_git_directory "$marker"
+    CHECKOUT_GIT_DIR=$marker
+  elif [[ -f $marker ]]; then
+    read_protected_git_binding_line "$marker" marker_line
+    if [[ $marker_line != "gitdir: "* ]]; then
+      checkout_binding_error
+    fi
+    target=${marker_line#gitdir: }
+    if [[ -z $target || $target != /* ]]; then
+      checkout_binding_error
+    fi
+    require_protected_git_directory "$target"
+    read_protected_git_binding_line "$target/gitdir" backlink
+    if [[ $backlink != "$marker" ]]; then
+      checkout_binding_error
+    fi
+    CHECKOUT_GIT_DIR=$target
+  else
+    checkout_binding_error
+  fi
+  if ! discovered=$(run_git -C "$CHECKOUT" rev-parse --absolute-git-dir); then
+    checkout_binding_error
+  fi
+  if [[ $discovered != "$CHECKOUT_GIT_DIR" ]]; then
+    checkout_binding_error
+  fi
+}
+
+CHECKOUT_UID=$(/usr/bin/id -u)
+CHECKOUT_GIT_DIR=
+
 run_checkout_git() {
-  run_git -C "$CHECKOUT" --work-tree="$CHECKOUT" "$@"
+  run_git -C "$CHECKOUT" --git-dir="$CHECKOUT_GIT_DIR" \
+    --work-tree="$CHECKOUT" "$@"
 }
 
 verify_checkout_state() {
   local root index_state index_entry marker
+  resolve_checkout_git_directory
   root=$(run_checkout_git rev-parse --show-toplevel)
   if [[ $root != "$CHECKOUT" ]]; then
     echo "release checkout Git root does not match" >&2
