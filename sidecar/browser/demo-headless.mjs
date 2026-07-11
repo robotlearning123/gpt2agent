@@ -19,7 +19,7 @@ const CHROME = process.env.CHROME_BIN || (process.platform === "darwin"
   ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
   : "/usr/bin/google-chrome");
 const PY = process.env.SDP_PY || "/home/robot/workspace/47-chatgpt2agent/gpt2agent/.venv/bin/python";
-const HELPER = fileURLToPath(new URL("../experiments/sdp_exchange.py", import.meta.url));
+const HELPER = fileURLToPath(new URL(`../experiments/${process.env.SDP_HELPER || "sdp_exchange.py"}`, import.meta.url));
 
 function exchange(offerSdp) {
   return new Promise((resolve, reject) => {
