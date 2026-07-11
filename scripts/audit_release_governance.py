@@ -12,6 +12,11 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
+if __package__:
+    from .verify_release_tools import ToolValidationError, validate_policy, validate_tool
+else:
+    from verify_release_tools import ToolValidationError, validate_policy, validate_tool
+
 
 _MAX_JSON_BYTES = 4 * 1024 * 1024
 _REPOSITORY_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
@@ -818,6 +823,11 @@ def main(argv: list[str] | None = None) -> int:
                 raise GovernanceError("governance policy is invalid")
             if args.live.lower() != reviewed_policy["repository"]:
                 raise GovernanceError("governance policy repository does not match --live target")
+            try:
+                validate_tool(args.gh, "gh")
+                validate_policy(args.policy)
+            except ToolValidationError:
+                raise GovernanceError("live audit inputs are not protected") from None
             snapshot = fetch_live_snapshot(
                 args.live,
                 release_settings_app_slug=reviewed_policy["release_settings_app"]["slug"],
