@@ -45,16 +45,17 @@ runs:
         INPUT_NOTES: ${{ inputs.notes }}
         INPUT_DIST: ${{ inputs.dist }}
         INPUT_EVIDENCE: ${{ inputs.evidence }}
-      run: >-
-        /usr/bin/env -i
-        GH_TOKEN="$INPUT_GITHUB_TOKEN"
-        /usr/bin/python3 -I -S -B
-        "$GITHUB_ACTION_PATH/publish.py"
-        --repository "$INPUT_REPOSITORY"
-        --release-id "$INPUT_RELEASE_ID"
-        --tag "$INPUT_TAG"
-        --version "$INPUT_VERSION"
-        --expected-prerelease "$INPUT_EXPECTED_PRERELEASE"
-        --notes "$INPUT_NOTES"
-        --dist "$INPUT_DIST"
-        --evidence "$INPUT_EVIDENCE"
+      run: |
+        set -euo pipefail
+        printf '%s' "$INPUT_GITHUB_TOKEN" |
+          /usr/bin/env -i /usr/bin/python3 -I -S -B \
+          "$GITHUB_ACTION_PATH/publish.py" \
+          --token-stdin \
+          --repository "$INPUT_REPOSITORY" \
+          --release-id "$INPUT_RELEASE_ID" \
+          --tag "$INPUT_TAG" \
+          --version "$INPUT_VERSION" \
+          --expected-prerelease "$INPUT_EXPECTED_PRERELEASE" \
+          --notes "$INPUT_NOTES" \
+          --dist "$INPUT_DIST" \
+          --evidence "$INPUT_EVIDENCE"

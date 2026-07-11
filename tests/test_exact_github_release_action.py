@@ -124,11 +124,14 @@ def test_action_is_isolated_and_does_not_put_token_on_command_line() -> None:
     assert "using: composite" in action
     assert "/usr/bin/env -i" in action
     assert "/usr/bin/python3 -I -S -B" in action
-    assert 'GH_TOKEN="$INPUT_GITHUB_TOKEN"' in action
+    assert 'printf \'%s\' "$INPUT_GITHUB_TOKEN" |' in action
+    assert "GH_TOKEN=" not in action
+    assert "--token-stdin" in action
     assert "--github-token" not in action
     assert "actions/checkout" not in action
     assert 'method not in {"GET", "PATCH"}' in source
     assert 'payload != {"draft": False}' in source
+    assert "os.environ" not in source
     assert '"POST"' not in source
 
 

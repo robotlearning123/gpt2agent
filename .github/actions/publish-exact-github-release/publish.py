@@ -10,6 +10,7 @@ import os
 import re
 import ssl
 import stat
+import sys
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -390,6 +391,7 @@ def publish_exact_release(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--token-stdin", action="store_true")
     parser.add_argument("--repository", required=True)
     parser.add_argument("--release-id", required=True)
     parser.add_argument("--tag", required=True)
@@ -404,6 +406,15 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if not args.token_stdin:
+            raise ValueError("GitHub token must be read from standard input")
+        raw_token = sys.stdin.buffer.read(4097)
+        if len(raw_token) > 4096:
+            raise ValueError("GitHub token is invalid")
+        try:
+            token = raw_token.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError("GitHub token is invalid") from None
         release_id = _parse_release_id(args.release_id)
         prerelease = _parse_bool(args.expected_prerelease)
         expected_body = _read_notes(args.notes)
@@ -415,10 +426,10 @@ def main(argv: list[str] | None = None) -> int:
             expected_body,
             prerelease,
             expected_assets,
-            os.environ.get("GH_TOKEN", ""),
+            token,
         )
     except ValueError as error:
-        print(f"exact GitHub Release publication failed: {error}", file=os.sys.stderr)
+        print(f"exact GitHub Release publication failed: {error}", file=sys.stderr)
         return 1
     print(f"exact GitHub Release publication succeeded: id={release_id} state={status}")
     return 0
