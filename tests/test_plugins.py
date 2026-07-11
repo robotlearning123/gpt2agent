@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 
 import pytest
 
@@ -104,6 +106,47 @@ def test_stale_local_cursor_is_contract_changed() -> None:
         _run(tool, limit=1, cursor=cursor)
 
 
+def test_local_cursor_fingerprint_uses_pre_redaction_plugin_ids() -> None:
+    class ChangingSecretIdClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def get(self, path, **kwargs):
+            self.calls += 1
+            marker = "a" if self.calls == 1 else "b"
+            return [
+                {"id": "sk-" + marker * 32},
+                {"id": "sk-" + "z" * 32},
+            ]
+
+    tool = _tools(ChangingSecretIdClient())["list_plugins"]
+    cursor = _run(tool, limit=1)["cursor"]
+    with pytest.raises(RuntimeError, match="fingerprint"):
+        _run(tool, limit=1, cursor=cursor)
+
+
+def test_local_cursor_fingerprint_is_keyed_not_an_offline_raw_id_oracle() -> None:
+    raw = [
+        {"id": "owner@example.com"},
+        {"id": "sk-" + "s" * 32},
+    ]
+    encoded_ids = json.dumps(
+        [item["id"] for item in raw], ensure_ascii=True, separators=(",", ":")
+    ).encode("utf-8")
+    unkeyed = hashlib.sha256(encoded_ids).hexdigest()
+
+    first = plugins.normalize_plugin_catalog(raw, limit=1, cursor=None)
+    second = plugins.normalize_plugin_catalog(raw, limit=1, cursor=None)
+    fingerprint, offset = plugins._decode_local_cursor(first["cursor"])
+
+    assert first["cursor"] == second["cursor"]
+    assert offset == 1
+    assert fingerprint != unkeyed
+    assert "owner@example.com" not in repr(first)
+    assert "sk-" + "s" * 32 not in repr(first)
+
+
 def test_local_cursor_cannot_be_reinterpreted_after_envelope_changes() -> None:
     local_page = [{"id": f"p-{i}"} for i in range(2)]
 
@@ -181,6 +224,28 @@ def test_installed_nested_envelope_is_normalized_without_nested_objects() -> Non
     assert result["items"][0]["app_ids"] == ["app-1"]
     assert result["items"][0]["disabled_skill_names"] == ["skill-1"]
     assert "marketplace" not in result["items"][0]
+
+
+def test_installed_plugins_redact_secrets_from_every_allowlisted_string() -> None:
+    secret = "sk-" + "s" * 32
+    scalar_fields = {
+        field: secret
+        for field in plugins._SCALAR_FIELDS
+        if field not in {"enabled", "release_version"}
+    }
+    payload = {
+        "plugins": [
+            {
+                **scalar_fields,
+                "release_version": secret,
+                **{field: [secret] for field in plugins._LIST_FIELDS},
+            }
+        ]
+    }
+
+    result = plugins.normalize_installed_plugins(payload)
+
+    assert secret not in repr(result)
 
 
 @pytest.mark.parametrize(

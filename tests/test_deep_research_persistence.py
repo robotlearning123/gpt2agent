@@ -85,6 +85,61 @@ def test_runner_persists_only_requested_report_and_shape_only_status(
     assert stat.S_IMODE((out_dir / "status.txt").stat().st_mode) == 0o600
 
 
+def test_runner_projects_untrusted_citation_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = _load_runner()
+    _patch_runner_events(
+        monkeypatch,
+        runner,
+        [
+            {
+                "type": "done",
+                "text": _RESPONSE_MARKER,
+                "content_references": [
+                    {
+                        "items": [
+                            {"title": "script", "url": "javascript:alert(1)"},
+                            {
+                                "title": "credential",
+                                "url": "https://user:secret@example.com/private",
+                            },
+                            {
+                                "title": "metadata",
+                                "url": "http://169.254.169.254/latest/meta-data",
+                            },
+                            {
+                                "title": "Safe [document]",
+                                "url": (
+                                    "https://Example.COM:443/doc?utm_source=private&"
+                                    "section=1&token=secret#fragment"
+                                ),
+                            },
+                        ]
+                    }
+                ],
+            }
+        ],
+    )
+    out_dir = tmp_path / "citation-output"
+
+    status = asyncio.run(runner._run("query", "light", out_dir))
+
+    assert status == 0
+    report = (out_dir / "report.md").read_text(encoding="utf-8")
+    assert "- [Safe \\[document\\]](<https://example.com/doc?section=1>)" in report
+    for forbidden in (
+        "javascript:",
+        "user:secret",
+        "169.254.169.254",
+        "utm_source",
+        "token=secret",
+        "#fragment",
+    ):
+        assert forbidden not in report
+    assert "\trefs=1\t" in (out_dir / "status.txt").read_text(encoding="utf-8")
+
+
 def test_runner_error_status_never_persists_exception_content(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

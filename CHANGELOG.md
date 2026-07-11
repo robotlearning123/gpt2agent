@@ -39,12 +39,16 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
   `list_scheduled_tasks`; neither tool claims to enumerate the other's jobs.
 - Apps/connectors and Plugins are separate surfaces. `list_apps` accepts the
   observed string and object variants, while the two Plugin tools normalize the
-  catalog and installed-plugin envelopes independently.
+  catalog and installed-plugin envelopes independently. Every projected Plugin
+  string is secret/PII-redacted, while process-local keyed pagination
+  fingerprints bind the validated pre-redaction identities so ordered Plugin
+  identity changes still fail closed without exposing an offline ID oracle.
 - `list_work_models` reports Work metadata without merging Work-only identifiers
   into `list_models` or suggesting them for `chat`.
 - The bundled Deep Research runner persists only the requested `report.md` and a
   shape-only `status.txt`. It no longer writes raw event or server-metadata
-  artifacts.
+  artifacts, and its citation list now uses the same bounded, secret-filtering
+  Markdown projection as the MCP Deep Research tools.
 - The Python MCP dependency is bounded to the stable v1 line
   (`mcp>=1.26,<2`). CI verifies both 1.26.0 and the latest resolvable v1 release.
 - Collection adapters now reject a blank 2xx body as a changed contract instead
@@ -55,6 +59,11 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
   classified as changed contracts before any URL is built.
 - Plain `gpt2agent run` now defaults to stdio. Version 0.0.12 disables HTTP;
   the legacy launch flag fails before constructing the account server.
+- The shell installer drives registration through the exact pipx-installed app
+  path, so a successful upgrade is not rolled back merely because the pipx app
+  directory is not yet visible in the current shell's `PATH`.
+- Optional image-asset enrichment preserves typed changed-contract and
+  indeterminate-access results while continuing to suppress exception details.
 
 ### Security
 
@@ -122,11 +131,12 @@ Voice, audio, browser-cookie export, or an OpenAI API fallback.
 - The stable `Required checks` gate now includes the full OS/Python suite,
   Ruff, ShellCheck, both MCP v1 compatibility lanes, and a wheel/sdist dry-run
   installed into clean environments.
-- Main CI rewrites setuptools' volatile gzip/tar timestamps, ownership, names,
-  and modes in the sdist under a fixed source epoch, then revalidates the exact
-  member types and payload hashes before Twine, package smoke, and artifact
-  retention. The release workflow relays those bytes and never normalizes or
-  rebuilds them.
+- The locked package lane builds twice from cleaned state, rewrites bounded
+  sdist container metadata under a fixed source epoch with an isolated,
+  dependency-free fail-closed normalizer, revalidates member types and payload
+  hashes, and requires byte-identical wheel and sdist pairs before Twine,
+  package smoke, and retention of the first set. The release workflow relays
+  those exact bytes and never normalizes or rebuilds them.
 - CI audits resolved application dependencies, the minimum supported
   `curl_cffi` release, and the hash-locked account-gate runtime for known
   vulnerabilities. A credential-free CI lane also bootstraps that runtime from

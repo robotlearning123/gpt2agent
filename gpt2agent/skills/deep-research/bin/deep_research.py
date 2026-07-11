@@ -30,6 +30,7 @@ import time
 from pathlib import Path
 
 from gpt2agent.backend import BackendClient
+from gpt2agent.server import _render_dr_sources
 from gpt2agent.sse import ConversationClient
 
 
@@ -207,25 +208,15 @@ async def _run(query: str, mode: str, out_dir: Path) -> int:
         body = light_final_text or "".join(progress_before_done + progress_after_done) or "(empty)"
 
     # --- Sources (light mode only; heavy loses URLs upstream) ---
-    sources = ""
-    seen: set[str] = set()
-    lines: list[str] = []
-    for ref in light_refs:
-        for item in (ref.get("items") or []):
-            url = item.get("url", "")
-            title = item.get("title", url)
-            if url and url not in seen:
-                seen.add(url)
-                lines.append(f"- [{title}]({url})")
-    if lines:
-        sources = "\n\n---\n\n## Sources\n\n" + "\n".join(lines)
+    sources = _render_dr_sources(light_refs)
+    source_count = sum(line.startswith("- [") for line in sources.splitlines())
 
     notes_block = ""
     if connector_failed:
         notes_block += "\n\n> **Note:** Deep Research connector reported failure — text may be a fallback answer.\n"
     if tool_error_count:
         notes_block += "\n\n> **Tool error:** One or more tool calls failed.\n"
-    if mode == "heavy" and not lines:
+    if mode == "heavy" and not sources:
         notes_block += "\n\n> **Citations:** No grouped source list in this report's widget state; the model may have written source URLs inline in the body instead.\n"
 
     header = (
@@ -250,7 +241,7 @@ async def _run(query: str, mode: str, out_dir: Path) -> int:
                 status_path,
                 f"INCOMPLETE\t{time.strftime('%Y-%m-%d %H:%M:%S')}\tmode={mode}\t"
                 f"elapsed={elapsed:.0f}s\tevents={n_events}\t"
-                f"body_chars={len(body)}\trefs={len(lines)}\t"
+                f"body_chars={len(body)}\trefs={source_count}\t"
                 f"tool_calls={tool_call_count}\tmeta_events={meta_event_count}\t"
                 f"tool_errors={tool_error_count}\t"
                 f"reason={terminal_done_reason}\n",
@@ -269,14 +260,18 @@ async def _run(query: str, mode: str, out_dir: Path) -> int:
             status_path,
             f"DONE\t{time.strftime('%Y-%m-%d %H:%M:%S')}\tmode={mode}\t"
             f"elapsed={elapsed:.0f}s\tevents={n_events}\t"
-            f"body_chars={len(body)}\trefs={len(lines)}\t"
+            f"body_chars={len(body)}\trefs={source_count}\t"
             f"tool_calls={tool_call_count}\tmeta_events={meta_event_count}\t"
             f"tool_errors={tool_error_count}\t"
             f"connector_failed={connector_failed}\n",
         )
     except Exception as exc:
         return _record_error(status_path, t0, exc)
-    print(f"[done] mode={mode} elapsed={elapsed:.0f}s body={len(body)} refs={len(lines)} -> {report_path}", flush=True)
+    print(
+        f"[done] mode={mode} elapsed={elapsed:.0f}s body={len(body)} "
+        f"refs={source_count} -> {report_path}",
+        flush=True,
+    )
     return 0
 
 

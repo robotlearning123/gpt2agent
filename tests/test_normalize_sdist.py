@@ -1,24 +1,32 @@
-"""Regression tests for deterministic source-distribution metadata."""
+"""Security and reproducibility checks for source-distribution normalization."""
 
 from __future__ import annotations
 
+import argparse
 import gzip
 import hashlib
 import importlib.util
 import io
+import os
+import stat
+import struct
 import sys
 import tarfile
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-NORMALIZER = PROJECT_ROOT / "scripts" / "normalize_sdist.py"
+SCRIPT = PROJECT_ROOT / "scripts" / "normalize_sdist.py"
+ROOT = "gpt2agent-1.2.3"
+EPOCH = 1_700_000_000
 
 
-def _load_normalizer():
-    spec = importlib.util.spec_from_file_location("normalize_sdist", NORMALIZER)
+def _load_module() -> ModuleType:
+    assert SCRIPT.is_file(), "the release sdist normalizer is missing"
+    spec = importlib.util.spec_from_file_location("normalize_sdist", SCRIPT)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -26,220 +34,185 @@ def _load_normalizer():
     return module
 
 
-def _write_source_archive(
-    path: Path,
+def _directory(name: str) -> tuple[tarfile.TarInfo, bytes | None]:
+    member = tarfile.TarInfo(name)
+    member.type = tarfile.DIRTYPE
+    member.mode = 0o775
+    member.mtime = EPOCH + 3.25
+    member.pax_headers = {"mtime": str(member.mtime)}
+    return member, None
+
+
+def _file(
+    name: str,
+    payload: bytes = b"payload",
     *,
-    gzip_mtime: int,
-    member_mtime: float,
-    unsafe_symlink: bool = False,
-    regular_mode: int = 0o644,
-    executable_mode: int = 0o755,
-) -> None:
-    with path.open("wb") as raw:
-        with gzip.GzipFile(
-            filename=f"nondeterministic-{gzip_mtime}.tar",
-            mode="wb",
-            fileobj=raw,
-            mtime=gzip_mtime,
-        ) as compressed:
-            with tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as archive:
-                root = tarfile.TarInfo("gpt2agent-1.2.3")
-                root.type = tarfile.DIRTYPE
-                root.mode = 0o755
-                root.mtime = member_mtime
-                root.pax_headers = {"mtime": str(member_mtime)}
-                archive.addfile(root)
+    mode: int = 0o664,
+) -> tuple[tarfile.TarInfo, bytes]:
+    member = tarfile.TarInfo(name)
+    member.mode = mode
+    member.mtime = EPOCH + 4.5
+    member.pax_headers = {"mtime": str(member.mtime)}
+    return member, payload
 
-                payload = b"[project]\nname = 'gpt2agent'\n"
-                metadata = tarfile.TarInfo("gpt2agent-1.2.3/pyproject.toml")
-                metadata.mode = regular_mode
-                metadata.mtime = member_mtime + 0.25
-                metadata.size = len(payload)
-                metadata.pax_headers = {"mtime": str(member_mtime + 0.25)}
-                archive.addfile(metadata, io.BytesIO(payload))
 
-                executable_payload = b"#!/bin/sh\nexit 0\n"
-                executable = tarfile.TarInfo("gpt2agent-1.2.3/install.sh")
-                executable.mode = executable_mode
-                executable.mtime = member_mtime + 0.5
-                executable.size = len(executable_payload)
-                executable.pax_headers = {"mtime": str(member_mtime + 0.5)}
-                archive.addfile(executable, io.BytesIO(executable_payload))
+def _required_entries() -> list[tuple[tarfile.TarInfo, bytes | None]]:
+    return [
+        _directory(ROOT),
+        _file(
+            f"{ROOT}/PKG-INFO",
+            b"Metadata-Version: 2.4\nName: gpt2agent\nVersion: 1.2.3\n",
+        ),
+        _file(f"{ROOT}/pyproject.toml", b"[build-system]\nrequires = []\n"),
+    ]
 
-                if unsafe_symlink:
-                    link = tarfile.TarInfo("gpt2agent-1.2.3/unsafe-link")
-                    link.type = tarfile.SYMTYPE
-                    link.linkname = "../../outside"
-                    link.mode = 0o777
-                    link.mtime = member_mtime
-                    archive.addfile(link)
+
+def _source_entries() -> list[tuple[tarfile.TarInfo, bytes | None]]:
+    return [
+        *_required_entries(),
+        _directory(f"{ROOT}/gpt2agent"),
+        _file(f"{ROOT}/gpt2agent/__init__.py", b'__version__ = "1.2.3"\n'),
+        _file(f"{ROOT}/install.sh", b"#!/bin/sh\nexit 0\n", mode=0o775),
+    ]
 
 
 def _write_custom_archive(
     path: Path,
-    members: list[tuple[tarfile.TarInfo, bytes | None]],
+    entries: list[tuple[tarfile.TarInfo, bytes | None]],
+    *,
+    gzip_mtime: int = EPOCH + 1,
+    global_pax: dict[str, str] | None = None,
 ) -> None:
-    with tarfile.open(path, "w:gz", format=tarfile.PAX_FORMAT) as archive:
-        for member, payload in members:
-            if payload is not None:
-                member.size = len(payload)
-            archive.addfile(member, io.BytesIO(payload) if payload is not None else None)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as raw:
+        with gzip.GzipFile(
+            filename=path.name,
+            mode="wb",
+            fileobj=raw,
+            mtime=gzip_mtime,
+        ) as compressed:
+            with tarfile.open(
+                fileobj=compressed,
+                mode="w",
+                format=tarfile.PAX_FORMAT,
+                pax_headers=global_pax,
+            ) as archive:
+                for member, payload in entries:
+                    member.uid = 1234
+                    member.gid = 5678
+                    member.uname = "builder"
+                    member.gname = "builders"
+                    if payload is not None:
+                        member.size = len(payload)
+                        archive.addfile(member, io.BytesIO(payload))
+                    else:
+                        archive.addfile(member)
 
 
-def _directory(name: str) -> tarfile.TarInfo:
-    member = tarfile.TarInfo(name)
-    member.type = tarfile.DIRTYPE
-    member.mode = 0o755
-    return member
+def test_normalizer_makes_order_and_metadata_distinct_archives_byte_identical(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    first = tmp_path / "first" / f"{ROOT}.tar.gz"
+    second = tmp_path / "second" / f"{ROOT}.tar.gz"
+    first_entries = _source_entries()
+    second_entries = list(reversed(_source_entries()))
+    for member, _payload in second_entries:
+        member.mtime += 100
+        member.pax_headers = {"mtime": str(member.mtime)}
+        member.mode = 0o700 if member.mode & 0o111 else 0o600
+    _write_custom_archive(first, first_entries, gzip_mtime=EPOCH + 1)
+    _write_custom_archive(second, second_entries, gzip_mtime=EPOCH + 101)
 
+    first_digest = module.normalize_sdist(first, epoch=EPOCH)
+    second_digest = module.normalize_sdist(second, epoch=EPOCH)
 
-def _file(name: str, payload: bytes = b"payload") -> tuple[tarfile.TarInfo, bytes]:
-    member = tarfile.TarInfo(name)
-    member.mode = 0o644
-    return member, payload
-
-
-def test_normalizer_makes_metadata_distinct_archives_byte_identical(tmp_path: Path) -> None:
-    normalizer = _load_normalizer()
-    first = tmp_path / "first" / "gpt2agent-1.2.3.tar.gz"
-    second = tmp_path / "second" / "gpt2agent-1.2.3.tar.gz"
-    first.parent.mkdir()
-    second.parent.mkdir()
-    _write_source_archive(first, gzip_mtime=1_700_000_001, member_mtime=1_700_000_010.25)
-    _write_source_archive(
-        second,
-        gzip_mtime=1_700_000_099,
-        member_mtime=1_700_000_200.75,
-        regular_mode=0o600,
-        executable_mode=0o700,
-    )
-
-    normalizer.normalize_sdist(first, epoch=1_700_000_000)
-    normalizer.normalize_sdist(second, epoch=1_700_000_000)
-
-    assert hashlib.sha256(first.read_bytes()).digest() == hashlib.sha256(
-        second.read_bytes()
-    ).digest()
     assert first.read_bytes() == second.read_bytes()
-    assert first.read_bytes()[3] & 0x08 == 0  # gzip FNAME is absent
-    assert int.from_bytes(first.read_bytes()[4:8], "little") == 1_700_000_000
-
+    assert first_digest == second_digest == hashlib.sha256(first.read_bytes()).hexdigest()
+    header = first.read_bytes()[:10]
+    assert header[3] & 0x08 == 0
+    assert struct.unpack("<I", header[4:8])[0] == EPOCH
     with tarfile.open(first, "r:gz") as archive:
         members = archive.getmembers()
-        assert [member.name for member in members] == [
-            "gpt2agent-1.2.3",
-            "gpt2agent-1.2.3/pyproject.toml",
-            "gpt2agent-1.2.3/install.sh",
-        ]
-        assert [member.mode for member in members] == [0o755, 0o644, 0o755]
-        assert all(member.mtime == 1_700_000_000 for member in members)
-        assert all(member.uid == 0 and member.gid == 0 for member in members)
-        assert all(member.uname == "" and member.gname == "" for member in members)
-        assert all("mtime" not in member.pax_headers for member in members)
-        extracted = archive.extractfile("gpt2agent-1.2.3/pyproject.toml")
-        assert extracted is not None
-        assert extracted.read() == b"[project]\nname = 'gpt2agent'\n"
+        assert [member.name for member in members] == sorted(member.name for member in members)
+        assert {member.mtime for member in members} == {EPOCH}
+        assert {member.uid for member in members} == {0}
+        assert {member.gid for member in members} == {0}
+        assert {member.uname for member in members} == {""}
+        assert {member.gname for member in members} == {""}
+        assert not any("mtime" in member.pax_headers for member in members)
+        assert archive.getmember(ROOT).mode == 0o755
+        assert archive.getmember(f"{ROOT}/PKG-INFO").mode == 0o644
+        assert archive.getmember(f"{ROOT}/install.sh").mode == 0o755
+    assert stat.S_IMODE(first.stat().st_mode) == 0o600
 
     normalized = first.read_bytes()
-    normalizer.normalize_sdist(first, epoch=1_700_000_000)
+    assert module.normalize_sdist(first, epoch=EPOCH) == first_digest
     assert first.read_bytes() == normalized
 
 
-def test_normalizer_rejects_links_without_replacing_the_input(tmp_path: Path) -> None:
-    normalizer = _load_normalizer()
-    archive = tmp_path / "gpt2agent-1.2.3.tar.gz"
-    _write_source_archive(
-        archive,
-        gzip_mtime=1_700_000_001,
-        member_mtime=1_700_000_010.25,
-        unsafe_symlink=True,
-    )
-    original = archive.read_bytes()
-
-    with pytest.raises(ValueError, match="regular files and directories"):
-        normalizer.normalize_sdist(archive, epoch=1_700_000_000)
-
-    assert archive.read_bytes() == original
-    assert list(tmp_path.glob(".gpt2agent-1.2.3.tar.gz.*.tmp")) == []
-
-
-def test_normalizer_replace_failure_is_atomic_and_cleans_temp(
+@pytest.mark.parametrize("suffix", [b"hidden trailing bytes", gzip.compress(b"second")])
+def test_normalizer_rejects_trailing_or_concatenated_gzip_data(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    suffix: bytes,
 ) -> None:
-    normalizer = _load_normalizer()
-    archive = tmp_path / "gpt2agent-1.2.3.tar.gz"
-    _write_source_archive(
-        archive,
-        gzip_mtime=1_700_000_001,
-        member_mtime=1_700_000_010.25,
-    )
+    module = _load_module()
+    archive = tmp_path / f"{ROOT}.tar.gz"
+    _write_custom_archive(archive, _source_entries())
+    archive.write_bytes(archive.read_bytes() + suffix)
     original = archive.read_bytes()
 
-    def fail_replace(*_args: object, **_kwargs: object) -> None:
-        raise OSError("synthetic replace failure")
-
-    monkeypatch.setattr(normalizer.os, "replace", fail_replace)
-    with pytest.raises(OSError, match="synthetic replace failure"):
-        normalizer.normalize_sdist(archive, epoch=1_700_000_000)
+    with pytest.raises(module.SdistNormalizationError, match="exactly one gzip"):
+        module.normalize_sdist(archive, epoch=EPOCH)
 
     assert archive.read_bytes() == original
-    assert list(tmp_path.glob(".gpt2agent-1.2.3.tar.gz.*.tmp")) == []
 
 
-def test_normalizer_rejects_a_symlink_archive(tmp_path: Path) -> None:
-    normalizer = _load_normalizer()
-    target = tmp_path / "target.tar.gz"
-    target.write_bytes(b"not an archive")
-    archive = tmp_path / "gpt2agent-1.2.3.tar.gz"
-    archive.symlink_to(target)
+def test_normalizer_rejects_nonzero_data_after_tar_eof_inside_one_gzip(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    archive = tmp_path / f"{ROOT}.tar.gz"
+    _write_custom_archive(archive, _source_entries())
+    expanded = gzip.decompress(archive.read_bytes())
+    archive.write_bytes(gzip.compress(expanded + b"hidden in one gzip", mtime=EPOCH))
 
-    with pytest.raises(ValueError, match="regular non-symlink"):
-        normalizer.normalize_sdist(archive, epoch=1_700_000_000)
+    with pytest.raises(module.SdistNormalizationError, match="after tar EOF"):
+        module.normalize_sdist(archive, epoch=EPOCH)
+
+
+def test_normalizer_rejects_truncated_gzip(tmp_path: Path) -> None:
+    module = _load_module()
+    archive = tmp_path / f"{ROOT}.tar.gz"
+    _write_custom_archive(archive, _source_entries())
+    archive.write_bytes(archive.read_bytes()[:-8])
+
+    with pytest.raises(module.SdistNormalizationError, match="truncated|malformed"):
+        module.normalize_sdist(archive, epoch=EPOCH)
 
 
 @pytest.mark.parametrize(
     "unsafe_name",
     [
+        f"{ROOT}/../outside",
+        f"{ROOT}//double",
+        f"{ROOT}\\windows-path",
         "/absolute",
-        "gpt2agent-1.2.3/../escape",
-        "gpt2agent-1.2.3\\windows-path",
-        "different-root/file",
+        "another-root/file",
+        f"{ROOT}/nul\x00name",
     ],
 )
-def test_normalizer_rejects_noncanonical_or_mismatched_paths(
+def test_normalizer_rejects_noncanonical_member_paths(
     tmp_path: Path,
     unsafe_name: str,
 ) -> None:
-    normalizer = _load_normalizer()
-    archive = tmp_path / "gpt2agent-1.2.3.tar.gz"
-    _write_custom_archive(
-        archive,
-        [
-            (_directory("gpt2agent-1.2.3"), None),
-            _file(unsafe_name),
-        ],
-    )
+    module = _load_module()
+    archive = tmp_path / f"{ROOT}.tar.gz"
+    entries = [*_required_entries(), _file(unsafe_name, b"bad")]
+    _write_custom_archive(archive, entries)
 
-    with pytest.raises(ValueError, match="path|root"):
-        normalizer.normalize_sdist(archive, epoch=1_700_000_000)
-
-
-def test_normalizer_rejects_duplicate_members(tmp_path: Path) -> None:
-    normalizer = _load_normalizer()
-    archive = tmp_path / "gpt2agent-1.2.3.tar.gz"
-    duplicate = "gpt2agent-1.2.3/duplicate.txt"
-    _write_custom_archive(
-        archive,
-        [
-            (_directory("gpt2agent-1.2.3"), None),
-            _file(duplicate, b"first"),
-            _file(duplicate, b"second"),
-        ],
-    )
-
-    with pytest.raises(ValueError, match="duplicate member"):
-        normalizer.normalize_sdist(archive, epoch=1_700_000_000)
+    with pytest.raises(module.SdistNormalizationError, match="path|root|terminator"):
+        module.normalize_sdist(archive, epoch=EPOCH)
 
 
 @pytest.mark.parametrize(
@@ -250,55 +223,239 @@ def test_normalizer_rejects_every_special_member_type(
     tmp_path: Path,
     member_type: bytes,
 ) -> None:
-    normalizer = _load_normalizer()
-    archive = tmp_path / "gpt2agent-1.2.3.tar.gz"
-    special = tarfile.TarInfo("gpt2agent-1.2.3/special")
+    module = _load_module()
+    archive = tmp_path / f"{ROOT}.tar.gz"
+    special = tarfile.TarInfo(f"{ROOT}/special")
     special.type = member_type
-    special.linkname = "gpt2agent-1.2.3/target"
-    _write_custom_archive(
-        archive,
-        [
-            (_directory("gpt2agent-1.2.3"), None),
-            (special, None),
-        ],
-    )
+    special.linkname = "../../outside"
+    _write_custom_archive(archive, [*_required_entries(), (special, None)])
 
-    with pytest.raises(ValueError, match="regular files and directories"):
-        normalizer.normalize_sdist(archive, epoch=1_700_000_000)
+    with pytest.raises(module.SdistNormalizationError, match="regular files and directories"):
+        module.normalize_sdist(archive, epoch=EPOCH)
 
 
-def test_normalizer_preserves_a_long_pax_path_without_volatile_metadata(
+def test_normalizer_rejects_duplicates_and_missing_or_wrong_required_metadata(
     tmp_path: Path,
 ) -> None:
-    normalizer = _load_normalizer()
-    archive = tmp_path / "gpt2agent-1.2.3.tar.gz"
-    long_name = "gpt2agent-1.2.3/" + "a" * 120
+    module = _load_module()
+    duplicate = tmp_path / "duplicate" / f"{ROOT}.tar.gz"
+    missing = tmp_path / "missing" / f"{ROOT}.tar.gz"
+    wrong_type = tmp_path / "wrong" / f"{ROOT}.tar.gz"
     _write_custom_archive(
-        archive,
-        [
-            (_directory("gpt2agent-1.2.3"), None),
-            _file(long_name),
-        ],
+        duplicate,
+        [*_required_entries(), _file(f"{ROOT}/PKG-INFO", b"duplicate")],
     )
+    _write_custom_archive(missing, _required_entries()[:-1])
+    wrong_entries = _required_entries()
+    wrong_entries[1] = _directory(f"{ROOT}/PKG-INFO")
+    _write_custom_archive(wrong_type, wrong_entries)
 
-    normalizer.normalize_sdist(archive, epoch=1_700_000_000)
+    for archive in (duplicate, missing, wrong_type):
+        with pytest.raises(module.SdistNormalizationError):
+            module.normalize_sdist(archive, epoch=EPOCH)
+
+
+@pytest.mark.parametrize("parent_kind", ["missing", "file"])
+def test_normalizer_rejects_missing_or_regular_intermediate_parent(
+    tmp_path: Path,
+    parent_kind: str,
+) -> None:
+    module = _load_module()
+    archive = tmp_path / f"{ROOT}.tar.gz"
+    entries = _required_entries()
+    if parent_kind == "file":
+        entries.append(_file(f"{ROOT}/parent", b"not a directory"))
+    entries.append(_file(f"{ROOT}/parent/child", b"child"))
+    _write_custom_archive(archive, entries)
+
+    with pytest.raises(module.SdistNormalizationError, match="parent"):
+        module.normalize_sdist(archive, epoch=EPOCH)
+
+
+def test_normalizer_rejects_global_and_unsupported_member_pax_metadata(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    global_archive = tmp_path / "global" / f"{ROOT}.tar.gz"
+    member_archive = tmp_path / "member" / f"{ROOT}.tar.gz"
+    _write_custom_archive(global_archive, _source_entries(), global_pax={"comment": "hidden"})
+    entries = _source_entries()
+    entries[-1][0].pax_headers["ctime"] = "123.5"
+    _write_custom_archive(member_archive, entries)
+
+    with pytest.raises(module.SdistNormalizationError, match="global PAX"):
+        module.normalize_sdist(global_archive, epoch=EPOCH)
+    with pytest.raises(module.SdistNormalizationError, match="unsupported PAX"):
+        module.normalize_sdist(member_archive, epoch=EPOCH)
+
+
+def test_normalizer_preserves_long_pax_path_without_volatile_metadata(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    archive = tmp_path / f"{ROOT}.tar.gz"
+    long_name = f"{ROOT}/" + "a" * 120
+    _write_custom_archive(archive, [*_required_entries(), _file(long_name)])
+
+    module.normalize_sdist(archive, epoch=EPOCH)
 
     with tarfile.open(archive, "r:gz") as normalized:
         member = normalized.getmember(long_name)
         assert member.pax_headers == {"path": long_name}
-        assert member.mtime == 1_700_000_000
+        assert member.mtime == EPOCH
 
 
-@pytest.mark.parametrize("epoch", [-1, 2**32, True, "1700000000"])
-def test_normalizer_rejects_noncanonical_gzip_epochs(epoch: object) -> None:
-    normalizer = _load_normalizer()
+def test_normalizer_rejects_symlink_input_and_noncanonical_archive_root(
+    tmp_path: Path,
+) -> None:
+    module = _load_module()
+    target = tmp_path / f"{ROOT}.tar.gz"
+    link = tmp_path / "linked-1.0.tar.gz"
+    invalid_root = tmp_path / "invalidroot.tar.gz"
+    _write_custom_archive(target, _source_entries())
+    link.symlink_to(target)
+    invalid_root.write_bytes(target.read_bytes())
 
-    with pytest.raises((TypeError, ValueError), match="epoch"):
-        normalizer.validate_epoch(epoch)
+    with pytest.raises(module.SdistNormalizationError, match="non-symlink"):
+        module.normalize_sdist(link, epoch=EPOCH)
+    with pytest.raises(module.SdistNormalizationError, match="canonical archive root"):
+        module.normalize_sdist(invalid_root, epoch=EPOCH)
+
+
+@pytest.mark.parametrize("epoch", [-1, 2**32, True, "1700000000", 1.5])
+def test_normalizer_rejects_invalid_gzip_epochs(epoch: object) -> None:
+    module = _load_module()
+
+    with pytest.raises(ValueError, match="epoch"):
+        module.validate_epoch(epoch)
+
+
+@pytest.mark.parametrize("value", ["01", "+1", " 1", "1 ", "-1"])
+def test_normalizer_cli_rejects_noncanonical_epoch_spellings(value: str) -> None:
+    module = _load_module()
+
+    with pytest.raises(argparse.ArgumentTypeError, match="canonical"):
+        module._parse_epoch(value)
 
 
 def test_normalizer_accepts_gzip_epoch_boundaries() -> None:
-    normalizer = _load_normalizer()
+    module = _load_module()
 
-    assert normalizer.validate_epoch(0) == 0
-    assert normalizer.validate_epoch(2**32 - 1) == 2**32 - 1
+    assert module.validate_epoch(0) == 0
+    assert module.validate_epoch(2**32 - 1) == 2**32 - 1
+
+
+def test_gzip_validation_bounds_each_decompression_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    limits: list[int] = []
+
+    class BoundedDecoder:
+        eof = False
+        unused_data = b""
+        unconsumed_tail = b""
+
+        def decompress(self, _data: bytes, max_length: int) -> bytes:
+            limits.append(max_length)
+            self.eof = True
+            return b"tar payload"
+
+    monkeypatch.setattr(module.zlib, "decompressobj", lambda *, wbits: BoundedDecoder())
+
+    module._validate_complete_gzip(io.BytesIO(b"compressed input"))
+
+    assert limits
+    assert max(limits) <= module._MAX_DECOMPRESS_BYTES
+
+
+def test_normalizer_enforces_member_size_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    archive = tmp_path / f"{ROOT}.tar.gz"
+    _write_custom_archive(archive, [*_required_entries(), _file(f"{ROOT}/large", b"12")])
+    monkeypatch.setattr(module, "_MAX_MEMBER_BYTES", 1)
+
+    with pytest.raises(module.SdistNormalizationError, match="supported bound"):
+        module.normalize_sdist(archive, epoch=EPOCH)
+
+
+def test_normalizer_semantic_rescan_rejects_mode_drift_without_replacing_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    archive = tmp_path / f"{ROOT}.tar.gz"
+    _write_custom_archive(archive, _source_entries())
+    original = archive.read_bytes()
+    real_canonical = module._canonical_tarinfo
+
+    def drift_mode(member: tarfile.TarInfo, epoch: int) -> tarfile.TarInfo:
+        result = real_canonical(member, epoch)
+        if member.name.endswith("PKG-INFO"):
+            result.mode = 0o755
+        return result
+
+    monkeypatch.setattr(module, "_canonical_tarinfo", drift_mode)
+
+    with pytest.raises(module.SdistNormalizationError, match="modes"):
+        module.normalize_sdist(archive, epoch=EPOCH)
+
+    assert archive.read_bytes() == original
+    assert not list(tmp_path.glob(f".{archive.name}.*.tmp"))
+
+
+def test_normalizer_rejects_same_size_source_mutation_even_with_restored_mtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    archive = tmp_path / f"{ROOT}.tar.gz"
+    _write_custom_archive(archive, _source_entries())
+    original_stat = archive.stat()
+    real_canonical = module._canonical_tarinfo
+    mutated = False
+
+    def mutate_source(member: tarfile.TarInfo, epoch: int) -> tarfile.TarInfo:
+        nonlocal mutated
+        if not mutated:
+            with archive.open("r+b") as stream:
+                stream.seek(9)
+                current = stream.read(1)
+                stream.seek(9)
+                stream.write(bytes([current[0] ^ 1]))
+            os.utime(archive, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+            mutated = True
+        return real_canonical(member, epoch)
+
+    monkeypatch.setattr(module, "_canonical_tarinfo", mutate_source)
+
+    with pytest.raises(module.SdistNormalizationError, match="changed"):
+        module.normalize_sdist(archive, epoch=EPOCH)
+
+    assert mutated
+    assert archive.stat().st_size == original_stat.st_size
+    assert archive.stat().st_mtime_ns == original_stat.st_mtime_ns
+    assert not list(tmp_path.glob(f".{archive.name}.*.tmp"))
+
+
+def test_normalizer_replace_failure_is_atomic_and_cleans_temp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_module()
+    archive = tmp_path / f"{ROOT}.tar.gz"
+    _write_custom_archive(archive, _source_entries())
+    original = archive.read_bytes()
+
+    def fail_replace(*_args: object, **_kwargs: object) -> None:
+        raise OSError("synthetic replace failure")
+
+    monkeypatch.setattr(module.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="synthetic replace failure"):
+        module.normalize_sdist(archive, epoch=EPOCH)
+
+    assert archive.read_bytes() == original
+    assert not list(tmp_path.glob(f".{archive.name}.*.tmp"))

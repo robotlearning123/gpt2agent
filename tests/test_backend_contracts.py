@@ -400,11 +400,18 @@ def test_backend_import_rejects_inherited_tls_keylog_before_curl_import(
     tmp_path: Path,
 ) -> None:
     keylog = tmp_path / "tls-secrets.log"
+    project_root = Path(__file__).resolve().parents[1]
     environment = dict(os.environ)
     environment["SSLKEYLOGFILE"] = str(keylog)
     result = subprocess.run(
-        [sys.executable, "-I", "-B", "-c", "import gpt2agent.backend"],
-        cwd=Path(__file__).resolve().parents[1],
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            f"import sys; sys.path.insert(0, {str(project_root)!r}); import gpt2agent.backend",
+        ],
+        cwd=project_root,
         env=environment,
         text=True,
         capture_output=True,

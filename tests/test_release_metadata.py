@@ -29,6 +29,20 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VERIFIER = PROJECT_ROOT / "scripts" / "verify_release.py"
 
 
+def test_release_workflow_narrows_release_tag_families() -> None:
+    workflow = (PROJECT_ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+    tag_block = workflow.split("    tags:\n", 1)[1].split("\n\npermissions:", 1)[0]
+
+    assert re.findall(r'^\s+- "([^"]+)"$', tag_block, flags=re.MULTILINE) == [
+        "v[0-9]+.[0-9]+.[0-9]+",
+        "v[0-9]+.[0-9]+.[0-9]+-alpha[0-9]+",
+        "v[0-9]+.[0-9]+.[0-9]+-beta[0-9]+",
+        "v[0-9]+.[0-9]+.[0-9]+-rc[0-9]+",
+    ]
+
+
 def test_coderabbit_is_an_assertive_required_reviewer_gate() -> None:
     configuration = (PROJECT_ROOT / ".coderabbit.yaml").read_text(encoding="utf-8")
 
@@ -600,11 +614,18 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert "name: Package dry-run" in ci
     assert '"$BUILD_VENV/bin/python" -m build --no-isolation' in ci
     assert (
+        '"$BUILD_VENV/bin/python" -m twine check --strict "${artifacts[@]}"'
+        in ci
+    )
+    assert (
         '"$BUILD_VENV/bin/python" -I -S -B scripts/normalize_sdist.py \\\n'
-        '            '
-        '--epoch "$SOURCE_DATE_EPOCH" dist/*.tar.gz'
+        '              --epoch "$SOURCE_DATE_EPOCH" "${sdists[0]}"'
     ) in ci
-    assert '"$BUILD_VENV/bin/python" -m twine check --strict dist/*' in ci
+    assert 'cmp -s -- "${FIRST_WHEELS[0]}" "${SECOND_WHEELS[0]}"' in ci
+    assert 'cmp -s -- "${FIRST_SDISTS[0]}" "${SECOND_SDISTS[0]}"' in ci
+    assert 'build_distribution_set "$FIRST_DIST"' in ci
+    assert 'build_distribution_set "$SECOND_DIST"' in ci
+    assert 'cp -- "${FIRST_WHEELS[0]}" "${FIRST_SDISTS[0]}" dist/' in ci
     assert 'scripts/package_smoke.sh dist "$PROJECT_VERSION" "$DIST_VERSION"' in ci
     assert (
         "name: release-candidate-${{ github.sha }}-${{ github.run_id }}-"

@@ -159,16 +159,11 @@ if ! "$PIPX_APP" --version >/dev/null 2>&1; then
   err "The new pipx environment's gpt2agent app failed its version smoke test."
   exit 1
 fi
-if ! command -v gpt2agent >/dev/null 2>&1; then
-  err "gpt2agent not on PATH after install. Open a new shell and re-run."
-  exit 1
-fi
-if [[ -n "$PIPX_BACKUP_DIR" ]]; then
-  rm -rf -- "$PIPX_BACKUP_DIR"
-  PIPX_BACKUP_DIR=""
-  trap - EXIT HUP INT TERM
-fi
 ok "gpt2agent installed"
+if ! command -v gpt2agent >/dev/null 2>&1; then
+  info "gpt2agent is installed at $PIPX_APP but its app directory is not on PATH."
+  info "Run 'pipx ensurepath', then open a new shell."
+fi
 
 # --- 4. codex login check --------------------------------------------------
 
@@ -186,12 +181,17 @@ fi
 if [[ $REGISTER -eq 1 ]]; then
   ARGS=(install --client "$CLIENT" --transport "$TRANSPORT")
   if [[ -n "$SKILL_FLAG" ]]; then ARGS+=("$SKILL_FLAG"); fi
-  gpt2agent "${ARGS[@]}"
+  "$PIPX_APP" "${ARGS[@]}"
 else
   info "Skipping client registration (--no-register). Run later:"
-  info "  gpt2agent install --client $CLIENT"
+  info "  $PIPX_APP install --client $CLIENT"
+fi
+if [[ -n "$PIPX_BACKUP_DIR" ]]; then
+  rm -rf -- "$PIPX_BACKUP_DIR"
+  PIPX_BACKUP_DIR=""
+  trap - EXIT HUP INT TERM
 fi
 
 h1 "Done."
-echo "  Try:  gpt2agent run --stdio   (manual smoke test)"
+echo "  Try:  $PIPX_APP run --stdio   (manual smoke test)"
 echo "  Or restart your MCP client (Claude Code / Codex) so it picks up the new server."

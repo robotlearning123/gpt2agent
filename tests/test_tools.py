@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from gpt2agent.errors import BackendContractError
+from gpt2agent.errors import BackendContractError, BackendHTTPError, backend_http_error
 from gpt2agent.tools import account, apps, codex, conversations, gpts, images
 from gpt2agent.tools import instructions, memory, tools_features, writes
 from gpt2agent.tools._redact import redact
@@ -576,6 +576,64 @@ def test_generate_image_does_not_echo_unexpected_exception_text() -> None:
     assert secret not in repr(out)
     assert out["assets"][0]["download_error"] == "temporarily_failed"
     assert out["assets"][0]["info_error"] == "temporarily_failed"
+
+
+def test_generate_image_distinguishes_contract_drift_from_temporary_failure() -> None:
+    client = FakeClient(
+        routes={
+            "/backend-api/files/f1/download": {
+                "download_url": "javascript:alert(1)",
+            },
+            "/backend-api/files/f1": {"id": "different-file"},
+        }
+    )
+    fn = _reg(images, client, _ToolConv()).tools["generate_image"]
+
+    out = asyncio.run(fn("a cat"))
+
+    assert out["assets"][0]["download_error"] == "contract_changed"
+    assert out["assets"][0]["info_error"] == "contract_changed"
+
+
+def test_generate_image_preserves_typed_http_enrichment_status() -> None:
+    class DeniedClient(FakeClient):
+        def get(self, path: str, target_path: str | None = None, **kwargs: Any) -> Any:
+            raise BackendHTTPError(
+                "GET", path, 403, code="access_indeterminate", retryable=False
+            )
+
+    fn = _reg(images, DeniedClient(), _ToolConv()).tools["generate_image"]
+
+    out = asyncio.run(fn("a cat"))
+
+    assert out["assets"][0]["download_error"] == "access_indeterminate"
+    assert out["assets"][0]["info_error"] == "access_indeterminate"
+
+
+def test_generate_image_treats_backend_generated_file_reads_as_fixed_probes() -> None:
+    class UnprocessableClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fixed_probe: list[bool | None] = []
+
+        def get(self, path: str, target_path: str | None = None, **kwargs: Any) -> Any:
+            fixed_probe = kwargs.get("fixed_probe")
+            self.fixed_probe.append(fixed_probe)
+            raise backend_http_error(
+                "GET",
+                path,
+                422,
+                fixed_probe=bool(fixed_probe),
+            )
+
+    client = UnprocessableClient()
+    fn = _reg(images, client, _ToolConv()).tools["generate_image"]
+
+    out = asyncio.run(fn("a cat"))
+
+    assert client.fixed_probe == [True, True]
+    assert out["assets"][0]["download_error"] == "contract_changed"
+    assert out["assets"][0]["info_error"] == "contract_changed"
 
 
 def test_generate_image_rejects_backend_file_id_before_building_a_url() -> None:

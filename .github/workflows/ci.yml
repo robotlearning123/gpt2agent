@@ -337,10 +337,65 @@ jobs:
           export SOURCE_DATE_EPOCH PYTHONHASHSEED=0 TZ=UTC
           printf 'SOURCE_DATE_EPOCH=%s\nPYTHONHASHSEED=%s\nTZ=%s\n' \
             "$SOURCE_DATE_EPOCH" "$PYTHONHASHSEED" "$TZ"
-          "$BUILD_VENV/bin/python" -m build --no-isolation
-          "$BUILD_VENV/bin/python" -I -S -B scripts/normalize_sdist.py \
-            --epoch "$SOURCE_DATE_EPOCH" dist/*.tar.gz
-          "$BUILD_VENV/bin/python" -m twine check --strict dist/*
+          FIRST_DIST="$RUNNER_TEMP/gpt2agent-first-dist"
+          SECOND_DIST="$RUNNER_TEMP/gpt2agent-second-dist"
+          cleanup_repro_build() {
+            status=$?
+            trap - EXIT HUP INT TERM
+            rm -rf -- "$FIRST_DIST" "$SECOND_DIST" dist build gpt2agent.egg-info
+            exit "$status"
+          }
+          trap cleanup_repro_build EXIT
+          trap 'exit 130' HUP INT TERM
+
+          shopt -s nullglob
+          build_distribution_set() {
+            local output=$1
+            rm -rf -- "$output" dist build gpt2agent.egg-info
+            "$BUILD_VENV/bin/python" -m build --no-isolation --outdir "$output"
+
+            local -a artifacts=("$output"/*)
+            local -a wheels=("$output"/*.whl)
+            local -a sdists=("$output"/*.tar.gz)
+            test "${#artifacts[@]}" -eq 2
+            test "${#wheels[@]}" -eq 1
+            test "${#sdists[@]}" -eq 1
+            test -f "${wheels[0]}" && test ! -L "${wheels[0]}"
+            test -f "${sdists[0]}" && test ! -L "${sdists[0]}"
+            "$BUILD_VENV/bin/python" -I -S -B scripts/normalize_sdist.py \
+              --epoch "$SOURCE_DATE_EPOCH" "${sdists[0]}"
+            "$BUILD_VENV/bin/python" -m twine check --strict "${artifacts[@]}"
+          }
+
+          build_distribution_set "$FIRST_DIST"
+          build_distribution_set "$SECOND_DIST"
+
+          FIRST_WHEELS=("$FIRST_DIST"/*.whl)
+          FIRST_SDISTS=("$FIRST_DIST"/*.tar.gz)
+          SECOND_WHEELS=("$SECOND_DIST"/*.whl)
+          SECOND_SDISTS=("$SECOND_DIST"/*.tar.gz)
+          test "$(basename -- "${FIRST_WHEELS[0]}")" = \
+            "$(basename -- "${SECOND_WHEELS[0]}")"
+          test "$(basename -- "${FIRST_SDISTS[0]}")" = \
+            "$(basename -- "${SECOND_SDISTS[0]}")"
+          cmp -s -- "${FIRST_WHEELS[0]}" "${SECOND_WHEELS[0]}"
+          cmp -s -- "${FIRST_SDISTS[0]}" "${SECOND_SDISTS[0]}"
+          sha256sum -- "${FIRST_WHEELS[0]}" "${FIRST_SDISTS[0]}"
+          sha256sum -- "${SECOND_WHEELS[0]}" "${SECOND_SDISTS[0]}"
+
+          mkdir -- dist
+          cp -- "${FIRST_WHEELS[0]}" "${FIRST_SDISTS[0]}" dist/
+          RETAINED_ARTIFACTS=(dist/*)
+          RETAINED_WHEELS=(dist/*.whl)
+          RETAINED_SDISTS=(dist/*.tar.gz)
+          test "${#RETAINED_ARTIFACTS[@]}" -eq 2
+          test "${#RETAINED_WHEELS[@]}" -eq 1
+          test "${#RETAINED_SDISTS[@]}" -eq 1
+          cmp -s -- "${FIRST_WHEELS[0]}" "${RETAINED_WHEELS[0]}"
+          cmp -s -- "${FIRST_SDISTS[0]}" "${RETAINED_SDISTS[0]}"
+
+          rm -rf -- "$FIRST_DIST" "$SECOND_DIST" build gpt2agent.egg-info
+          trap - EXIT HUP INT TERM
 
       - name: Test wheel and sdist in clean environments
         run: |

@@ -550,15 +550,16 @@ they are not an authorization boundary.
 - **Notes**:
   - Supports both the observed root-array catalog and the current
     `plugins`/`pagination.next_page_token` envelope.
-  - Root-array pagination uses a fingerprinted local cursor and fails closed if
-    the catalog changes between pages.
+  - Root-array pagination uses a process-local keyed fingerprint in its local
+    cursor and fails closed if the ordered Plugin identities change between pages.
   - Unknown nested data is not returned. Malformed known envelopes are `contract_changed`.
 
 ---
 
 ### list_installed_plugins
 
-- **Purpose**: Return installed Plugins using bounded, non-identifying fields.
+- **Purpose**: Return installed Plugins without Plugin bodies; configured
+  secret/PII shapes in bounded allowlisted fields are redacted.
 - **Parameters**: None.
 - **Returns**: `dict` with `items`, normalized to the same allowlist used by `list_plugins`.
 - **When to use**: Determine which Plugins and bounded skill/app identifiers are installed.

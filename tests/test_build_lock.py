@@ -199,16 +199,24 @@ def test_package_ci_uses_the_locked_builder_and_reproducible_build_settings() ->
     assert 'SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$GITHUB_SHA")"' in package
     assert "PYTHONHASHSEED=0" in package
     assert "TZ=UTC" in package
-    assert '"$BUILD_VENV/bin/python" -m build --no-isolation' in package
+    assert (
+        '"$BUILD_VENV/bin/python" -m build --no-isolation --outdir "$output"'
+        in package
+    )
     assert (
         '"$BUILD_VENV/bin/python" -I -S -B scripts/normalize_sdist.py \\\n'
-        '            '
-        '--epoch "$SOURCE_DATE_EPOCH" dist/*.tar.gz'
+        '              --epoch "$SOURCE_DATE_EPOCH" "${sdists[0]}"'
     ) in package
-    assert package.index("scripts/normalize_sdist.py") < package.index(
-        '"$BUILD_VENV/bin/python" -m twine check --strict dist/*'
-    )
-    assert '"$BUILD_VENV/bin/python" -m twine check --strict dist/*' in package
+    assert '"$BUILD_VENV/bin/python" -m twine check --strict "${artifacts[@]}"' in package
+    assert 'build_distribution_set "$FIRST_DIST"' in package
+    assert 'build_distribution_set "$SECOND_DIST"' in package
+    assert "build_distribution_set dist" not in package
+    assert 'cmp -s -- "${FIRST_WHEELS[0]}" "${SECOND_WHEELS[0]}"' in package
+    assert 'cmp -s -- "${FIRST_SDISTS[0]}" "${SECOND_SDISTS[0]}"' in package
+    assert 'cp -- "${FIRST_WHEELS[0]}" "${FIRST_SDISTS[0]}" dist/' in package
+    assert 'cmp -s -- "${FIRST_WHEELS[0]}" "${RETAINED_WHEELS[0]}"' in package
+    assert 'cmp -s -- "${FIRST_SDISTS[0]}" "${RETAINED_SDISTS[0]}"' in package
+    assert 'sha256sum -- "${FIRST_WHEELS[0]}" "${FIRST_SDISTS[0]}"' in package
     assert package.count("scripts/package_smoke.sh") == 1
     assert "overwrite: false" in package
 
