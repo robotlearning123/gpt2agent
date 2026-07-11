@@ -95,7 +95,8 @@ final footer as authoritative; a matching string earlier in model-authored text
 is not a receipt. Hidden dispatch and response bodies remain withheld.
 
 Regular response text and heavy Deep Research progress are buffered until the
-current message is terminal and cannot be revoked by a late visibility patch.
+current message is terminal; late visibility patches can revoke provisional
+text before it is published.
 Deep Research emits only static `web_search` / `web` tool events internally,
 never private dispatch text. An Agent polling timeout returns
 `(no final assistant response)` followed by the final activity receipt.

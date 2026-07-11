@@ -88,6 +88,67 @@ def test_regular_complete_withholds_recipient_all_connector_dispatch(
     assert "connector_openai_deep_research" not in result
 
 
+def test_agent_stream_polls_after_hidden_lifecycle_supersedes_acknowledgement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hidden = _message(
+        "private connector lifecycle",
+        message_id="hidden-lifecycle",
+        recipient="api_tool.private_connector",
+        status="in_progress",
+        metadata={"is_visually_hidden_from_conversation": True},
+    )
+    acknowledgement = _message(
+        "stale acknowledgement",
+        message_id="acknowledgement",
+        create_time=2,
+    )
+    frames = [
+        "data: "
+        + json.dumps({"conversation_id": "conversation-safe", "message": hidden}),
+        "data: "
+        + json.dumps(
+            {"conversation_id": "conversation-safe", "message": acknowledgement}
+        ),
+        "data: "
+        + json.dumps({"conversation_id": "conversation-safe", "message": hidden}),
+        "data: [DONE]",
+    ]
+    _patch_sse_frames(monkeypatch, frames)
+
+    class _PollingBackend(_Backend):
+        def get(self, *_: Any, **__: Any) -> dict[str, Any]:
+            return {
+                "mapping": {
+                    "final": {
+                        "message": _message(
+                            "safe final",
+                            message_id="safe-final",
+                            create_time=3,
+                        )
+                    }
+                }
+            }
+
+    async def _no_sleep(*_: Any, **__: Any) -> None:
+        return None
+
+    monkeypatch.setattr(sse_mod.asyncio, "sleep", _no_sleep)
+    client = sse_mod.ConversationClient(_PollingBackend())  # type: ignore[arg-type]
+
+    result = asyncio.run(
+        client.complete(
+            "gpt-5-3",
+            [{"role": "user", "content": "question"}],
+            poll_async=True,
+        )
+    )
+
+    assert result == "safe final" + _SAFE_RECEIPT_SUFFIX.format(category="connector")
+    assert "stale acknowledgement" not in result
+    assert "private connector lifecycle" not in result
+
+
 def test_heavy_dr_withholds_recipient_all_connector_dispatch_and_emits_receipt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

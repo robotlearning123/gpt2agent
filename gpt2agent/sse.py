@@ -1558,7 +1558,12 @@ class ConversationClient:
                 _validate_metadata_bounds(metadata, adapter="conversation_stream")
                 current_metadata = metadata
                 if current_visibility_revoked or not _is_visible_assistant_message(message):
-                    if role != "assistant" or not started_new or not candidate_was_known:
+                    if (
+                        current_visibility_revoked
+                        or role != "assistant"
+                        or not started_new
+                        or not candidate_was_known
+                    ):
                         candidate_text.clear()
                     _revoke_current_visibility()
                     return
