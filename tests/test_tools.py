@@ -1,6 +1,6 @@
 """Unit tests for the MCP tool layer — no network.
 
-Round-2 coverage: the 25-tool handler surface (the product's actual value) had
+Round-2 coverage began with the original 25-tool handler surface, which had
 zero direct unit tests. These exercise every `tools/*.py` handler through its
 real `register(mcp, client, conv=None)` signature using a recording FakeMCP +
 FakeClient, and the server.py SSE closures via FastMCP's tool manager with a
@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from gpt2agent.errors import BackendContractError
 from gpt2agent.tools import account, apps, codex, conversations, gpts, images
 from gpt2agent.tools import instructions, memory, tools_features, writes
 from gpt2agent.tools._redact import redact
@@ -41,6 +42,9 @@ class FakeClient:
         self.posts = posts or {}
         self.posted: list[tuple[str, Any]] = []
         self.gets: list[str] = []
+
+    def request_headers(self) -> dict[str, str]:
+        return {"Authorization": "Bearer TEST_ACCOUNT"}
 
     def get(self, path: str, target_path: str | None = None, **k: Any) -> Any:
         self.gets.append(path)
@@ -81,10 +85,12 @@ class _ToolConv:
         self.tool_calls.append({"prompt": prompt, "model": model, "temporary": temporary})
         return {"conversation_id": "c", "text": "ran", "tool_calls": [], "tool_responses": []}
 
-    async def image_gen(self, prompt, *, model="gpt-5-3"):
-        self.image_gen_calls.append({"prompt": prompt, "model": model})
+    async def image_gen(self, prompt, *, model="gpt-5-3", auth_headers=None):
+        self.image_gen_calls.append(
+            {"prompt": prompt, "model": model, "auth_headers": auth_headers}
+        )
         return {"conversation_id": "c", "assets": [
-            {"file_id": "f1", "asset_pointer": "sediment://file-1", "width": 4, "height": 2}]}
+            {"file_id": "f1", "asset_pointer": "sediment://f1", "width": 4, "height": 2}]}
 
 
 # --------------------------------------------------------------------------- #
@@ -129,6 +135,37 @@ def test_account_status_empty_accounts_no_crash() -> None:
     out = _run(_reg(account, client).tools["account_status"])
     assert out["features_count"] == 0
     assert out["subscription"] is None
+
+
+def test_account_status_reuses_one_auth_snapshot_for_both_reads() -> None:
+    class SnapshotClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__(
+                routes={
+                    "/backend-api/me": {},
+                    "/backend-api/accounts/check": {"accounts": {}},
+                }
+            )
+            self.snapshot_calls = 0
+            self.auth_headers: list[dict | None] = []
+
+        def request_headers(self):
+            self.snapshot_calls += 1
+            return {"Authorization": "Bearer OPERATION_A"}
+
+        def get(self, path: str, **kwargs: Any) -> Any:
+            self.auth_headers.append(kwargs.get("auth_headers"))
+            return super().get(path, **kwargs)
+
+    client = SnapshotClient()
+
+    _run(_reg(account, client).tools["account_status"])
+
+    assert client.snapshot_calls == 1
+    assert client.auth_headers == [
+        {"Authorization": "Bearer OPERATION_A"},
+        {"Authorization": "Bearer OPERATION_A"},
+    ]
 
 
 def test_list_models_exposes_slug() -> None:
@@ -283,15 +320,21 @@ def test_apps_classify() -> None:
     assert apps._classify("") == "unknown"
 
 
-def test_list_apps_filters_nondict_and_connected_fallback() -> None:
+def test_list_apps_normalizes_string_ids_and_connected_fallback() -> None:
     client = FakeClient(routes={"/backend-api/apps/list": {"apps": [
         {"id": "connector_a", "enabled": True, "is_connected": True},
         {"id": "asdk_app_b", "connected": False},
         "not-a-dict"]}})
     out = _run(_reg(apps, client).tools["list_apps"])
-    assert len(out) == 2  # string filtered out
+    assert len(out) == 3
     assert out[0]["type"] == "official_connector"
     assert out[1]["connected"] is False  # `connected` fallback used
+    assert out[2] == {
+        "id": "not-a-dict",
+        "type": "unknown",
+        "enabled": None,
+        "connected": None,
+    }
 
 
 def test_list_codex_envs_repo_count_and_envelope() -> None:
@@ -324,16 +367,54 @@ def test_list_codex_tasks_unwraps_redacts_and_truncates() -> None:
 
 def test_get_file_info_and_download_url() -> None:
     client = FakeClient(routes={
-        "/backend-api/files/f1/download": {"download_url": "https://dl/x"},
+        "/backend-api/files/f1/download": {
+            "download_url": "https://downloads.example.com/x"
+        },
         "/backend-api/files/f1": {"id": "f1", "name": "img.png"}})
     mcp = _reg(images, client, conv=object())
     assert _run(mcp.tools["get_file_info"], "f1")["name"] == "img.png"
-    assert _run(mcp.tools["get_file_download_url"], "f1") == "https://dl/x"
+    assert _run(mcp.tools["get_file_download_url"], "f1") == (
+        "https://downloads.example.com/x"
+    )
     # missing download_url -> ""
     c2 = FakeClient(routes={"/backend-api/files/f2/download": {}})
     assert _run(
         _reg(images, c2, conv=object()).tools["get_file_download_url"], "f2"
     ) == ""
+
+
+def test_get_file_info_projects_only_bounded_contract_fields() -> None:
+    secret = "SYNTHETIC-FILE-SECRET"
+    client = FakeClient(
+        routes={
+            "/backend-api/files/f1": {
+                "id": "f1",
+                "name": "owner@example.com image.png",
+                "size": 42,
+                "file_size_bytes": 42,
+                "use_case": "multimodal",
+                "state": "ready",
+                "creation_time": "2026-07-10T00:00:00Z",
+                "mime_type": "image/png",
+                "opaque": {"access_token": secret},
+                "signed_url": f"https://private.invalid/?token={secret}",
+            }
+        }
+    )
+
+    result = _run(_reg(images, client, conv=object()).tools["get_file_info"], "f1")
+
+    assert secret not in repr(result)
+    assert result == {
+        "id": "f1",
+        "name": "<EMAIL> image.png",
+        "size": 42,
+        "file_size_bytes": 42,
+        "use_case": "multimodal",
+        "state": "ready",
+        "creation_time": "2026-07-10T00:00:00Z",
+        "mime_type": "image/png",
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -358,9 +439,20 @@ def test_codex_task_create_raises_on_ambiguous_label() -> None:
 
 
 def test_codex_task_create_builds_payload_shape() -> None:
-    client = FakeClient(posts={"/backend-api/codex/tasks": {"ok": True}})
+    secret = "SYNTHETIC-CODEX-SECRET"
+    client = FakeClient(
+        posts={
+            "/backend-api/codex/tasks": {
+                "task": {"id": "task-1", "private": secret},
+                "turn": {"turn_status": "queued"},
+                "internal": {"access_token": secret},
+            }
+        }
+    )
     fn = _reg(writes, client).tools["codex_task_create"]
-    _run(fn, repo_label="ignored", prompt="do it", environment_id="envXYZ", branch="dev")
+    result = _run(
+        fn, repo_label="ignored", prompt="do it", environment_id="envXYZ", branch="dev"
+    )
     path, payload = client.posted[-1]
     assert path == "/backend-api/codex/tasks"
     assert payload == {
@@ -369,6 +461,8 @@ def test_codex_task_create_builds_payload_shape() -> None:
                          "content": [{"content_type": "text", "text": "do it"}]}]}
     # env supplied -> no environments GET
     assert all("environments" not in g for g in client.gets)
+    assert result == {"id": "task-1", "status": "queued"}
+    assert secret not in repr(result)
 
 
 def test_custom_instructions_set_preserves_unsupplied_fields() -> None:
@@ -383,6 +477,52 @@ def test_custom_instructions_set_preserves_unsupplied_fields() -> None:
     assert payload["enabled"] is True
     assert payload["disabled_tools"] == ["t"]
     assert payload["about_model_message"] == "new"  # overridden
+
+
+@pytest.mark.parametrize("tool_name", ["custom_instructions_set", "codex_task_create"])
+def test_compound_writes_reuse_one_auth_snapshot(tool_name: str) -> None:
+    class SnapshotWriteClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__(
+                routes={
+                    "/backend-api/user_system_messages": {},
+                    "/backend-api/codex/environments": {
+                        "environments": [{"id": "env-a", "label": "repo/a"}]
+                    },
+                },
+                posts={
+                    "/backend-api/user_system_messages": {"ok": True},
+                    "/backend-api/codex/tasks": {"task": {"id": "task-1"}},
+                },
+            )
+            self.snapshot_calls = 0
+            self.auth_headers: list[dict | None] = []
+
+        def request_headers(self) -> dict[str, str]:
+            self.snapshot_calls += 1
+            return {"Authorization": "Bearer OPERATION_A"}
+
+        def get(self, path: str, **kwargs: Any) -> Any:
+            self.auth_headers.append(kwargs.get("auth_headers"))
+            return super().get(path, **kwargs)
+
+        def post(self, path: str, **kwargs: Any) -> Any:
+            self.auth_headers.append(kwargs.get("auth_headers"))
+            return super().post(path, **kwargs)
+
+    client = SnapshotWriteClient()
+    fn = _reg(writes, client).tools[tool_name]
+
+    if tool_name == "custom_instructions_set":
+        _run(fn, about_model="new")
+    else:
+        _run(fn, repo_label="repo/a", prompt="do it")
+
+    assert client.snapshot_calls == 1
+    assert client.auth_headers == [
+        {"Authorization": "Bearer OPERATION_A"},
+        {"Authorization": "Bearer OPERATION_A"},
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -410,12 +550,95 @@ def test_canvas_execute_temporary_false_and_prefixes_prompt() -> None:
 def test_generate_image_enriches_assets_with_download_url() -> None:
     conv = _ToolConv()
     client = FakeClient(routes={
-        "/backend-api/files/f1/download": {"download_url": "https://dl/img", "file_name": "img.png"},
+        "/backend-api/files/f1/download": {
+            "download_url": "https://downloads.example.com/img",
+            "file_name": "img.png",
+        },
         "/backend-api/files/f1": {"name": "img.png"}})
     fn = _reg(images, client, conv).tools["generate_image"]
     out = asyncio.run(fn("a cat"))
     assert conv.image_gen_calls[-1]["prompt"] == "a cat"
-    assert out["assets"][0]["download_url"] == "https://dl/img"
+    assert out["assets"][0]["download_url"] == (
+        "https://downloads.example.com/img"
+    )
+
+
+def test_generate_image_does_not_echo_unexpected_exception_text() -> None:
+    secret = "Bearer synthetic-private-download-secret"
+
+    class FailingClient(FakeClient):
+        def get(self, path: str, target_path: str | None = None, **k: Any) -> Any:
+            raise RuntimeError(secret)
+
+    fn = _reg(images, FailingClient(), _ToolConv()).tools["generate_image"]
+    out = asyncio.run(fn("a cat"))
+
+    assert secret not in repr(out)
+    assert out["assets"][0]["download_error"] == "temporarily_failed"
+    assert out["assets"][0]["info_error"] == "temporarily_failed"
+
+
+def test_generate_image_rejects_backend_file_id_before_building_a_url() -> None:
+    class MalformedConversation(_ToolConv):
+        async def image_gen(self, prompt, *, model="gpt-5-3", auth_headers=None):
+            return {
+                "conversation_id": "c",
+                "assets": [
+                    {
+                        "file_id": "../private",
+                        "asset_pointer": "sediment://../private",
+                    }
+                ],
+            }
+
+    client = FakeClient()
+    fn = _reg(images, client, MalformedConversation()).tools["generate_image"]
+
+    with pytest.raises(BackendContractError):
+        asyncio.run(fn("a cat"))
+    assert client.gets == []
+
+
+def test_generate_image_reuses_one_auth_snapshot_for_stream_and_file_reads() -> None:
+    snapshot = {"Authorization": "Bearer OPERATION_A"}
+
+    class SnapshotClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__(
+                routes={
+                    "/backend-api/files/f1/download": {},
+                    "/backend-api/files/f1": {"name": "img.png"},
+                }
+            )
+            self.snapshot_calls = 0
+            self.auth_headers: list[dict[str, str] | None] = []
+
+        def request_headers(self) -> dict[str, str]:
+            self.snapshot_calls += 1
+            return snapshot
+
+        def get(self, path: str, **kwargs: Any) -> Any:
+            self.auth_headers.append(kwargs.get("auth_headers"))
+            return super().get(path, **kwargs)
+
+    class SnapshotConversation(_ToolConv):
+        def __init__(self) -> None:
+            super().__init__()
+            self.auth_headers: dict[str, str] | None = None
+
+        async def image_gen(self, prompt, *, model="gpt-5-3", auth_headers=None):
+            self.auth_headers = auth_headers
+            return await super().image_gen(prompt, model=model)
+
+    client = SnapshotClient()
+    conv = SnapshotConversation()
+    fn = _reg(images, client, conv).tools["generate_image"]
+
+    asyncio.run(fn("a cat"))
+
+    assert client.snapshot_calls == 1
+    assert conv.auth_headers is snapshot
+    assert client.auth_headers == [snapshot, snapshot]
 
 
 # --------------------------------------------------------------------------- #
@@ -431,10 +654,12 @@ class _RecordConv:
         self.heavy_events: list[dict] = []
 
     async def complete(self, model, messages, *, temporary=True, gizmo_id=None,
-                       poll_async=False):
+                       poll_async=False, thinking_effort=None, auth_headers=None):
         self.complete_calls.append({"model": model, "messages": messages,
                                     "temporary": temporary, "gizmo_id": gizmo_id,
-                                    "poll_async": poll_async})
+                                    "poll_async": poll_async,
+                                    "thinking_effort": thinking_effort,
+                                    "auth_headers": auth_headers})
         return self.reply
 
     def deep_research(self, q):
@@ -454,13 +679,37 @@ class _RecordConv:
 
 def _build_with_conv(monkeypatch, conv):
     import gpt2agent.backend as backend_mod
+    import gpt2agent.model_catalog as model_catalog_mod
     import gpt2agent.sse as sse_mod
     from gpt2agent.server import build_server
 
-    monkeypatch.setattr(backend_mod, "BackendClient", lambda *a, **k: object())
+    class _Catalog:
+        def __init__(self) -> None:
+            self.validations: list[tuple[str, str | None]] = []
+            self.auth_snapshots: list[tuple[int, dict] | None] = []
+
+        async def validate_general(self, model, thinking_effort, *, auth_snapshot=None):
+            self.validations.append((model, thinking_effort))
+            self.auth_snapshots.append(auth_snapshot)
+            return {"slug": model}
+
+        async def general(self):
+            return []
+
+        async def work(self):
+            return []
+
+    class _Backend:
+        def auth_snapshot(self):
+            return 7, {"Authorization": "Bearer OPERATION_ACCOUNT"}
+
+    monkeypatch.setattr(backend_mod, "BackendClient", lambda *a, **k: _Backend())
     monkeypatch.setattr(sse_mod, "ConversationClient", lambda *a, **k: conv)
+    catalog = _Catalog()
+    monkeypatch.setattr(model_catalog_mod, "ModelCatalog", lambda *a, **k: catalog)
     mcp = build_server({"server": {"host": "127.0.0.1", "port": 9000},
                         "models": {"chat": "gpt-5-3", "agent": "agent-mode"}})
+    conv.catalog = catalog
     return mcp._tool_manager._tools
 
 
@@ -480,6 +729,28 @@ def test_chat_does_not_poll_async(monkeypatch) -> None:
     tools = _build_with_conv(monkeypatch, conv)
     asyncio.run(tools["chat"].fn("hi"))
     assert conv.complete_calls[-1]["poll_async"] is False
+
+
+def test_chat_validates_and_forwards_thinking_effort(monkeypatch) -> None:
+    conv = _RecordConv()
+    tools = _build_with_conv(monkeypatch, conv)
+
+    asyncio.run(tools["chat"].fn("hi", "gpt-5-3", True, "high"))
+
+    assert conv.catalog.validations[-1] == ("gpt-5-3", "high")
+    assert conv.complete_calls[-1]["thinking_effort"] == "high"
+
+
+def test_chat_model_validation_and_send_share_one_auth_snapshot(monkeypatch) -> None:
+    conv = _RecordConv()
+    tools = _build_with_conv(monkeypatch, conv)
+
+    asyncio.run(tools["chat"].fn("hi"))
+
+    generation, validation_headers = conv.catalog.auth_snapshots[-1]
+    assert generation == 7
+    assert validation_headers == {"Authorization": "Bearer OPERATION_ACCOUNT"}
+    assert conv.complete_calls[-1]["auth_headers"] == validation_headers
 
 
 def test_gpt_chat_temporary_false_and_passes_gizmo(monkeypatch) -> None:
@@ -524,21 +795,220 @@ def test_deep_research_imperative_prefix_toggle(monkeypatch) -> None:
 def test_deep_research_dedupes_sources(monkeypatch) -> None:
     conv = _RecordConv()
     conv.dr_events = [{"type": "done", "text": "Body", "content_references": [
-        {"items": [{"url": "https://a", "title": "A"}, {"url": "https://a", "title": "A2"}]},
-        {"items": [{"url": "https://b", "title": "B"}, {"title": "no-url"}]}]}]
+        {"items": [{"url": "https://a.example.com", "title": "A"}, {"url": "https://a.example.com", "title": "A2"}]},
+        {"items": [{"url": "https://b.example.com", "title": "B"}, {"title": "no-url"}]}]}]
     tools = _build_with_conv(monkeypatch, conv)
     out = asyncio.run(tools["deep_research"].fn("q", False))
-    assert out.count("https://a") == 1  # deduped
-    assert "https://b" in out
+    assert out.count("https://a.example.com") == 1  # deduped
+    assert "https://b.example.com" in out
     assert "no-url" not in out  # missing url dropped
 
 
+@pytest.mark.parametrize("tool_name", ["deep_research", "deep_research_heavy"])
+def test_deep_research_sources_are_projected_without_secrets_or_markdown_injection(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+) -> None:
+    token_secret = "SYNTHETIC_CITATION_TOKEN_SECRET"
+    userinfo_secret = "SYNTHETIC_CITATION_USERINFO_SECRET"
+    fragment_secret = "SYNTHETIC_CITATION_FRAGMENT_SECRET"
+    opaque_secret = "SYNTHETIC_CITATION_OPAQUE_SECRET"
+    exception_secret = "SYNTHETIC_CITATION_EXCEPTION_SECRET"
+    api_key = "sk-" + "a" * 24
+
+    class _Opaque:
+        def __str__(self) -> str:
+            raise AssertionError(opaque_secret)
+
+    refs = [
+        {
+            "items": [
+                {
+                    "url": (
+                        "HTTPS://Example.COM:443/report?safe=1&utm_source=private"
+                        f"&access_token={token_secret}#{fragment_secret}"
+                    ),
+                    "title": (
+                        "Unsafe [source](https://evil.example) owner@example.com "
+                        + api_key
+                    ),
+                },
+                {
+                    "url": "https://example.com/report?safe=1",
+                    "title": "duplicate must not win",
+                },
+                {
+                    "url": f"https://user:{userinfo_secret}@example.com/private",
+                    "title": "credentialed URL",
+                },
+                {"url": "javascript:alert(1)", "title": "script"},
+                {"url": "ftp://example.com/file", "title": "ftp"},
+                {"url": _Opaque(), "title": _Opaque()},
+                {
+                    "url": "https://safe.example/exception-title",
+                    "title": RuntimeError(exception_secret),
+                },
+                RuntimeError(exception_secret),
+            ]
+        },
+        RuntimeError(exception_secret),
+    ]
+    conv = _RecordConv()
+    event = {"type": "done", "text": "Body", "content_references": refs}
+    if tool_name == "deep_research":
+        conv.dr_events = [event]
+    else:
+        conv.heavy_events = [event]
+    tools = _build_with_conv(monkeypatch, conv)
+
+    out = asyncio.run(tools[tool_name].fn("q", False))
+
+    assert out.count("https://example.com/report?safe=1") == 1
+    assert "access_token" not in out
+    assert "utm_source" not in out
+    assert token_secret not in out
+    assert userinfo_secret not in out
+    assert fragment_secret not in out
+    assert opaque_secret not in out
+    assert exception_secret not in out
+    assert "owner@example.com" not in out
+    assert api_key not in out
+    assert "javascript:" not in out
+    assert "ftp://" not in out
+    assert r"\[source\]\(https://evil.example\)" in out
+    assert "https://safe.example/exception-title" in out
+    assert "[Source]" in out
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "http://127.0.0.1:8000/admin",
+        "http://169.254.169.254/latest/meta-data",
+        "http://localhost:3000/secret",
+        "http://[::1]/x",
+        "https://10.0.0.1/x",
+        "https://service.internal/x",
+        "https://printer.local/x",
+        "https://intranet/x",
+        "https://public.example.com:8443/admin",
+    ),
+)
+def test_deep_research_source_renderer_rejects_nonpublic_targets(url: str) -> None:
+    from gpt2agent import server as server_mod
+
+    refs = [{"items": [{"url": url, "title": "must be omitted"}]}]
+
+    assert server_mod._render_dr_sources(refs) == ""
+
+
+def test_deep_research_source_renderer_bounds_counts_types_and_lengths() -> None:
+    from gpt2agent import server as server_mod
+
+    items: list[object] = [
+        None,
+        RuntimeError("SYNTHETIC_RENDER_EXCEPTION_SECRET"),
+        {"url": "https://example.com/" + "x" * 3_000, "title": "too long"},
+        {"url": "https://bounded.example/first", "title": "T" * 1_000},
+    ]
+    items.extend(
+        {"url": f"https://bounded.example/{index}", "title": f"Source {index}"}
+        for index in range(200)
+    )
+    refs: list[object] = [None, {"items": "not-a-list"}, {"items": items}]
+
+    rendered = server_mod._render_dr_sources(refs)
+
+    assert rendered.count("\n- ") == server_mod._MAX_RENDERED_CITATIONS
+    assert "T" * server_mod._MAX_CITATION_TITLE_LENGTH in rendered
+    assert "T" * (server_mod._MAX_CITATION_TITLE_LENGTH + 1) not in rendered
+    assert "too long" not in rendered
+    assert "SYNTHETIC_RENDER_EXCEPTION_SECRET" not in rendered
+    assert server_mod._render_dr_sources({"items": items}) == ""
+
+
+@pytest.mark.parametrize(
+    "query_name",
+    [
+        "access_token",
+        "auth",
+        "Authorization",
+        "signature",
+        "sig",
+        "api_key",
+        "key",
+        "session_id",
+        "password",
+        "oauth_code",
+        "X-Amz-Credential",
+        "X-Amz-Signature",
+        "utm_source",
+    ],
+)
+def test_deep_research_source_renderer_strips_sensitive_query_fields(
+    query_name: str,
+) -> None:
+    from gpt2agent import server as server_mod
+
+    secret = "SYNTHETIC_QUERY_PARAMETER_SECRET"
+    refs = [
+        {
+            "items": [
+                {
+                    "url": (
+                        f"HTTP://Example.COM:80/report?safe=1&{query_name}={secret}"
+                        "#SYNTHETIC_FRAGMENT_SECRET"
+                    ),
+                    "title": "Source",
+                }
+            ]
+        }
+    ]
+
+    rendered = server_mod._render_dr_sources(refs)
+
+    assert "http://example.com/report?safe=1" in rendered
+    assert query_name not in rendered
+    assert secret not in rendered
+    assert "SYNTHETIC_FRAGMENT_SECRET" not in rendered
+
+
+@pytest.mark.parametrize(
+    "encoded_path",
+    [
+        "private/owner%40example.com",
+        "private/sk%2Daaaaaaaaaaaaaaaaaaaaaaaa",
+        "private/owner%2540example.com",
+    ],
+)
+def test_deep_research_source_renderer_rejects_encoded_secrets_in_paths(
+    encoded_path: str,
+) -> None:
+    from gpt2agent import server as server_mod
+
+    refs = [
+        {
+            "items": [
+                {
+                    "url": f"https://example.com/{encoded_path}",
+                    "title": "must be omitted",
+                }
+            ]
+        }
+    ]
+
+    assert server_mod._render_dr_sources(refs) == ""
+
+
 def test_deep_research_heavy_appends_connector_warning(monkeypatch) -> None:
+    secret = "SYNTHETIC_MCP_TOOL_ERROR_SECRET account@example.com"
     conv = _RecordConv()
     conv.heavy_events = [{"type": "done", "text": "Body", "content_references": [],
                           "connector_failed": True},
-                         {"type": "tool_error", "message": "boom line\nsecond"}]
+                         {"type": "tool_error", "code": "connector_unavailable",
+                          "message": secret}]
     tools = _build_with_conv(monkeypatch, conv)
     out = asyncio.run(tools["deep_research_heavy"].fn("q", False))
     assert "DR connector unavailable" in out
-    assert "boom line" in out
+    assert "Server message" not in out
+    assert secret not in out

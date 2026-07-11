@@ -1,0 +1,151 @@
+{
+  "custom_deployment_protection_rules": {
+    "custom_deployment_protection_rules": [],
+    "total_count": 0
+  },
+  "deployment_branch_policies": {
+    "branch_policies": [
+      {
+        "id": 301,
+        "name": "v*",
+        "type": "tag"
+      }
+    ],
+    "total_count": 1
+  },
+  "environment": {
+    "can_admins_bypass": false,
+    "deployment_branch_policy": {
+      "custom_branch_policies": true,
+      "protected_branches": false
+    },
+    "name": "pypi",
+    "protection_rules": [
+      {
+        "id": 201,
+        "prevent_self_review": true,
+        "reviewers": [
+          {
+            "reviewer": {
+              "id": 41,
+              "login": "independent-release-reviewer"
+            },
+            "type": "User"
+          }
+        ],
+        "type": "required_reviewers"
+      },
+      {
+        "id": 202,
+        "type": "branch_policy"
+      }
+    ]
+  },
+  "policy": {
+    "pypi_gate": {
+      "kind": "reviewer",
+      "login": "independent-release-reviewer"
+    },
+    "release_tag_app": {
+      "id": 101
+    },
+    "required_check_app": {
+      "id": 15368
+    },
+    "repository": "example/gpt2agent",
+    "schema_version": 1
+  },
+  "repository": {
+    "default_branch": "main",
+    "full_name": "example/gpt2agent"
+  },
+  "rulesets": [
+    {
+      "bypass_actors": [
+        {
+          "actor_id": 101,
+          "actor_type": "Integration",
+          "bypass_mode": "always"
+        }
+      ],
+      "conditions": {
+        "ref_name": {
+          "exclude": [],
+          "include": [
+            "refs/tags/v*"
+          ]
+        }
+      },
+      "enforcement": "active",
+      "id": 1,
+      "rules": [
+        {
+          "type": "creation"
+        }
+      ],
+      "target": "tag"
+    },
+    {
+      "bypass_actors": [],
+      "conditions": {
+        "ref_name": {
+          "exclude": [],
+          "include": [
+            "refs/tags/v*"
+          ]
+        }
+      },
+      "enforcement": "active",
+      "id": 2,
+      "rules": [
+        {
+          "type": "deletion"
+        },
+        {
+          "type": "non_fast_forward"
+        },
+        {
+          "type": "update"
+        }
+      ],
+      "target": "tag"
+    },
+    {
+      "bypass_actors": [],
+      "conditions": {
+        "ref_name": {
+          "exclude": [],
+          "include": [
+            "refs/heads/main"
+          ]
+        }
+      },
+      "enforcement": "active",
+      "id": 3,
+      "rules": [
+        {
+          "parameters": {
+            "dismiss_stale_reviews_on_push": true,
+            "required_approving_review_count": 1,
+            "required_review_thread_resolution": true
+          },
+          "type": "pull_request"
+        },
+        {
+          "parameters": {
+            "required_status_checks": [
+              {
+                "context": "Required checks",
+                "integration_id": 15368
+              }
+            ],
+            "strict_required_status_checks_policy": true
+          },
+          "type": "required_status_checks"
+        }
+      ],
+      "target": "branch"
+    }
+  ],
+  "schema_version": 1
+}

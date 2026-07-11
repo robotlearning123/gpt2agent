@@ -7,9 +7,9 @@ Two modes:
 
 Outputs (in --out-dir):
   report.md   final markdown report
-  events.jsonl all raw SSE events
-  status.txt  START / DONE / INCOMPLETE / ERROR + elapsed
-  meta.json   server metadata (model slug, request id, plan type, ...)
+  status.txt  shape-only START / DONE / INCOMPLETE / ERROR diagnostics
+
+Raw SSE events and server metadata are deliberately never persisted.
 
 Run with any Python that has gpt2agent installed, e.g.
 
@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import os
 import sys
 import tempfile
@@ -63,11 +62,12 @@ def _write_private_text(path: Path, content: str) -> None:
 
 
 def _record_error(status_path: Path, started_at: float, exc: Exception) -> int:
-    message = f"{type(exc).__name__}: {exc}"
+    error_type = type(exc).__name__
     try:
         _write_private_text(
             status_path,
-            f"ERROR\t{message}\telapsed={time.time() - started_at:.0f}s\n",
+            f"ERROR\terror_type={error_type}\t"
+            f"elapsed={time.time() - started_at:.0f}s\n",
         )
     except Exception as status_exc:
         # The status path itself may be the artifact that cannot be written.
@@ -77,7 +77,7 @@ def _record_error(status_path: Path, started_at: float, exc: Exception) -> int:
             file=sys.stderr,
             flush=True,
         )
-    print(f"[error] {message}", flush=True)
+    print(f"[error] {error_type}; private exception content omitted", flush=True)
     return 2
 
 
@@ -99,17 +99,13 @@ async def _run(query: str, mode: str, out_dir: Path) -> int:
         out_dir.chmod(0o700)
     except OSError:
         pass
-    events_path = out_dir / "events.jsonl"
     report_path = out_dir / "report.md"
     status_path = out_dir / "status.txt"
-    meta_path = out_dir / "meta.json"
 
     t0 = time.time()
     initialization_error: Exception | None = None
     initial_artifacts = (
-        (events_path, ""),
         (report_path, ""),
-        (meta_path, "[]\n"),
         (
             status_path,
             f"START\t{time.strftime('%Y-%m-%d %H:%M:%S')}\tmode={mode}\n",
@@ -143,73 +139,64 @@ async def _run(query: str, mode: str, out_dir: Path) -> int:
     light_groups: list = []
     progress_before_done: list[str] = []
     progress_after_done: list[str] = []
-    tool_calls: list[str] = []
-    meta_data: list = []
-    tool_error_msg = ""
+    tool_call_count = 0
+    meta_event_count = 0
+    tool_error_count = 0
     connector_failed = False
 
     try:
-        events_file = _open_private_text(events_path)
+        async for ev in gen:
+            n_events += 1
+            et = ev.get("type")
+            if et == "tool":
+                tool_call_count += 1
+            elif et == "tool_error":
+                tool_error_count += 1
+            elif et == "meta":
+                meta_event_count += 1
+            elif et == "clarification_auto_reply":
+                # A clean `done` immediately before this event was only a
+                # clarification question, not a completed report. Reset all
+                # report/terminal candidates so only the follow-up round can
+                # complete the run.
+                seen_first_done = False
+                terminal_done_complete = False
+                terminal_done_reason = "clarification follow-up did not complete"
+                light_final_text = ""
+                light_refs = []
+                light_groups = []
+                progress_before_done = []
+                progress_after_done = []
+            elif et == "done":
+                txt = ev.get("text", "") or ""
+                if ev.get("connector_failed"):
+                    connector_failed = True
+                if ev.get("timeout"):
+                    terminal_done_complete = False
+                    terminal_done_reason = "polling timed out"
+                elif ev.get("terminated_abnormally"):
+                    terminal_done_complete = False
+                    terminal_done_reason = "stream terminated abnormally"
+                else:
+                    terminal_done_complete = True
+                    terminal_done_reason = ""
+                # Pick the LONGEST done as the real report. The research model
+                # often emits a short tool-dispatch JSON as the FIRST done; the
+                # real report is a later, longer done.
+                if not seen_first_done or len(txt) > len(light_final_text):
+                    light_final_text = txt
+                    light_refs = ev.get("content_references", []) or light_refs
+                    light_groups = ev.get("search_result_groups", []) or light_groups
+                seen_first_done = True
+            elif et == "progress":
+                txt = ev.get("text", "")
+                (progress_after_done if seen_first_done else progress_before_done).append(
+                    txt
+                )
+            if n_events % 100 == 0:
+                print(f"[t+{int(time.time() - t0)}s] events={n_events}", flush=True)
     except Exception as exc:
         return _record_error(status_path, t0, exc)
-
-    with events_file as ef:
-        try:
-            async for ev in gen:
-                n_events += 1
-                ef.write(json.dumps(ev, default=str) + "\n")
-                ef.flush()
-                et = ev.get("type")
-                if et == "tool":
-                    tool_calls.append(ev.get("call", ""))
-                elif et == "tool_error":
-                    tool_error_msg = ev.get("message", "")
-                elif et == "meta":
-                    md = ev.get("data") or {}
-                    meta_data.append(md)
-                elif et == "clarification_auto_reply":
-                    # A clean `done` immediately before this event was only a
-                    # clarification question, not a completed report. Reset all
-                    # report/terminal candidates so only the follow-up round can
-                    # complete the run.
-                    seen_first_done = False
-                    terminal_done_complete = False
-                    terminal_done_reason = "clarification follow-up did not complete"
-                    light_final_text = ""
-                    light_refs = []
-                    light_groups = []
-                    progress_before_done = []
-                    progress_after_done = []
-                elif et == "done":
-                    txt = ev.get("text", "") or ""
-                    if ev.get("connector_failed"):
-                        connector_failed = True
-                    if ev.get("timeout"):
-                        terminal_done_complete = False
-                        terminal_done_reason = "polling timed out"
-                    elif ev.get("terminated_abnormally"):
-                        terminal_done_complete = False
-                        terminal_done_reason = "stream terminated abnormally"
-                    else:
-                        terminal_done_complete = True
-                        terminal_done_reason = ""
-                    # Pick the LONGEST done as the real report. The research model
-                    # often emits a short tool-dispatch JSON as the FIRST done
-                    # (e.g. {"queries": [...], "source_filter": [...]}); the real
-                    # report is a later, longer done. Taking the first done here
-                    # silently discarded the actual report (observed 2026-06-03).
-                    if not seen_first_done or len(txt) > len(light_final_text):
-                        light_final_text = txt
-                        light_refs = ev.get("content_references", []) or light_refs
-                        light_groups = ev.get("search_result_groups", []) or light_groups
-                    seen_first_done = True
-                elif et == "progress":
-                    txt = ev.get("text", "")
-                    (progress_after_done if seen_first_done else progress_before_done).append(txt)
-                if n_events % 100 == 0:
-                    print(f"[t+{int(time.time() - t0)}s] events={n_events}", flush=True)
-        except Exception as exc:
-            return _record_error(status_path, t0, exc)
 
     # --- Build report body ---
     if mode == "heavy":
@@ -236,8 +223,8 @@ async def _run(query: str, mode: str, out_dir: Path) -> int:
     notes_block = ""
     if connector_failed:
         notes_block += "\n\n> **Note:** Deep Research connector reported failure — text may be a fallback answer.\n"
-    if tool_error_msg:
-        notes_block += f"\n\n> **Tool error:** {tool_error_msg}\n"
+    if tool_error_count:
+        notes_block += "\n\n> **Tool error:** One or more tool calls failed.\n"
     if mode == "heavy" and not lines:
         notes_block += "\n\n> **Citations:** No grouped source list in this report's widget state; the model may have written source URLs inline in the body instead.\n"
 
@@ -246,15 +233,13 @@ async def _run(query: str, mode: str, out_dir: Path) -> int:
         f"- Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"- Mode: `{mode}`\n"
         f"- Elapsed: {time.time() - t0:.0f}s\n"
-        f"- Events: {n_events} (tool={len(tool_calls)}, meta={len(meta_data)})\n"
-        f"- Tool: `{tool_calls[0][:80] if tool_calls else 'none'}`\n\n"
+        f"- Events: {n_events} (tool={tool_call_count}, "
+        f"meta={meta_event_count}, tool_error={tool_error_count})\n\n"
         f"---\n\n"
     )
 
     try:
         _write_private_text(report_path, header + body + sources + notes_block)
-        if meta_data:
-            _write_private_text(meta_path, json.dumps(meta_data, indent=2, default=str))
     except Exception as exc:
         return _record_error(status_path, t0, exc)
 
@@ -266,13 +251,15 @@ async def _run(query: str, mode: str, out_dir: Path) -> int:
                 f"INCOMPLETE\t{time.strftime('%Y-%m-%d %H:%M:%S')}\tmode={mode}\t"
                 f"elapsed={elapsed:.0f}s\tevents={n_events}\t"
                 f"body_chars={len(body)}\trefs={len(lines)}\t"
+                f"tool_calls={tool_call_count}\tmeta_events={meta_event_count}\t"
+                f"tool_errors={tool_error_count}\t"
                 f"reason={terminal_done_reason}\n",
             )
         except Exception as exc:
             return _record_error(status_path, t0, exc)
         print(
-            f"[incomplete] {terminal_done_reason}; retry the run and inspect "
-            f"{events_path}",
+            f"[incomplete] {terminal_done_reason}; inspect {status_path} and "
+            f"{report_path}",
             flush=True,
         )
         return 3
@@ -283,7 +270,9 @@ async def _run(query: str, mode: str, out_dir: Path) -> int:
             f"DONE\t{time.strftime('%Y-%m-%d %H:%M:%S')}\tmode={mode}\t"
             f"elapsed={elapsed:.0f}s\tevents={n_events}\t"
             f"body_chars={len(body)}\trefs={len(lines)}\t"
-            f"tool_calls={len(tool_calls)}\tconnector_failed={connector_failed}\n",
+            f"tool_calls={tool_call_count}\tmeta_events={meta_event_count}\t"
+            f"tool_errors={tool_error_count}\t"
+            f"connector_failed={connector_failed}\n",
         )
     except Exception as exc:
         return _record_error(status_path, t0, exc)

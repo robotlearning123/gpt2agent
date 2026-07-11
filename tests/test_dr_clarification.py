@@ -121,9 +121,9 @@ class _FakeResp:
     def __init__(self, lines: list[str]) -> None:
         self._lines = lines
 
-    async def aiter_lines(self):
+    async def aiter_content(self):
         for ln in self._lines:
-            yield ln
+            yield (ln + "\n").encode()
 
 
 class _ScriptedSession:
@@ -155,12 +155,17 @@ class _FakeBackend:
     def _reload_token_if_stale(self) -> None:  # mirrors BackendClient
         pass
 
+    def request_headers(self) -> dict[str, str]:
+        return dict(self._session.headers)
+
 
 class _FakeSentinel:
     def __init__(self, *_: Any, **__: Any) -> None:
         pass
 
-    async def get_tokens(self) -> dict[str, str]:
+    async def get_tokens(
+        self, _operation_headers: dict[str, str] | None = None
+    ) -> dict[str, str]:
         return {"chat-requirements": "stub", "proof": "", "turnstile": ""}
 
 
@@ -400,15 +405,11 @@ def test_bundled_runner_marks_empty_clarification_followup_incomplete(
     report = (out_dir / "report.md").read_text(encoding="utf-8")
     assert _CLARIFICATION_TEXT not in report
 
-    events = [
-        json.loads(line)
-        for line in (out_dir / "events.jsonl")
-        .read_text(encoding="utf-8")
-        .splitlines()
-    ]
-    assert events[-1]["type"] == "done"
-    assert events[-1]["text"] == ""
-    assert events[-1]["terminated_abnormally"] is True
+    status_text = (out_dir / "status.txt").read_text(encoding="utf-8")
+    assert "events=3" in status_text
+    assert "reason=stream terminated abnormally" in status_text
+    assert not (out_dir / "events.jsonl").exists()
+    assert not (out_dir / "meta.json").exists()
 
 
 def test_bundled_runner_uses_short_cited_final_after_long_clarification(

@@ -6,6 +6,159 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.0.12] - 2026-07-11
+
+Account-native discovery and release-safety update. The public surface grows
+from 25 to 32 MCP tools and adds two deterministic MCP resources without adding
+Voice, audio, browser-cookie export, or an OpenAI API fallback.
+
+### Added
+
+- Seven read-only discovery tools: `list_scheduled_tasks`, `list_plugins`,
+  `list_installed_plugins`, `list_work_models`, `sites_access`, `list_sites`, and
+  `account_capabilities`. They use bounded allowlists and typed contract errors
+  rather than returning private backend payloads.
+- Two packaged, account-independent MCP resources:
+  `chatgpt://feature-coverage` records the release contract and
+  `chatgpt://update-evidence` records the public-surface evidence snapshot.
+- Every one of the 32 tools now declares all four MCP tool annotations:
+  read-only, destructive, idempotent, and open-world hints.
+- `chat` accepts an optional model-aware `thinking_effort`. A supplied value is
+  checked against the selected general ChatGPT model's live catalog. Both
+  `chat` and `agent` validate their selected general-model slug; Work-only model
+  identifiers stay isolated from those paths.
+- Safe machine-readable backend failures distinguish unavailable, unsupported,
+  changed-contract, temporary, indeterminate-access, invalid-input,
+  login-required, and unverified outcomes without retaining response bodies,
+  URLs, headers, or account content.
+
+### Changed
+
+- `list_tasks` is now documented and validated as the generic asynchronous-job
+  surface. Scheduled automations are a separate contract exposed by
+  `list_scheduled_tasks`; neither tool claims to enumerate the other's jobs.
+- Apps/connectors and Plugins are separate surfaces. `list_apps` accepts the
+  observed string and object variants, while the two Plugin tools normalize the
+  catalog and installed-plugin envelopes independently.
+- `list_work_models` reports Work metadata without merging Work-only identifiers
+  into `list_models` or suggesting them for `chat`.
+- The bundled Deep Research runner persists only the requested `report.md` and a
+  shape-only `status.txt`. It no longer writes raw event or server-metadata
+  artifacts.
+- The Python MCP dependency is bounded to the stable v1 line
+  (`mcp>=1.26,<2`). CI verifies both 1.26.0 and the latest resolvable v1 release.
+- Collection adapters now reject a blank 2xx body as a changed contract instead
+  of presenting it as an honestly empty account collection.
+- File metadata, account status, scheduled automations, conversation detail,
+  and Codex task creation now return bounded allowlisted projections rather
+  than opaque private-backend objects. Malformed backend-generated file IDs are
+  classified as changed contracts before any URL is built.
+- Plain `gpt2agent run` now defaults to stdio. Streamable HTTP requires the
+  explicit launch command `gpt2agent run --http --port 9000`.
+
+### Security
+
+- Authorization is request-local. A multi-request operation captures one bearer
+  snapshot so token rotation cannot mix authentication generations inside the
+  same operation, and the shared HTTP session no longer stores Authorization.
+- Account requests never follow redirects, preventing account headers or prompt
+  bodies from being forwarded through an upstream redirect. The `curl_cffi`
+  floor is now 0.15.0, excluding CVE-2026-33752.
+- Private-backend JSON is capped at 4 MiB before retention, and account SSE
+  streams are capped at 64 MiB with a 4 MiB pending-line limit. A process-wide
+  request policy permits
+  four ordinary REST/JSON requests in flight by default, accepts a bounded 1-8
+  override, fails fast when saturated, and applies route-local 429 cooldowns
+  with Retry-After capped at 60 seconds. Direct SSE/Sentinel streams remain
+  separately bounded by endpoint timeouts and serial heavy-DR guidance.
+- Streamable HTTP is strictly loopback-only and uses the MCP SDK's native Host
+  and Origin protection against DNS rebinding. The former unauthenticated remote
+  bypass is gone.
+- The former raw SSE/poll dump is gone. Setting its legacy environment variable
+  fails before account access and writes no file.
+- Capability probes share one auth snapshot, a 90-second budget enforced by
+  each request's remaining timeout, strict known GET routes, and shape-only
+  results. Voice, realtime, transcript, conversation body, write, unknown, and
+  off-host routes are outside the probe contract.
+- Visually hidden ChatGPT messages are excluded from streaming, async polling,
+  conversation detail, tool-call, and Deep Research transcript output. Chat,
+  Agent, and Custom GPT replies always end with one authoritative server receipt,
+  using a bounded category or `none`; only the final footer is trustworthy.
+  Private dispatch payloads remain hidden. Regular response text and heavy-DR
+  progress are held until late visibility metadata can no longer revoke them.
+  Unsupported late message mutations now revoke the buffered candidate,
+  metadata JSON-pointer patches are bounded before allocation, malformed poll
+  lifecycles fail closed, and a completed Deep Research widget is accepted only
+  when its carrier remains the newest lifecycle.
+- File-download projections accept only absolute public HTTPS destinations,
+  while preserving valid signed queries. Common provider secrets,
+  credential-bearing database URLs, label-aware assignments, and PEM private
+  keys are redacted before private text reaches MCP clients.
+- Image generation follows the observed prepare/conduit `/f` v1 stream and
+  accepts an asset only when its visible carrier is bound to the current stream
+  by the observed dispatch or a same-message marker and has image-generation
+  provenance. These private routes remain undocumented and may change.
+- Live validation on 2026-07-10 confirmed image generation in the authenticated
+  website, while the direct client failed closed before prepare on changed
+  required-Turnstile instructions. Catalog entitlement is not reported as live
+  image execution reachability.
+- Sentinel tokens and challenges have protocol-specific type, format, and size
+  bounds before solver dispatch; malformed challenges and solver failures become
+  static contract errors without retaining exception content.
+- `custom_instructions_set` remains serialized within one server process. Two
+  independently running gpt2agent processes can still race a read-modify-write;
+  operators should avoid concurrent writers.
+
+### CI / Release
+
+- The stable `Required checks` gate now includes the full OS/Python suite,
+  Ruff, ShellCheck, both MCP v1 compatibility lanes, and a wheel/sdist dry-run
+  installed into clean environments.
+- CI audits both resolved dependencies and the minimum supported `curl_cffi`
+  release for known vulnerabilities.
+- A separate daily no-secret public-surface radar checks bounded official/public
+  sources, emits only redacted summaries, retains evidence for 30 days, and does
+  not pretend to verify a private account adapter.
+- The private account gate runs only on a trusted local machine against the
+  exact candidate commit. It measures the active Pro entitlement instead of
+  trusting a caller label, and its public receipt reports empty/nonempty shape
+  classes without exact account collection counts. Cookies and bearer tokens
+  are never uploaded; the sanitized receipt remains separate from hosted CI.
+- The read-only governance audit binds the release-tag App, Required-checks App,
+  and independent PyPI gate to an explicit reviewed policy. Tag creation and
+  no-bypass tag immutability are audited as separate rules, and main-branch
+  bypasses, stale approvals, unresolved threads, or non-strict checks fail the
+  release gate.
+- An annotated release tag must contain exactly one
+  `account-receipt-sha256: <64 lowercase hex>` line. Release evidence binds that
+  digest to the tag object, source commit/tree, workflow identity, and exact
+  wheel/sdist hashes. A clean PyPI install canary must pass before the GitHub
+  Release is created; the release owner then manually attaches the exact
+  sanitized receipt and verifies the downloaded asset against the tag digest.
+  The digest is a commitment and post-publish audit link, not hosted
+  pre-publish validation of the receipt. Independent restricted tag creation
+  and protected-environment approval remain required release controls.
+- GitHub Release notes are extracted by the same exact-version CHANGELOG parser
+  used by release metadata verification, so regex-like version near-matches
+  cannot select another section.
+
+### Migration
+
+- Remove `GPT2AGENT_ALLOW_REMOTE` and `GPT2AGENT_RAW_DUMP` from current launch
+  scripts. Both legacy variables now fail closed; the first cannot enable a
+  non-loopback bind and the second cannot create diagnostic files.
+- Use stdio for local MCP clients. Streamable HTTP remains available only on a
+  loopback host and has no remote override. Existing HTTP service units that
+  used plain `gpt2agent run` must add `--http`; Claude Code HTTP installation
+  only registers the URL and does not start or supervise the server.
+- Deep Research automation should consume `report.md` plus `status.txt`, not
+  `events.jsonl` or `meta.json`.
+- Voice remains outside 0.0.12. A bounded read-only voice catalog is planned for
+  0.0.13; GPT-Live audio is not exposed as a supported MCP/account capability,
+  and later AgentRTC/WebRTC work is a separate transport project.
+- See [`docs/migration-0.0.12.md`](docs/migration-0.0.12.md) for the upgrade
+  checklist and compatibility notes.
+
 ## [0.0.11] - 2026-07-10
 
 Recovery release carrying forward every change in the

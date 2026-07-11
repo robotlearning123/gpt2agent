@@ -122,9 +122,9 @@ class _FakeResp:
     def __init__(self, lines: list[str]) -> None:
         self._lines = lines
 
-    async def aiter_lines(self):
+    async def aiter_content(self):
         for ln in self._lines:
-            yield ln
+            yield (ln + "\n").encode()
 
 
 class _FakeSession:
@@ -150,6 +150,9 @@ class _FakeBackend:
     def _reload_token_if_stale(self) -> None:  # mirrors BackendClient
         pass
 
+    def request_headers(self) -> dict[str, str]:
+        return dict(self._session.headers)
+
     def post(self, *args: Any, **kwargs: Any) -> dict:
         # Quota probe response — plenty of DR quota left.
         return {
@@ -161,7 +164,9 @@ class _FakeSentinel:
     def __init__(self, *_: Any, **__: Any) -> None:
         pass
 
-    async def get_tokens(self) -> dict[str, str]:
+    async def get_tokens(
+        self, _operation_headers: dict[str, str] | None = None
+    ) -> dict[str, str]:
         return {"chat-requirements": "stub", "proof": "", "turnstile": ""}
 
 
@@ -383,6 +388,8 @@ def test_connector_dispatch_replaced_by_real_report_can_finish(
 
 
 def test_heavy_dr_in_band_sse_error_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    from gpt2agent.errors import BackendHTTPError
+
     frames = [
         "data: "
         + json.dumps(
@@ -394,13 +401,14 @@ def test_heavy_dr_in_band_sse_error_raises(monkeypatch: pytest.MonkeyPatch) -> N
         "data: [DONE]",
     ]
 
-    with pytest.raises(RuntimeError) as exc:
+    with pytest.raises(BackendHTTPError) as exc:
         _run_heavy_dr_with_frames(monkeypatch, frames)
 
     message = str(exc.value)
-    assert "ChatGPT SSE error" in message
+    assert exc.value.code == "temporarily_failed"
+    assert exc.value.route == "/backend-api/f/conversation"
+    assert "upstream failed" not in message
     assert "eyJ" + "a" * 30 not in message
-    assert "Bearer <REDACTED>" in message
 
 
 def test_poll_completion_uses_citation_metadata_from_same_turn_fixture() -> None:

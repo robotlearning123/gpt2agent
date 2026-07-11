@@ -32,8 +32,42 @@ in the ChatGPT web app for your plan.
 
 ### `429` / rate limited
 
-You're being throttled. Wait and retry; keep request volume human-scale. Deep
-Research also has a monthly quota (see [faq.md](./faq.md)).
+You're being throttled. For ordinary REST/JSON requests, gpt2agent applies a
+cooldown only to the normalized route that returned 429, honors valid
+`Retry-After` up to 60 seconds, and fails fast while that route is cooling down.
+Wait for the reported interval; keep request volume human-scale. Deep Research
+also has a monthly quota (see [faq.md](./faq.md)).
+
+Ordinary REST/JSON account calls also share a process-wide in-flight limit
+(default 4). If the client reports a temporary failure after a one-second permit
+wait, reduce its parallelism or set `GPT2AGENT_MAX_IN_FLIGHT` to a justified
+integer from 1 to 8. Direct SSE/Sentinel streams are outside this semaphore and
+use endpoint timeouts; run heavy Deep Research serially. The limit does not
+coordinate multiple gpt2agent processes.
+
+### `contract_changed` / `access_indeterminate` / `unverified`
+
+These are typed, content-free adapter outcomes, not raw backend errors.
+`contract_changed` means a private response no longer matches the minimum known
+schema. `access_indeterminate` means the route did not prove entitlement either
+way. `unverified` means the release intentionally made no live claim, including
+Voice in 0.0.12. Update gpt2agent and inspect the public radar or sanitized local
+account receipt before assuming the feature is absent.
+
+### `thinking_effort ... is not valid` / unsupported model
+
+Call `list_models` and use one of the selected general model's advertised
+`thinking_efforts`. gpt2agent refreshes the 60-second model cache once after a
+rejected effort. A Work-only slug from `list_work_models` remains invalid for
+`chat` or the configured `agent` model unless the exact slug also appears in the
+general catalog. Leave `thinking_effort` unset to use the model default.
+
+### HTTP refuses a non-loopback host
+
+This is intentional. The streamable HTTP transport has no authentication and no
+remote override. Use `gpt2agent run --stdio` for local MCP clients, or bind a
+supported loopback host for a local browser client. Native Host/Origin checks
+also reject non-loopback DNS-rebinding requests.
 
 ### image gen / code interpreter / canvas returns plain text
 
@@ -41,11 +75,22 @@ Research also has a monthly quota (see [faq.md](./faq.md)).
 tools — `generate_image`, `code_interpreter`, `canvas_execute` — which set
 `temporary=False` for you. (Calling `chat` and asking it to make an image won't work.)
 
+`generate_image` uses an observed, undocumented private prepare/conduit + `/f`
+v1 flow. A `contract_changed` result means that flow or its relational result
+provenance no longer matches the known shape; it is not a stable public API.
+As of the 2026-07-10 release validation, the authenticated website path worked
+but the direct client failed before prepare because the required Turnstile
+challenge no longer matched the vendored solver. Do not export a browser token
+or infer direct execution reachability from the model catalog.
+
 ### `deep_research_heavy` has no grouped Sources list
 
 The report is recovered from the connector's widget state; grouped source URLs are
 usually present but not guaranteed. If absent, the model often cited sources inline
 in the body. Use light `deep_research` for reliably grouped citations.
+
+The bundled runner writes only `report.md` and shape-only `status.txt`. Raw SSE
+events and server metadata are intentionally unavailable as diagnostic files.
 
 ### Installer aborts / `externally-managed-environment`
 

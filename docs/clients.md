@@ -96,6 +96,19 @@ hosts need.
 ## HTTP transport (advanced, not recommended)
 
 stdio is the default and safest. The HTTP transport is **unauthenticated** and
-proxies your full account, so it binds `127.0.0.1` only and refuses non-loopback
-hosts unless you set `GPT2AGENT_ALLOW_REMOTE=1` (put it behind your own auth proxy).
+proxies your full account, so it binds loopback only and always refuses a
+non-loopback host. There is no remote override. The server also enables native
+MCP Host and Origin validation to reject non-loopback DNS-rebinding attempts.
 See the README's **Security & risk** section.
+
+Only Claude Code URL registration is automated:
+
+```bash
+gpt2agent install --client claude-code --transport http --http-port 9000
+gpt2agent run --http --port 9000
+```
+
+The first command writes the URL entry. It does not start or supervise the
+second command. Keep the server running separately before restarting Claude
+Code. HTTP installation for Codex, Cursor, Windsurf, Claude Desktop, Zed, or a
+mixed auto-detected target set fails before any configuration is written.

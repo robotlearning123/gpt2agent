@@ -1,9 +1,10 @@
 ---
 name: gpt2agent
 description: |
-  Full ChatGPT Plus/Pro account access via MCP. 25 tools covering chat,
+  ChatGPT Plus/Pro account access via 32 MCP tools and 2 static resources covering chat,
   agent mode, deep research, image generation, code execution, canvas,
-  memory, custom instructions, conversations, Custom GPTs, and Codex.
+  memory, custom instructions, conversations, Custom GPTs, Codex, Apps,
+  Plugins, Work models, automations, Sites, and capability truth.
   Reuses $CODEX_HOME/auth.json (or ~/.codex/auth.json) or the manual
   ~/.gpt2agent/token.json fallback.
   Use when you need ChatGPT models, web research with citations, DALL-E
@@ -37,6 +38,13 @@ allowed-tools:
   - mcp__gpt2agent__list_codex_envs
   - mcp__gpt2agent__list_codex_tasks
   - mcp__gpt2agent__codex_task_create
+  - mcp__gpt2agent__list_scheduled_tasks
+  - mcp__gpt2agent__list_plugins
+  - mcp__gpt2agent__list_installed_plugins
+  - mcp__gpt2agent__list_work_models
+  - mcp__gpt2agent__sites_access
+  - mcp__gpt2agent__list_sites
+  - mcp__gpt2agent__account_capabilities
 ---
 
 # gpt2agent — ChatGPT Account Access via MCP
@@ -69,8 +77,10 @@ If any precondition fails, stop and tell the user the exact fix command.
 | Chat & reasoning | `chat`, `agent`, `deep_research`, `deep_research_heavy`, `gpt_chat` |
 | Image & file | `generate_image`, `get_file_info`, `get_file_download_url` |
 | Code execution | `code_interpreter`, `canvas_execute` |
-| Account & models | `account_status`, `list_models`, `list_apps` |
-| Conversations | `list_conversations`, `get_conversation`, `list_tasks` |
+| Account & models | `account_status`, `list_models`, `list_work_models`, `account_capabilities` |
+| Apps & Plugins | `list_apps`, `list_plugins`, `list_installed_plugins` |
+| Conversations & jobs | `list_conversations`, `get_conversation`, `list_tasks`, `list_scheduled_tasks` |
+| Sites | `sites_access`, `list_sites` |
 | Custom GPTs | `list_custom_gpts`, `gpt_chat` |
 | Memory | `memory_list`, `memory_search`, `memory_create_via_chat` |
 | Instructions | `custom_instructions_get`, `custom_instructions_set` |
@@ -80,7 +90,7 @@ If any precondition fails, stop and tell the user the exact fix command.
 
 | Need | Tool | Notes |
 |---|---|---|
-| Quick Q&A with a ChatGPT model | `chat` | Default: gpt-5-3, temporary=True |
+| Quick Q&A with a ChatGPT model | `chat` | Default: gpt-5-3, temporary=True; optional model-aware thinking_effort |
 | Chat that needs image gen / code / canvas | `chat(temporary=False)` | Temporary chats block these features |
 | Multi-step task with browsing + code exec | `agent` | 262K context, autonomous |
 | Web research with citations (30-120s) | `deep_research` | Costs 1 DR quota |
@@ -91,6 +101,9 @@ If any precondition fails, stop and tell the user the exact fix command.
 | Use a Custom GPT | `gpt_chat(gizmo_id, prompt)` | List IDs with `list_custom_gpts` |
 | Save something to ChatGPT memory | `memory_create_via_chat` | Model-initiated write (REST 405 workaround) |
 | Create a Codex coding task | `codex_task_create` | Auto-resolves environment_id from repo_label |
+| Check current account truth | `account_capabilities` | Tri-state entitlement/reachability, shape-only output |
+| Inspect scheduled automation | `list_scheduled_tasks` | Distinct from generic `list_tasks` jobs |
+| Inspect Plugin state | `list_plugins`, `list_installed_plugins` | Plugins are distinct from Apps/connectors |
 
 ## Usage Patterns
 
@@ -122,8 +135,27 @@ Both require a non-temporary conversation context.
 ```
 1. account_status()   -- plan, features, expiry
 2. list_models()      -- all available model slugs
-3. list_conversations() -- recent chat history
+3. list_work_models() -- separate Work-only catalog
+4. account_capabilities() -- live shape-only truth
+5. list_conversations() -- recent chat history
 ```
+
+Do not pass a Work-only slug to `chat` or configure it for `agent`. Optional
+`thinking_effort` values must appear in the selected general model's live
+catalog; leave the value unset to preserve the model default.
+
+### Apps, Plugins, jobs, and resources
+```
+1. list_apps()              -- connected Apps/connectors
+2. list_plugins()           -- Plugin catalog
+3. list_installed_plugins() -- installed Plugins
+4. list_tasks()             -- generic asynchronous jobs
+5. list_scheduled_tasks()   -- scheduled automations
+```
+
+MCP resource discovery also exposes `chatgpt://feature-coverage` and
+`chatgpt://update-evidence`. They are packaged static JSON and never contact the
+account. Use `account_capabilities` for live state.
 
 ### Codex integration
 ```
@@ -160,6 +192,12 @@ chat = "gpt-5-3"
 # heavy_dr = "gpt-5-5-pro"
 ```
 
+Ordinary REST/JSON backend calls share a process-wide limit of 4. Set
+`GPT2AGENT_MAX_IN_FLIGHT` only to an integer from 1 through 8. A 429 activates a
+route-local cooldown capped at 60 seconds. Direct SSE/Sentinel streams are not
+held by this semaphore; endpoint timeouts bound them, and heavy Deep Research
+should run serially.
+
 ## Troubleshooting
 
 | Error | Fix |
@@ -171,10 +209,13 @@ chat = "gpt-5-3"
 | Image/code/canvas fails | Ensure `temporary=False` — these features are blocked in temporary chats |
 | DR connector unavailable | Enable Deep Research at chatgpt.com > Settings > Connectors |
 | "memory_add not available" | Use `memory_create_via_chat` instead (REST POST returns 405) |
+| `contract_changed` | Private response no longer satisfies the bounded adapter; update and inspect sanitized evidence |
+| HTTP remote bind refused | Expected: use stdio or a loopback-only local HTTP client |
+| Invalid `thinking_effort` | Call `list_models`; use an effort advertised by that exact general model or leave it unset |
 
 ## Detailed Reference
 
 For full parameter docs and return types, see:
-`gpt2agent/gpt2agent/skills/gpt2agent/tools-reference.md`
+`gpt2agent/skills/gpt2agent/tools-reference.md`
 
 Or inspect tool schemas directly: `mcp__gpt2agent__*` tools are self-describing via MCP.

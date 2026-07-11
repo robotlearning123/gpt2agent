@@ -21,6 +21,7 @@ from gpt2agent.install import (
     install_claude_skill,
     install_codex,
     install_cursor,
+    run_install,
     install_windsurf,
     install_zed,
 )
@@ -86,6 +87,15 @@ def test_claude_http_transport(tmp_path: Path) -> None:
     data = json.loads(cfg.read_text())
     assert data["mcpServers"]["gpt2agent"]["type"] == "url"
     assert data["mcpServers"]["gpt2agent"]["url"] == "http://localhost:9001/mcp"
+
+
+def test_claude_rejects_unknown_transport_before_write(tmp_path: Path) -> None:
+    cfg = tmp_path / "claude.json"
+
+    with pytest.raises(ValueError, match="transport must be 'stdio' or 'http'"):
+        install_claude_code(config_path=cfg, transport="websocket")
+
+    assert not cfg.exists()
 
 
 def test_claude_rejects_broken_json(tmp_path: Path) -> None:
@@ -686,3 +696,71 @@ def test_json_host_dry_run_no_write(tmp_path: Path) -> None:
 def test_supported_clients_lists_all_hosts() -> None:
     for name in ("claude-code", "codex", "cursor", "windsurf", "claude-desktop", "zed"):
         assert name in SUPPORTED_CLIENTS
+
+
+# ── top-level HTTP install contract ────────────────────────────────────────
+
+
+def test_http_install_rejects_codex_before_writing_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    codex_home = tmp_path / "codex"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    status = run_install(client="codex", transport="http", install_skill=False)
+
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "HTTP registration is supported only for Claude Code" in captured.err
+    assert not (codex_home / "config.toml").exists()
+
+
+def test_http_install_rejects_mixed_auto_detect_before_any_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    claude_dir = home / ".claude"
+    claude_dir.mkdir(parents=True)
+    codex_home = home / ".codex"
+    codex_home.mkdir()
+    codex_config = codex_home / "config.toml"
+    codex_config.write_text('model = "keep-me"\n')
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+
+    status = run_install(client="all", transport="http", install_skill=True)
+
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "unsupported detected target(s): codex" in captured.err
+    assert not (home / ".claude.json").exists()
+    assert codex_config.read_text() == 'model = "keep-me"\n'
+    assert not codex_config.with_name("config.toml.bak-gpt2agent").exists()
+    assert not (claude_dir / "skills").exists()
+
+
+def test_http_install_allows_claude_url_and_prints_server_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEX_HOME", str(home / "missing-codex"))
+
+    status = run_install(
+        client="all",
+        transport="http",
+        http_port=9123,
+        install_skill=False,
+    )
+
+    captured = capsys.readouterr()
+    assert status == 0
+    data = json.loads((home / ".claude.json").read_text())
+    assert data["mcpServers"]["gpt2agent"] == {
+        "type": "url",
+        "url": "http://localhost:9123/mcp",
+    }
+    assert "gpt2agent run --http --port 9123" in captured.out
+    assert "spawns the new MCP subprocess" not in captured.out

@@ -5,17 +5,22 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
+import re
 import time
-from pathlib import Path
-from typing import AsyncIterator
+from copy import deepcopy
+from typing import AsyncIterator, Mapping
 from uuid import uuid4
 
+from curl_cffi import CurlOpt
 from curl_cffi.requests import AsyncSession
 
-from gpt2agent._log_redact import redact_error as _redact_error
-from gpt2agent.backend import BackendClient, _BASE
+from gpt2agent.backend import BackendClient, _BASE, _is_filesize_exceeded
+from gpt2agent.errors import BackendContractError, BackendHTTPError, backend_http_error
+from gpt2agent.message_visibility import is_user_visible_message
 from gpt2agent.sentinel import SentinelGate  # noqa: F401  (used in stream)
+from gpt2agent.tools._redact import redact
 
 _log = logging.getLogger(__name__)
 
@@ -24,48 +29,756 @@ _CONV_URL = _BASE + "/backend-api/conversation"
 _INCOMPLETE_RESPONSE_MESSAGE = (
     "ChatGPT stream ended before completion; partial output was discarded"
 )
+_MAX_SSE_LINE_BYTES = 4 * 1024 * 1024
+_MAX_SSE_STREAM_BYTES = 64 * 1024 * 1024
+_MAX_TOOL_RECORDS = 100
+_MAX_TOOL_PARTS = 100
+_MAX_TOOL_PART_CHARS = 20_000
+_MAX_TOOL_TEXT_CHARS = 100_000
+_MAX_TOOL_PROJECTED_CHARS = 4 * 1024 * 1024
+_MAX_TOOL_INTEGER = (1 << 63) - 1
+_MAX_METADATA_POINTER_CHARS = 2_048
+_MAX_METADATA_POINTER_DEPTH = 32
+_MAX_METADATA_ARRAY_INDEX = 100
+_MAX_METADATA_LIST_ITEMS = _MAX_METADATA_ARRAY_INDEX + 1
+_MAX_METADATA_NODES = 4_096
+_MAX_METADATA_STRUCTURE_DEPTH = 64
+_MAX_METADATA_STRING_CHARS = 1_000_000
+_BACKEND_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
+_SEDIMENT_ASSET_RE = re.compile(r"sediment://([A-Za-z0-9_-]{1,256})\Z")
+_TOOL_ACTIVITY_CATEGORIES = (
+    "web",
+    "code_execution",
+    "image_generation",
+    "canvas",
+    "connector",
+    "tool_response",
+)
+_KNOWN_MESSAGE_ROLES = frozenset({"assistant", "system", "tool", "user"})
 
 
-class _IncompleteStreamError(RuntimeError):
-    def __init__(self, conversation_id: str | None = None) -> None:
-        super().__init__(_INCOMPLETE_RESPONSE_MESSAGE)
-        self.conversation_id = conversation_id
+def _bounded_tool_string(
+    value,
+    *,
+    field: str,
+    maximum: int,
+    redact_value: bool = True,
+    adapter: str = "tool_call",
+) -> str:
+    if not isinstance(value, str) or len(value) > maximum:
+        raise BackendContractError(adapter, f"{field} must be a bounded string")
+    if not redact_value:
+        return value
+    projected = redact(value)
+    assert isinstance(projected, str)
+    return projected
 
 
-def _is_successful_assistant_terminal(message: dict) -> bool:
-    recipient = message.get("recipient")
-    content_type = (message.get("content") or {}).get("content_type")
-    return (
-        (message.get("author") or {}).get("role") == "assistant"
-        and recipient in (None, "all")
-        and content_type in ("text", "multimodal_text")
-        and message.get("status") == "finished_successfully"
+def _redacted_tool_text(value: str, *, maximum: int) -> str:
+    projected = redact(value)
+    assert isinstance(projected, str)
+    return projected[:maximum]
+
+
+def _tool_asset_integer(value, *, field: str, adapter: str = "tool_call") -> int | None:
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or value > _MAX_TOOL_INTEGER
+    ):
+        raise BackendContractError(
+            adapter, f"{field} must be a bounded non-negative integer or null"
+        )
+    return value
+
+
+def _project_tool_image_asset(part: dict, *, adapter: str = "tool_call") -> dict:
+    asset_pointer = _bounded_tool_string(
+        part.get("asset_pointer"),
+        field="asset_pointer",
+        maximum=2_048,
+        redact_value=False,
+        adapter=adapter,
+    )
+    match = _SEDIMENT_ASSET_RE.fullmatch(asset_pointer)
+    if match is None:
+        raise BackendContractError(
+            adapter, "asset_pointer must contain one sediment file identifier"
+        )
+    file_id = match.group(1)
+    projected_pointer = redact(asset_pointer)
+    projected_file_id = redact(file_id)
+    assert isinstance(projected_pointer, str)
+    assert isinstance(projected_file_id, str)
+    return {
+        "asset_pointer": projected_pointer,
+        "file_id": projected_file_id,
+        "width": _tool_asset_integer(part.get("width"), field="width", adapter=adapter),
+        "height": _tool_asset_integer(part.get("height"), field="height", adapter=adapter),
+        "size_bytes": _tool_asset_integer(
+            part.get("size_bytes"), field="size_bytes", adapter=adapter
+        ),
+    }
+
+
+def _backend_path_id(value, *, adapter: str, field: str) -> str:
+    if not isinstance(value, str) or _BACKEND_ID_RE.fullmatch(value) is None:
+        raise BackendContractError(adapter, f"{field} must be one bounded URL-safe identifier")
+    return value
+
+
+def _private_protocol_string(value: object, *, maximum: int = 256) -> str | None:
+    """Validate an opaque backend correlation value without ever exposing it."""
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > maximum
+        or any(ord(character) < 0x21 or ord(character) > 0x7E for character in value)
+    ):
+        return None
+    return value
+
+
+def _image_dispatch_binding(message: object) -> dict[str, str | None] | None:
+    """Extract the minimum private tuple needed to bind an image tool result."""
+    if not isinstance(message, dict):
+        return None
+    author = message.get("author")
+    if not isinstance(author, dict) or author.get("role") != "assistant":
+        return None
+    recipient = _private_protocol_string(message.get("recipient"))
+    message_id = _private_protocol_string(message.get("id"))
+    if recipient in (None, "all") or message_id is None:
+        return None
+    metadata = message.get("metadata")
+    turn_exchange_id = None
+    if isinstance(metadata, dict) and metadata.get("turn_exchange_id") is not None:
+        turn_exchange_id = _private_protocol_string(metadata.get("turn_exchange_id"))
+        if turn_exchange_id is None:
+            return None
+    return {
+        "message_id": message_id,
+        "recipient": recipient,
+        "turn_exchange_id": turn_exchange_id,
+    }
+
+
+def _is_generated_image_part(part: object) -> bool:
+    if not isinstance(part, dict) or part.get("content_type") != "image_asset_pointer":
+        return False
+    pointer = part.get("asset_pointer")
+    if not isinstance(pointer, str) or _SEDIMENT_ASSET_RE.fullmatch(pointer) is None:
+        return False
+    metadata = part.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    dalle = metadata.get("dalle")
+    generation = metadata.get("generation")
+    return bool(
+        isinstance(dalle, dict)
+        and dalle.get("serialization_title") == "DALL-E generation metadata"
+        or isinstance(generation, dict)
+        and generation.get("serialization_title") == "Image Generation metadata"
     )
 
 
-def _safe_body(resp: object) -> str:
+def _is_image_result_candidate(
+    message: object,
+    *,
+    dispatch: dict[str, str | None] | None,
+    marked_message_ids: set[str] | None = None,
+    marker_protocol_seen: bool = False,
+) -> bool:
+    """Return whether a tool carrier is provably from this image-generation turn."""
+    if not isinstance(message, dict) or not is_user_visible_message(message):
+        return False
+    author = message.get("author")
+    content = message.get("content")
+    metadata = message.get("metadata")
+    if (
+        not isinstance(author, dict)
+        or author.get("role") != "tool"
+        or message.get("recipient") != "all"
+        or message.get("status") != "finished_successfully"
+        or not isinstance(content, dict)
+        or content.get("content_type") != "multimodal_text"
+        or not isinstance(metadata, dict)
+    ):
+        return False
+    async_task_type = metadata.get("async_task_type")
+    if async_task_type is not None and async_task_type != "image_gen":
+        return False
+    parts = content.get("parts")
+    if (
+        not isinstance(parts, list)
+        or not parts
+        or len(parts) > _MAX_TOOL_PARTS
+        or not any(_is_generated_image_part(part) for part in parts)
+    ):
+        return False
+    message_id = _private_protocol_string(message.get("id"))
+    if dispatch is None:
+        # ``async_task_type`` identifies an image result but does not bind a
+        # historical result to the request being polled.  Without a dispatch,
+        # require the same-stream marker/message-ID relation observed in the
+        # current ChatGPT image protocol.
+        return bool(
+            marker_protocol_seen
+            and message_id is not None
+            and marked_message_ids is not None
+            and message_id in marked_message_ids
+        )
+
+    if marker_protocol_seen and (
+        message_id is None or marked_message_ids is None or message_id not in marked_message_ids
+    ):
+        return False
+
+    author_name = _private_protocol_string(author.get("name"))
+    parent_id = _private_protocol_string(metadata.get("parent_id"))
+    if author_name != dispatch["recipient"] or parent_id != dispatch["message_id"]:
+        return False
+    dispatch_turn = dispatch.get("turn_exchange_id")
+    if dispatch_turn is not None:
+        candidate_turn = _private_protocol_string(metadata.get("turn_exchange_id"))
+        if candidate_turn != dispatch_turn:
+            return False
+    return True
+
+
+def _validated_patch_tokens(
+    path: object,
+    operation: object,
+    *,
+    adapter: str,
+) -> tuple[str | None, str | None]:
+    """Validate hash-safe JSON-patch routing tokens before dispatch."""
+    if path is not None and not isinstance(path, str):
+        raise BackendContractError(adapter, "patch path must be a string or null")
+    if operation is not None and not isinstance(operation, str):
+        raise BackendContractError(adapter, "patch operation must be a string or null")
+    if isinstance(path, str) and len(path) > _MAX_METADATA_POINTER_CHARS:
+        raise BackendContractError(adapter, "patch pointer path exceeds the size limit")
+    if isinstance(operation, str) and len(operation) > 64:
+        raise BackendContractError(adapter, "patch operation exceeds the size limit")
+    return path, operation
+
+
+def _patch_mutates_current_message(event: object) -> bool:
+    if not isinstance(event, dict):
+        return False
+    path = event.get("p")
+    operation = event.get("o")
+    if path is not None and not isinstance(path, str):
+        return True
+    if operation is not None and not isinstance(operation, str):
+        return True
+    if isinstance(path, str) and len(path) > _MAX_METADATA_POINTER_CHARS:
+        return True
+    if isinstance(operation, str) and len(operation) > 64:
+        return True
+    if isinstance(path, str) and (path == "/message" or path.startswith("/message/")):
+        return True
+    value = event.get("v")
+    envelope_message = value.get("message") if isinstance(value, dict) else None
+    envelope_author = (
+        envelope_message.get("author") if isinstance(envelope_message, dict) else None
+    )
+    envelope_role = envelope_author.get("role") if isinstance(envelope_author, dict) else None
+    has_valid_envelope = bool(
+        isinstance(envelope_message, dict)
+        and isinstance(envelope_role, str)
+        and envelope_role in _KNOWN_MESSAGE_ROLES
+    )
+    if path == "" and operation == "patch":
+        if not isinstance(value, list):
+            return True
+        return any(
+            not isinstance(subpatch, dict) or _patch_mutates_current_message(subpatch)
+            for subpatch in value
+        )
+    if path == "":
+        if operation in ("add", "replace") and has_valid_envelope:
+            return False
+        return True
+    # A scalar/bare ``v`` continues the last path in the v1 protocol. The image
+    # adapter deliberately does not retain or reconstruct that unbounded state,
+    # so any such continuation after a candidate must revoke it. A full implicit
+    # envelope is handled and revalidated separately.
+    return bool(
+        path is None
+        and operation is None
+        and "v" in event
+        and not has_valid_envelope
+    )
+
+
+def _image_payloads(prompt: str, model: str) -> tuple[dict, dict]:
+    if not isinstance(prompt, str) or not prompt or len(prompt) > _MAX_TOOL_TEXT_CHARS:
+        raise BackendContractError("image_generation", "prompt must be a non-empty bounded string")
+    model = _backend_path_id(model, adapter="image_generation", field="model")
+    message_id = str(uuid4())
+    parent_message_id = str(uuid4())
+    message = {
+        "id": message_id,
+        "author": {"role": "user"},
+        "create_time": time.time(),
+        "content": {"content_type": "text", "parts": [prompt]},
+        "metadata": {
+            "system_hints": ["picture_v2"],
+            "serialization_metadata": {"custom_symbol_offsets": []},
+        },
+    }
+    common = {
+        "action": "next",
+        "parent_message_id": parent_message_id,
+        "model": model,
+        "timezone_offset_min": -480,
+        "timezone": "UTC",
+        "conversation_mode": {"kind": "primary_assistant"},
+        "history_and_training_disabled": False,
+        "system_hints": ["picture_v2"],
+        "supports_buffering": True,
+        "supported_encodings": ["v1"],
+        "client_contextual_info": {"app_name": "chatgpt.com"},
+    }
+    prepare = {
+        **common,
+        "client_prepare_state": "success",
+        "partial_query": message,
+    }
+    generate = {
+        **common,
+        "client_prepare_state": "sent",
+        "messages": [message],
+        "force_parallel_switch": "auto",
+    }
+    return prepare, generate
+
+
+_CONNECTOR_ACTION_RE = re.compile(
+    r"(?:^|[/\\:])connector_[a-z0-9_]+/"
+    r"(?:start|run|invoke|search|execute)(?:$|[/?#])",
+    re.IGNORECASE,
+)
+
+
+def _connector_dispatch_category(text: object) -> str | None:
+    """Classify one bounded recipient-all connector dispatch envelope.
+
+    Some account backends address a connector dispatch to ``recipient=all``
+    and place its private arguments in an assistant text part.  Recognize the
+    JSON structure rather than one exact serialization so that whitespace,
+    key order, and connector names cannot turn the private envelope into user
+    output.
+    """
+    if not isinstance(text, str) or not text or len(text) > _MAX_TOOL_TEXT_CHARS:
+        return None
     try:
-        text = getattr(resp, "text", "") or ""
-    except Exception:
-        return ""
-    return _redact_error(text) if text else ""
+        payload = json.loads(text)
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("args"), dict):
+        return None
+    path = payload.get("path")
+    if (
+        not isinstance(path, str)
+        or not path
+        or len(path) > 2_048
+        or _CONNECTOR_ACTION_RE.search(path) is None
+    ):
+        return None
+
+    target_tokens = frozenset(re.findall(r"[a-z0-9]+", path.casefold()))
+    if target_tokens & {"browser", "search", "web"} or {
+        "deep",
+        "research",
+    }.issubset(target_tokens):
+        return "web"
+    if target_tokens & {"code", "interpreter", "python"}:
+        return "code_execution"
+    if "image" in target_tokens:
+        return "image_generation"
+    if "canvas" in target_tokens:
+        return "canvas"
+    return "connector"
 
 
-def _raise_for_sse_error(obj: dict) -> None:
-    """Surface in-band SSE error frames instead of silently dropping them."""
-    raw: object = None
+def _message_connector_dispatch_category(message: object) -> str | None:
+    if not isinstance(message, dict):
+        return None
+    author = message.get("author")
+    if not isinstance(author, dict) or author.get("role") != "assistant":
+        return None
+    if message.get("recipient") not in (None, "all"):
+        return None
+    content = message.get("content")
+    if not isinstance(content, dict):
+        return None
+    parts = content.get("parts")
+    if not isinstance(parts, list) or not parts:
+        return None
+    return _connector_dispatch_category(parts[0])
+
+
+def _tool_activity_category(message: object) -> str | None:
+    """Map a backend tool lifecycle to one non-sensitive audit category."""
+    if not isinstance(message, dict):
+        return None
+    author = message.get("author")
+    if not isinstance(author, dict):
+        return None
+    role = author.get("role")
+    if role == "tool":
+        return "tool_response"
+    if role != "assistant":
+        return None
+
+    dispatch_category = _message_connector_dispatch_category(message)
+    if dispatch_category is not None:
+        return dispatch_category
+
+    recipient = message.get("recipient")
+    content = message.get("content")
+    content_type = content.get("content_type") if isinstance(content, dict) else None
+    if recipient in (None, "all") and content_type != "code":
+        return None
+
+    target = recipient.casefold() if isinstance(recipient, str) else ""
+    target_tokens = frozenset(re.findall(r"[a-z0-9]+", target))
+    if target_tokens & {"browser", "search", "web"} or {
+        "deep",
+        "research",
+    }.issubset(target_tokens):
+        return "web"
+    if content_type == "code" or target_tokens & {
+        "code",
+        "interpreter",
+        "python",
+    }:
+        return "code_execution"
+    if "image" in target_tokens:
+        return "image_generation"
+    if "canvas" in target_tokens:
+        return "canvas"
+    return "connector"
+
+
+def _append_tool_activity_receipt(text: str, categories: set[str]) -> str:
+    """Append the authoritative final receipt without exposing private payloads."""
+    ordered = [name for name in _TOOL_ACTIVITY_CATEGORIES if name in categories]
+    if not ordered:
+        ordered = ["none"]
+    labels = ", ".join(f"`{name}`" for name in ordered)
+    receipt = f"Tool activity receipt: {labels}. Private dispatch payloads were withheld."
+    body = text or "(no response)"
+    return f"{body}\n\n---\n{receipt}"
+
+
+class _IncompleteStreamError(RuntimeError):
+    def __init__(
+        self,
+        conversation_id: str | None = None,
+        tool_activity: set[str] | None = None,
+    ) -> None:
+        super().__init__(_INCOMPLETE_RESPONSE_MESSAGE)
+        self.conversation_id = conversation_id
+        self.tool_activity = frozenset(tool_activity or ())
+
+
+def _is_successful_assistant_terminal(message: dict) -> bool:
+    author = message.get("author")
+    content = message.get("content")
+    recipient = message.get("recipient")
+    return (
+        is_user_visible_message(message)
+        and isinstance(author, dict)
+        and author.get("role") == "assistant"
+        and recipient in (None, "all")
+        and isinstance(content, dict)
+        and content.get("content_type") in ("text", "multimodal_text")
+        and message.get("status") == "finished_successfully"
+        and _message_connector_dispatch_category(message) is None
+    )
+
+
+def _is_visible_assistant_message(message: dict) -> bool:
+    author = message.get("author")
+    content = message.get("content")
+    return (
+        is_user_visible_message(message)
+        and isinstance(author, dict)
+        and author.get("role") == "assistant"
+        and message.get("recipient") in (None, "all")
+        and isinstance(content, dict)
+        and content.get("content_type") in ("text", "multimodal_text")
+        and _message_connector_dispatch_category(message) is None
+    )
+
+
+def _bounded_lifecycle_timestamp(
+    raw_time: object,
+    *,
+    adapter: str,
+) -> int | float | None:
+    """Return one exact bounded create_time value, or null for insertion order."""
+    if raw_time is None:
+        return None
+    if isinstance(raw_time, bool) or not isinstance(raw_time, (int, float)):
+        raise BackendContractError(
+            adapter, "message create_time must be a finite number or null"
+        )
+    if isinstance(raw_time, int):
+        if abs(raw_time) > _MAX_TOOL_INTEGER:
+            raise BackendContractError(
+                adapter, "message create_time must be a bounded number or null"
+            )
+        return raw_time
+    if not math.isfinite(raw_time) or abs(raw_time) > _MAX_TOOL_INTEGER:
+        raise BackendContractError(
+            adapter, "message create_time must be a bounded number or null"
+        )
+    return raw_time
+
+
+def _ordered_poll_lifecycles(
+    mapping: dict,
+    *,
+    adapter: str,
+) -> list[tuple[tuple[int | float, int], dict]]:
+    """Return validated messages in one deterministic lifecycle order.
+
+    Backend snapshots normally carry numeric ``create_time`` values.  Older
+    shapes can omit them, in which case insertion order is the only available
+    ordering signal and is used consistently for the entire snapshot. Mixed
+    timestamp modes are ambiguous and fail closed; a newer non-output message
+    such as a user turn must still invalidate an earlier terminal candidate.
+    """
+    records: list[tuple[int, int | float | None, dict]] = []
+    any_missing_time = False
+    any_present_time = False
+    for index, node in enumerate(mapping.values()):
+        if node is None:
+            continue
+        if not isinstance(node, dict):
+            raise BackendContractError(adapter, "mapping node must be an object or null")
+        message = node.get("message")
+        if message is None:
+            continue
+        if not isinstance(message, dict):
+            raise BackendContractError(adapter, "mapping message must be an object or null")
+        author = message.get("author")
+        if not isinstance(author, dict):
+            raise BackendContractError(adapter, "message author must be an object")
+        role = author.get("role")
+        if not isinstance(role, str) or role not in _KNOWN_MESSAGE_ROLES:
+            raise BackendContractError(adapter, "message author role is invalid")
+        metadata = message.get("metadata")
+        if metadata is None:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            raise BackendContractError(adapter, "message metadata must be an object")
+        _validate_metadata_bounds(metadata, adapter=adapter)
+
+        timestamp = _bounded_lifecycle_timestamp(
+            message.get("create_time"),
+            adapter=adapter,
+        )
+        if timestamp is None:
+            any_missing_time = True
+        else:
+            any_present_time = True
+        records.append((index, timestamp, message))
+
+    if any_missing_time and any_present_time:
+        raise BackendContractError(adapter, "message create_time values must use one ordering mode")
+
+    ordered = [
+        (
+            (index if any_missing_time else timestamp, index),
+            message,
+        )
+        for index, timestamp, message in records
+    ]
+    ordered.sort(key=lambda item: item[0])
+    return ordered
+
+
+def _poll_terminal_text(message: dict, *, adapter: str) -> str | None:
+    if not _is_successful_assistant_terminal(message):
+        return None
+    content = message.get("content")
+    assert isinstance(content, dict)
+    parts = content.get("parts")
+    if not isinstance(parts, list) or len(parts) > _MAX_TOOL_PARTS:
+        raise BackendContractError(adapter, "message parts must be an array of at most 100 items")
+    if not parts:
+        return None
+    text = parts[0]
+    if not isinstance(text, str) or not text:
+        return None
+    if len(text) > _MAX_TOOL_TEXT_CHARS:
+        raise BackendContractError(adapter, "assistant text exceeds the size limit")
+    return text
+
+
+def _raise_for_sse_error(obj: dict, *, route: str = "/backend-api/conversation") -> None:
+    """Surface an in-band error without retaining its account-content body."""
+    has_error = False
     err = obj.get("error")
-    if isinstance(err, dict):
-        raw = err.get("message") or err.get("detail") or err.get("code") or err
-    elif isinstance(err, str):
-        raw = err
-    elif obj.get("type") in {"error", "conversation_error"}:
-        raw = obj.get("message") or obj.get("detail") or obj.get("code") or obj
-    if raw is None:
+    if err is not None:
+        has_error = True
+    if obj.get("type") in ("error", "conversation_error"):
+        has_error = True
+    if not has_error:
         return
-    if not isinstance(raw, str):
-        raw = json.dumps(raw, ensure_ascii=False)
-    raise RuntimeError(f"ChatGPT SSE error: {_redact_error(raw, max_len=500)}")
+    raise BackendHTTPError(
+        "STREAM",
+        route,
+        None,
+        code="temporarily_failed",
+        retryable=True,
+    )
+
+
+def _decode_sse_object(data: str, *, adapter: str) -> dict | None:
+    """Decode one bounded SSE payload without leaking raw parser failures."""
+    try:
+        payload = json.loads(data)
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        raise BackendContractError(adapter, "event payload must be valid JSON") from None
+    return payload if isinstance(payload, dict) else None
+
+
+async def _post_account_stream(session, url: str, route: str, **kwargs):
+    """Issue one stream POST and normalize network failures without body data."""
+    response_oversized = False
+    network_failed = False
+    try:
+        kwargs["allow_redirects"] = False
+        response = await session.post(url, **kwargs)
+    except Exception as exc:
+        response_oversized = _is_filesize_exceeded(exc)
+        network_failed = not response_oversized
+    if response_oversized:
+        raise BackendContractError(f"sse {route}", "stream exceeds 64 MiB") from None
+    if network_failed:
+        raise BackendHTTPError(
+            "POST", route, None, code="temporarily_failed", retryable=True
+        ) from None
+    return response
+
+
+def _stream_session() -> AsyncSession:
+    """Build an account stream session with libcurl's native size ceiling."""
+    return AsyncSession(
+        impersonate="chrome131",
+        verify=True,
+        curl_options={CurlOpt.MAXFILESIZE_LARGE: _MAX_SSE_STREAM_BYTES},
+    )
+
+
+async def _bounded_sse_lines(response, *, route: str) -> AsyncIterator[str]:
+    """Parse response bytes while bounding both the current line and stream."""
+    total = 0
+    pending = bytearray()
+    swallow_lf = False
+
+    iterator_failed = False
+    iterator_oversized = False
+    try:
+        iterator = response.aiter_content().__aiter__()
+    except Exception as exc:
+        iterator_failed = True
+        iterator_oversized = _is_filesize_exceeded(exc)
+    if iterator_failed:
+        if iterator_oversized:
+            raise BackendContractError(f"sse {route}", "stream exceeds 64 MiB") from None
+        raise BackendHTTPError(
+            "STREAM", route, None, code="temporarily_failed", retryable=True
+        ) from None
+
+    while True:
+        read_failed = False
+        read_oversized = False
+        finished = False
+        try:
+            raw_chunk = await anext(iterator)
+        except StopAsyncIteration:
+            finished = True
+        except Exception as exc:
+            read_failed = True
+            read_oversized = _is_filesize_exceeded(exc)
+
+        if finished:
+            break
+        if read_failed:
+            if read_oversized:
+                raise BackendContractError(f"sse {route}", "stream exceeds 64 MiB") from None
+            raise BackendHTTPError(
+                "STREAM", route, None, code="temporarily_failed", retryable=True
+            ) from None
+        if not isinstance(raw_chunk, (bytes, bytearray)):
+            raise BackendContractError(f"sse {route}", "stream chunk must be bytes")
+        if not raw_chunk:
+            continue
+
+        chunk_size = len(raw_chunk)
+        if chunk_size > _MAX_SSE_STREAM_BYTES - total:
+            raise BackendContractError(f"sse {route}", "stream exceeds 64 MiB")
+        total += chunk_size
+        chunk = raw_chunk if isinstance(raw_chunk, bytes) else bytes(raw_chunk)
+
+        position = 0
+        if swallow_lf:
+            swallow_lf = False
+            if chunk[0] == 0x0A:
+                position = 1
+
+        while position < len(chunk):
+            cr = chunk.find(b"\r", position)
+            lf = chunk.find(b"\n", position)
+            if cr < 0:
+                delimiter = lf
+            elif lf < 0:
+                delimiter = cr
+            else:
+                delimiter = min(cr, lf)
+
+            if delimiter < 0:
+                fragment = chunk[position:]
+                if len(fragment) > _MAX_SSE_LINE_BYTES - len(pending):
+                    raise BackendContractError(f"sse {route}", "event line exceeds 4 MiB")
+                pending.extend(fragment)
+                break
+
+            fragment = chunk[position:delimiter]
+            if len(fragment) > _MAX_SSE_LINE_BYTES - len(pending):
+                raise BackendContractError(f"sse {route}", "event line exceeds 4 MiB")
+            pending.extend(fragment)
+            yield pending.decode("utf-8", errors="replace")
+            pending.clear()
+
+            if chunk[delimiter] == 0x0D:
+                if delimiter + 1 == len(chunk):
+                    swallow_lf = True
+                    position = delimiter + 1
+                elif chunk[delimiter + 1] == 0x0A:
+                    position = delimiter + 2
+                else:
+                    position = delimiter + 1
+            else:
+                position = delimiter + 1
+
+    if pending:
+        yield pending.decode("utf-8", errors="replace")
+
+
+def _raise_http_status(route: str, status_code: int) -> None:
+    raise backend_http_error("POST", route, status_code)
 
 
 # /backend-api/f/conversation — the frontend-facing endpoint used by the web app.
@@ -83,23 +796,13 @@ HEAVY_DR_HINT = "connector:connector_openai_deep_research"
 
 
 def _raw_dump(obj: dict, *, phase: str) -> None:
-    path = os.environ.get("GPT2AGENT_RAW_DUMP")
-    if not path:
-        return
-    record = {"phase": phase, "obj": obj}
-    try:
-        out = Path(path).expanduser()
-        out.parent.mkdir(parents=True, exist_ok=True)
-        serialized = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
-        fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        try:
-            os.fchmod(fd, 0o600)
-        except (OSError, AttributeError):
-            pass
-        with os.fdopen(fd, "a", encoding="utf-8") as stream:
-            stream.write(serialized + "\n")
-    except Exception as exc:
-        _log.warning("GPT2AGENT_RAW_DUMP write failed (%s)", exc)
+    """Reject the removed raw-payload persistence escape hatch."""
+    del obj, phase
+    if os.environ.get("GPT2AGENT_RAW_DUMP"):
+        raise RuntimeError(
+            "GPT2AGENT_RAW_DUMP is no longer supported because it persisted "
+            "private account payloads; unset GPT2AGENT_RAW_DUMP to continue"
+        )
 
 
 def _has_citation_payload(meta: dict | None) -> bool:
@@ -146,7 +849,7 @@ def _coerce_widget_state(obj: object) -> dict | None:
             return None
         try:
             obj = json.loads(obj[brace:])
-        except (json.JSONDecodeError, ValueError):
+        except (json.JSONDecodeError, ValueError, RecursionError):
             return None
     if not isinstance(obj, dict):
         return None
@@ -156,36 +859,23 @@ def _coerce_widget_state(obj: object) -> dict | None:
     return inner if isinstance(inner, dict) else None
 
 
-def _dr_report_from_widget_state(detail: dict | None) -> tuple[str, list]:
-    """Recover the Deep Research report from a connector widget-state node.
+def _dr_widget_report_candidates(detail: dict | None) -> list[tuple[dict, str, list]]:
+    """Return validated ``(carrier, report_text, references)`` candidates.
 
-    The "Deep Research App" connector (pineapple URI
-    ``connectors://connector_openai_deep_research``) never writes its final
-    report as an assistant text node in the conversation ``mapping``; the report
-    text lives in ``widget_state.report_message`` and renders client-side. This
-    walks the mapping for either widget-state carrier (see
-    :func:`_coerce_widget_state`) and returns ``(report_text, content_references)``
-    for the longest *completed* report found, or ``("", [])`` if none is present.
-
-    Hardening (audits 2026-06-18 and 2026-07-10):
-
-    * Only ``tool`` nodes with the observed Deep Research-specific backend
-      envelope are accepted. Arbitrary assistant, user, or tool content with a
-      widget-shaped payload is ignored. These envelope checks are fail-closed
-      provenance validation, not cryptographic authentication; the payload itself
-      is unsigned and can still contain incorrect or prompt-injected research.
-    * The text carrier must *start with* the prefix, not merely contain it.
-    * An in-progress draft is ignored: both the top-level widget status and the
-      nested report status must carry their explicit completed values, so polling
-      never emits a half-written report as the final answer.
+    The carrier object is retained so a polling caller can require the widget
+    report to belong to the authoritative latest lifecycle.  This provenance
+    must not be discarded before lifecycle ordering is checked: an older,
+    completed widget can remain in the mapping while a newer tool call is still
+    running.
     """
     mapping = (detail or {}).get("mapping") or {}
     if not isinstance(mapping, dict):
-        return "", []
-    best_text = ""
-    best_refs: list = []
+        return []
+    candidates: list[tuple[dict, str, list]] = []
     for node in mapping.values():
-        msg = (node or {}).get("message")
+        if not isinstance(node, dict):
+            continue
+        msg = node.get("message")
         if not isinstance(msg, dict):
             continue
         author = msg.get("author") or {}
@@ -201,7 +891,14 @@ def _dr_report_from_widget_state(detail: dict | None) -> tuple[str, list]:
         ):
             continue
         carriers: list[object] = []
-        parts = content.get("parts") or []
+        parts = content.get("parts")
+        if parts is None:
+            parts = []
+        if not isinstance(parts, list) or len(parts) > _MAX_TOOL_PARTS:
+            raise BackendContractError(
+                "heavy_deep_research",
+                "widget carrier parts must be an array of at most 100 items",
+            )
         if (
             author.get("name") == "api_tool.widget_state"
             and content.get("content_type") == "text"
@@ -234,64 +931,208 @@ def _dr_report_from_widget_state(detail: dict | None) -> tuple[str, list]:
             if not isinstance(report, dict):
                 continue
             # Only emit the exact completed shape observed from the connector.
-            if (
-                (state or {}).get("status") != "completed"
-                or report.get("status") != "finished_successfully"
-            ):
+            if (state or {}).get("status") != "completed" or report.get(
+                "status"
+            ) != "finished_successfully":
                 continue
             report_content = report.get("content") or {}
-            if (
-                not isinstance(report_content, dict)
-                or report_content.get("content_type") != "text"
-            ):
+            if not isinstance(report_content, dict) or report_content.get("content_type") != "text":
                 continue
-            rparts = report_content.get("parts") or []
-            text = rparts[0] if rparts and isinstance(rparts[0], str) else ""
-            if text and len(text) > len(best_text):
-                best_text = text
-                refs = (report.get("metadata") or {}).get("content_references") or []
-                best_refs = refs if isinstance(refs, list) else []
-    return best_text, best_refs
+            rparts = report_content.get("parts")
+            if rparts is None:
+                rparts = []
+            if not isinstance(rparts, list) or len(rparts) > _MAX_TOOL_PARTS:
+                raise BackendContractError(
+                    "heavy_deep_research",
+                    "widget report parts must be an array of at most 100 items",
+                )
+            if rparts and not isinstance(rparts[0], str):
+                raise BackendContractError(
+                    "heavy_deep_research", "widget report first part must be a string"
+                )
+            text = rparts[0] if rparts else ""
+            if not text:
+                continue
+            if len(text) > _MAX_TOOL_TEXT_CHARS:
+                raise BackendContractError(
+                    "heavy_deep_research", "widget report text exceeds the size limit"
+                )
+            report_metadata = report.get("metadata") or {}
+            if not isinstance(report_metadata, dict):
+                raise BackendContractError(
+                    "heavy_deep_research", "widget report metadata must be an object"
+                )
+            _validate_metadata_bounds(report_metadata, adapter="heavy_deep_research")
+            refs = report_metadata.get("content_references") or []
+            if not isinstance(refs, list):
+                raise BackendContractError(
+                    "heavy_deep_research", "widget references must be an array"
+                )
+            candidates.append((msg, text, refs))
+    return candidates
 
 
-def _pointer_parts(path: str, prefix: str) -> list[str]:
+def _dr_report_from_widget_state(detail: dict | None) -> tuple[str, list]:
+    """Recover the Deep Research report from a connector widget-state node.
+
+    The "Deep Research App" connector (pineapple URI
+    ``connectors://connector_openai_deep_research``) never writes its final
+    report as an assistant text node in the conversation ``mapping``; the report
+    text lives in ``widget_state.report_message`` and renders client-side. This
+    walks the mapping for either widget-state carrier (see
+    :func:`_coerce_widget_state`) and returns ``(report_text, content_references)``
+    for the longest *completed* report found, or ``("", [])`` if none is present.
+
+    Hardening (audits 2026-06-18 and 2026-07-10):
+
+    * Only ``tool`` nodes with the observed Deep Research-specific backend
+      envelope are accepted. Arbitrary assistant, user, or tool content with a
+      widget-shaped payload is ignored. These envelope checks are fail-closed
+      provenance validation, not cryptographic authentication; the payload itself
+      is unsigned and can still contain incorrect or prompt-injected research.
+    * The text carrier must *start with* the prefix, not merely contain it.
+    * An in-progress draft is ignored: both the top-level widget status and the
+      nested report status must carry their explicit completed values, so polling
+      never emits a half-written report as the final answer.
+    """
+    candidates = _dr_widget_report_candidates(detail)
+    if not candidates:
+        return "", []
+    _, text, refs = max(candidates, key=lambda candidate: len(candidate[1]))
+    return text, refs
+
+
+def _is_ascii_pointer_index(part: str) -> bool:
+    return bool(part) and part.isascii() and part.isdecimal()
+
+
+def _validate_metadata_bounds(value: object, *, adapter: str) -> None:
+    """Validate one JSON metadata tree before copying or projecting it."""
+    stack: list[tuple[object, int]] = [(value, 0)]
+    seen_containers: set[int] = set()
+    node_count = 0
+    string_chars = 0
+    while stack:
+        current, depth = stack.pop()
+        node_count += 1
+        if node_count > _MAX_METADATA_NODES:
+            raise BackendContractError(adapter, "metadata exceeds the node limit")
+        if depth > _MAX_METADATA_STRUCTURE_DEPTH:
+            raise BackendContractError(adapter, "metadata exceeds the nesting limit")
+        if isinstance(current, dict):
+            identity = id(current)
+            if identity in seen_containers:
+                raise BackendContractError(adapter, "metadata must be an acyclic JSON tree")
+            seen_containers.add(identity)
+            for key, child in current.items():
+                if not isinstance(key, str) or len(key) > _MAX_METADATA_POINTER_CHARS:
+                    raise BackendContractError(adapter, "metadata object key is invalid")
+                string_chars += len(key)
+                if string_chars > _MAX_METADATA_STRING_CHARS:
+                    raise BackendContractError(adapter, "metadata exceeds the string size limit")
+                stack.append((child, depth + 1))
+        elif isinstance(current, list):
+            identity = id(current)
+            if identity in seen_containers:
+                raise BackendContractError(adapter, "metadata must be an acyclic JSON tree")
+            seen_containers.add(identity)
+            if len(current) > _MAX_METADATA_LIST_ITEMS:
+                raise BackendContractError(adapter, "metadata list exceeds the size limit")
+            stack.extend((child, depth + 1) for child in current)
+        elif isinstance(current, str):
+            string_chars += len(current)
+            if string_chars > _MAX_METADATA_STRING_CHARS:
+                raise BackendContractError(adapter, "metadata exceeds the string size limit")
+        elif current is None or isinstance(current, (bool, int)):
+            continue
+        elif isinstance(current, float) and math.isfinite(current):
+            continue
+        else:
+            raise BackendContractError(adapter, "metadata must contain JSON values")
+
+
+def _pointer_parts(
+    path: str,
+    prefix: str,
+    *,
+    adapter: str = "conversation_stream",
+) -> list[str]:
+    if len(path) > _MAX_METADATA_POINTER_CHARS:
+        raise BackendContractError(adapter, "metadata pointer exceeds the size limit")
     tail = path[len(prefix) :].strip("/")
     if not tail:
         return []
-    return [p.replace("~1", "/").replace("~0", "~") for p in tail.split("/")]
+    raw_parts = tail.split("/")
+    if len(raw_parts) > _MAX_METADATA_POINTER_DEPTH:
+        raise BackendContractError(adapter, "metadata pointer exceeds the depth limit")
+    parts: list[str] = []
+    for raw_part in raw_parts:
+        if re.search(r"~(?:[^01]|$)", raw_part):
+            raise BackendContractError(adapter, "metadata pointer escape is invalid")
+        part = raw_part.replace("~1", "/").replace("~0", "~")
+        if part.isnumeric() and not _is_ascii_pointer_index(part):
+            raise BackendContractError(adapter, "metadata pointer array index is invalid")
+        if _is_ascii_pointer_index(part) and int(part) > _MAX_METADATA_ARRAY_INDEX:
+            raise BackendContractError(adapter, "metadata pointer array index is too large")
+        parts.append(part)
+    return parts
 
 
 def _new_container(next_part: str) -> list | dict:
-    return [] if next_part == "-" or next_part.isdigit() else {}
+    return [] if next_part == "-" or _is_ascii_pointer_index(next_part) else {}
 
 
-def _ensure_list_slot(seq: list, part: str, value_factory):
+def _ensure_list_slot(
+    seq: list,
+    part: str,
+    value_factory,
+    *,
+    adapter: str = "conversation_stream",
+):
     if part == "-":
+        if len(seq) >= _MAX_METADATA_LIST_ITEMS:
+            raise BackendContractError(adapter, "metadata list exceeds the size limit")
         seq.append(value_factory())
         return seq[-1]
-    if not part.isdigit():
-        return None
+    if not _is_ascii_pointer_index(part):
+        raise BackendContractError(adapter, "metadata list pointer must be an index")
     idx = int(part)
+    if idx > _MAX_METADATA_ARRAY_INDEX:
+        raise BackendContractError(adapter, "metadata pointer array index is too large")
     while len(seq) <= idx:
+        if len(seq) >= _MAX_METADATA_LIST_ITEMS:
+            raise BackendContractError(adapter, "metadata list exceeds the size limit")
         seq.append(None)
     if not isinstance(seq[idx], (dict, list)):
         seq[idx] = value_factory()
     return seq[idx]
 
 
-def _merge_metadata_path(meta: dict, path: str, op: str, value) -> dict:
+def _merge_metadata_path(
+    meta: dict,
+    path: str,
+    op: str,
+    value,
+    *,
+    adapter: str = "conversation_stream",
+) -> dict:
+    _validate_metadata_bounds(meta, adapter=adapter)
     if path == "/message/metadata":
         if op in ("append", "patch") and isinstance(value, dict):
-            return {**meta, **value}
-        if op == "replace" and isinstance(value, dict):
+            _validate_metadata_bounds(value, adapter=adapter)
+            merged = {**meta, **value}
+            _validate_metadata_bounds(merged, adapter=adapter)
+            return merged
+        if op in ("add", "replace") and isinstance(value, dict):
+            _validate_metadata_bounds(value, adapter=adapter)
             return value
         return meta
 
     if not path.startswith("/message/metadata/"):
         return meta
 
-    out = dict(meta)
-    parts = _pointer_parts(path, "/message/metadata")
+    out = deepcopy(meta)
+    parts = _pointer_parts(path, "/message/metadata", adapter=adapter)
     if not parts:
         return out
 
@@ -305,9 +1146,12 @@ def _merge_metadata_path(meta: dict, path: str, op: str, value) -> dict:
                 cur[part] = nxt
             cur = nxt
         elif isinstance(cur, list):
-            nxt = _ensure_list_slot(cur, part, lambda: _new_container(next_part))
-            if nxt is None:
-                return out
+            nxt = _ensure_list_slot(
+                cur,
+                part,
+                lambda: _new_container(next_part),
+                adapter=adapter,
+            )
             cur = nxt
 
     key = parts[-1]
@@ -315,6 +1159,8 @@ def _merge_metadata_path(meta: dict, path: str, op: str, value) -> dict:
         if op == "append":
             existing = cur.get(key)
             if isinstance(existing, list):
+                if len(existing) >= _MAX_METADATA_LIST_ITEMS:
+                    raise BackendContractError(adapter, "metadata list exceeds the size limit")
                 cur[key] = [*existing, value]
             elif isinstance(existing, str) and isinstance(value, str):
                 cur[key] = existing + value
@@ -326,17 +1172,26 @@ def _merge_metadata_path(meta: dict, path: str, op: str, value) -> dict:
             cur[key] = value
     elif isinstance(cur, list):
         if key == "-" or op == "append":
+            if len(cur) >= _MAX_METADATA_LIST_ITEMS:
+                raise BackendContractError(adapter, "metadata list exceeds the size limit")
             cur.append(value)
-        elif key.isdigit():
+        elif _is_ascii_pointer_index(key):
             idx = int(key)
+            if idx > _MAX_METADATA_ARRAY_INDEX:
+                raise BackendContractError(adapter, "metadata pointer array index is too large")
             while len(cur) <= idx:
+                if len(cur) >= _MAX_METADATA_LIST_ITEMS:
+                    raise BackendContractError(adapter, "metadata list exceeds the size limit")
                 cur.append(None)
             cur[idx] = value
+        else:
+            raise BackendContractError(adapter, "metadata list pointer must be an index")
+    _validate_metadata_bounds(out, adapter=adapter)
     return out
 
 
 def _is_connector_dispatch_text(text: str) -> bool:
-    return text.startswith('{"path":') and "connector_openai_deep_research" in text
+    return _connector_dispatch_category(text) is not None
 
 
 def _build_payload(
@@ -345,6 +1200,7 @@ def _build_payload(
     *,
     gizmo_id: str | None = None,
     temporary: bool = True,
+    thinking_effort: str | None = None,
 ) -> dict:
     payload: dict = {
         "action": "next",
@@ -369,6 +1225,8 @@ def _build_payload(
     if gizmo_id:
         payload["gizmo_id"] = gizmo_id
         payload["conversation_origin"] = {"type": "custom_gpt", "gizmo_id": gizmo_id}
+    if thinking_effort is not None:
+        payload["thinking_effort"] = thinking_effort
     return payload
 
 
@@ -536,79 +1394,314 @@ class ConversationClient:
         *,
         gizmo_id: str | None = None,
         temporary: bool = True,
+        thinking_effort: str | None = None,
+        auth_headers: Mapping[str, str] | None = None,
     ) -> AsyncIterator[str | dict]:
-        # Yields text chunks (str). As the final item it may yield a single
-        # ``{"_conversation_id": ...}`` dict sentinel for ``complete()`` to detect
-        # agent-mode async runs — callers that join chunks must skip non-str items.
-        self._backend._reload_token_if_stale()
-        headers = dict(self._backend._session.headers)
+        # Buffers each backend message until later visibility patches can no longer
+        # revoke it, then yields text chunks (str). The optional final dict is one
+        # combined private sentinel for ``complete()``; callers that join chunks
+        # must skip non-str items.
+        headers = (
+            dict(auth_headers) if auth_headers is not None else self._backend.request_headers()
+        )
         headers["Accept"] = "text/event-stream"
         headers["Content-Type"] = "application/json"
 
-        sentinel = await SentinelGate(self._backend).get_tokens()
-        headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
-            "chat-requirements"
-        ]
+        sentinel = await SentinelGate(self._backend).get_tokens(headers)
+        headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel["chat-requirements"]
         if sentinel.get("proof"):
             headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
         if sentinel.get("turnstile"):
             headers["Openai-Sentinel-Turnstile-Token"] = sentinel["turnstile"]
 
-        payload = _build_payload(model, messages, gizmo_id=gizmo_id, temporary=temporary)
+        payload = _build_payload(
+            model,
+            messages,
+            gizmo_id=gizmo_id,
+            temporary=temporary,
+            thinking_effort=thinking_effort,
+        )
         if tools:
             payload["tools"] = tools
 
-        async with AsyncSession(impersonate="chrome131", verify=True) as s:
-            resp = await s.post(
+        async with _stream_session() as s:
+            resp = await _post_account_stream(
+                s,
                 _CONV_URL,
+                "/backend-api/conversation",
                 headers=headers,
                 json=payload,
                 timeout=300,
                 stream=True,
             )
-            if resp.status_code == 401:
-                body = _safe_body(resp)
-                raise RuntimeError(
-                    "401 Unauthorized — run `codex login`"
-                    + (f": {body}" if body else "")
-                )
-            if resp.status_code == 403:
-                body = _safe_body(resp)
-                raise RuntimeError(
-                    "403 Forbidden — token may have expired"
-                    + (f": {body}" if body else "")
-                )
             if resp.status_code not in (200, 201):
-                body = _safe_body(resp)
-                raise RuntimeError(
-                    f"HTTP {resp.status_code} from /backend-api/conversation"
-                    + (f": {body}" if body else "")
-                )
+                _raise_http_status("/backend-api/conversation", resp.status_code)
 
             current_msg_id: str | None = None
-            last_text = ""
+            have_current_message = False
+            last_text_parts: list[str] = []
+            last_text_length = 0
+            current_candidate_key: str | None = None
+            candidate_order: list[str] = []
+            candidate_text: dict[str, str] = {}
+            revoked_message_ids: set[str] = set()
             _conversation_id: str | None = None
             done_received = False
             message_completed = False
+            current_message_visible = False
+            current_visibility_revoked = False
+            current_message_role = ""
+            current_metadata: dict = {}
+            last_path: str | None = None
+            tool_activity: set[str] = set()
+
+            def _set_current_text(value: str) -> None:
+                nonlocal last_text_length
+                if len(value) > _MAX_TOOL_TEXT_CHARS:
+                    raise BackendContractError(
+                        "conversation_stream", "assistant text exceeds the size limit"
+                    )
+                last_text_parts.clear()
+                if value:
+                    last_text_parts.append(value)
+                last_text_length = len(value)
+
+            def _save_current() -> None:
+                if current_candidate_key is None:
+                    return
+                text = "".join(last_text_parts)
+                dispatch_category = (
+                    _connector_dispatch_category(text)
+                    if current_message_role == "assistant"
+                    else None
+                )
+                if dispatch_category is not None:
+                    tool_activity.add(dispatch_category)
+                    candidate_text.pop(current_candidate_key, None)
+                    return
+                if current_message_visible and text:
+                    candidate_text[current_candidate_key] = text
+                else:
+                    candidate_text.pop(current_candidate_key, None)
 
             def _reset_if_new_msg(msg_id: str | None) -> bool:
-                """Return True if this frame starts a new message (caller must not dedupe)."""
-                nonlocal current_msg_id, last_text
-                if msg_id and msg_id != current_msg_id:
+                """Start a patch target while retaining revocable candidates by ID."""
+                nonlocal current_msg_id, have_current_message
+                nonlocal current_message_visible, current_message_role
+                nonlocal current_metadata, current_visibility_revoked, last_path
+                nonlocal current_candidate_key
+                is_new = not have_current_message or (
+                    msg_id is not None and msg_id != current_msg_id
+                )
+                if is_new:
+                    if have_current_message:
+                        _save_current()
                     current_msg_id = msg_id
-                    last_text = ""
+                    have_current_message = True
+                    current_candidate_key = (
+                        f"message:{msg_id}" if msg_id is not None else "message:unknown"
+                    )
+                    if current_candidate_key not in candidate_order:
+                        if len(candidate_order) >= _MAX_TOOL_RECORDS:
+                            raise BackendContractError(
+                                "conversation_stream",
+                                "message candidate list exceeds 100 records",
+                            )
+                        candidate_order.append(current_candidate_key)
+                    _set_current_text("")
+                    current_message_visible = False
+                    current_visibility_revoked = bool(
+                        msg_id is not None and msg_id in revoked_message_ids
+                    )
+                    current_message_role = ""
+                    current_metadata = {}
+                    last_path = None
                     return True
                 return False
 
             def _track_message_lifecycle(message: dict) -> None:
                 nonlocal message_completed
-                role = (message.get("author") or {}).get("role")
-                if role in ("assistant", "tool"):
-                    message_completed = _is_successful_assistant_terminal(message)
+                message_completed = _is_successful_assistant_terminal(message)
+                category = _tool_activity_category(message)
+                if category is not None:
+                    tool_activity.add(category)
 
-            async for raw_line in resp.aiter_lines():
-                if isinstance(raw_line, bytes):
-                    raw_line = raw_line.decode("utf-8", errors="replace")
+            def _accept_message_snapshot(message: dict) -> None:
+                nonlocal current_message_visible, current_message_role
+                nonlocal current_metadata, current_visibility_revoked
+                nonlocal last_path
+                author = message.get("author")
+                if not isinstance(author, dict):
+                    raise BackendContractError(
+                        "conversation_stream", "message author must be an object"
+                    )
+                role = author.get("role")
+                if not isinstance(role, str) or role not in _KNOWN_MESSAGE_ROLES:
+                    raise BackendContractError(
+                        "conversation_stream", "message author role is invalid"
+                    )
+                _track_message_lifecycle(message)
+                msg_id = message.get("id")
+                candidate_key = (
+                    f"message:{msg_id}" if isinstance(msg_id, str) else "message:unknown"
+                )
+                candidate_was_known = candidate_key in candidate_order
+                started_new = _reset_if_new_msg(msg_id if isinstance(msg_id, str) else None)
+                current_message_role = role
+                metadata = message.get("metadata", {})
+                if metadata is None:
+                    metadata = {}
+                elif not isinstance(metadata, dict):
+                    raise BackendContractError(
+                        "conversation_stream", "message metadata must be an object"
+                    )
+                _validate_metadata_bounds(metadata, adapter="conversation_stream")
+                current_metadata = metadata
+                if current_visibility_revoked or not _is_visible_assistant_message(message):
+                    if role != "assistant" or not started_new or not candidate_was_known:
+                        candidate_text.clear()
+                    _revoke_current_visibility()
+                    return
+                current_message_visible = True
+                content = message.get("content")
+                if not isinstance(content, dict):
+                    current_message_visible = False
+                    _set_current_text("")
+                    last_path = None
+                    return
+                parts = content.get("parts")
+                if not isinstance(parts, list) or len(parts) > _MAX_TOOL_PARTS:
+                    current_message_visible = False
+                    _set_current_text("")
+                    last_path = None
+                    if isinstance(parts, list):
+                        raise BackendContractError(
+                            "conversation_stream",
+                            "message parts must be an array of at most 100 items",
+                        )
+                    return
+                _set_current_text(parts[0] if parts and isinstance(parts[0], str) else "")
+                last_path = "/message/content/parts/0"
+
+            def _revoke_current_visibility() -> None:
+                nonlocal current_message_visible, current_visibility_revoked
+                nonlocal last_path, message_completed
+                current_message_visible = False
+                current_visibility_revoked = True
+                message_completed = False
+                if current_msg_id is not None:
+                    revoked_message_ids.add(current_msg_id)
+                if current_candidate_key is not None:
+                    candidate_text.pop(current_candidate_key, None)
+                _set_current_text("")
+                last_path = None
+
+            def _apply_path_patch(path: str, op: str, value: object) -> None:
+                nonlocal current_metadata, last_path, last_text_length
+                nonlocal message_completed
+                last_path = path
+                if not have_current_message:
+                    return
+                if path == "/message/metadata" or path.startswith("/message/metadata/"):
+                    if op not in {"add", "append", "patch", "replace"}:
+                        _revoke_current_visibility()
+                        return
+                    if path == "/message/metadata" and not isinstance(value, dict):
+                        _revoke_current_visibility()
+                        return
+                    current_metadata = _merge_metadata_path(
+                        current_metadata,
+                        path,
+                        op,
+                        value,
+                        adapter="conversation_stream",
+                    )
+                    if not is_user_visible_message({"metadata": current_metadata}):
+                        _revoke_current_visibility()
+                    return
+                if path == "/message/status":
+                    if op not in {"add", "replace"} or not isinstance(value, str):
+                        _revoke_current_visibility()
+                        return
+                    if current_message_role in ("assistant", "tool"):
+                        message_completed = bool(
+                            current_message_visible
+                            and current_message_role == "assistant"
+                            and value == "finished_successfully"
+                        )
+                    return
+                if path != "/message/content/parts/0":
+                    if path == "/message" or path.startswith("/message/"):
+                        # Exposure-defining fields such as recipient, author,
+                        # and content type can change after text was buffered.
+                        # Until every mutation is revalidated as a full message,
+                        # discard the candidate rather than projecting stale text.
+                        _revoke_current_visibility()
+                    return
+                if (
+                    not current_message_visible
+                    or op not in {"add", "append", "replace"}
+                    or not isinstance(value, str)
+                ):
+                    _revoke_current_visibility()
+                    return
+                message_completed = False
+                if op == "append":
+                    if last_text_length + len(value) > _MAX_TOOL_TEXT_CHARS:
+                        raise BackendContractError(
+                            "conversation_stream",
+                            "assistant text exceeds the size limit",
+                        )
+                    if value:
+                        last_text_parts.append(value)
+                        last_text_length += len(value)
+                elif op in {"add", "replace"}:
+                    _set_current_text(value)
+
+            def _apply_patch(obj: dict) -> None:
+                nonlocal last_path
+                p, o = _validated_patch_tokens(
+                    obj.get("p"),
+                    obj.get("o"),
+                    adapter="conversation_stream",
+                )
+                has_v = "v" in obj
+                value = obj.get("v")
+
+                if (
+                    isinstance(value, dict)
+                    and "message" in value
+                    and ((p == "" and o in {"add", "replace"}) or (p is None and o is None))
+                ):
+                    message = value.get("message")
+                    if isinstance(message, dict):
+                        _accept_message_snapshot(message)
+                    else:
+                        _reset_if_new_msg(None)
+                        _revoke_current_visibility()
+                    return
+
+                if p == "" and o == "patch" and isinstance(value, list):
+                    for subpatch in value:
+                        if isinstance(subpatch, dict):
+                            _apply_patch(subpatch)
+                        else:
+                            _revoke_current_visibility()
+                    return
+
+                if p == "":
+                    _revoke_current_visibility()
+                    last_path = None
+                    return
+
+                if isinstance(p, str) and p:
+                    _apply_path_patch(p, o if isinstance(o, str) else "replace", value)
+                    return
+
+                if p is None and o is None and has_v and last_path:
+                    _apply_path_patch(last_path, "append", value)
+
+            async for raw_line in _bounded_sse_lines(resp, route="/backend-api/conversation"):
                 line = raw_line.strip()
                 if not line or line.startswith(":") or not line.startswith("data:"):
                     continue
@@ -616,90 +1709,47 @@ class ConversationClient:
                 if data == "[DONE]":
                     done_received = True
                     break
-                try:
-                    obj = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(obj, dict):
+                obj = _decode_sse_object(data, adapter="conversation_stream")
+                if obj is None:
                     continue
                 _raise_for_sse_error(obj)
 
                 # Capture conversation_id from any event that carries it
                 cid = obj.get("conversation_id")
                 if cid and not _conversation_id:
-                    _conversation_id = cid
+                    _conversation_id = _backend_path_id(
+                        cid, adapter="conversation_stream", field="conversation_id"
+                    )
 
-                # Format A: v-patch (live streaming mode)
-                v = obj.get("v")
-                if v is not None:
-                    if isinstance(v, str):
-                        # String v-patch — continuation of current message id
-                        if v:
-                            message_completed = False
-                            yield v
-                            last_text += v
-                        continue
-                    if isinstance(v, dict):
-                        # `{"v":{"message":null}}` makes .get("message", {}) return
-                        # None (key present), so chained .get() would AttributeError.
-                        vmsg = v.get("message") or {}
-                        _track_message_lifecycle(vmsg)
-                        msg_id = vmsg.get("id")
-                        is_new = _reset_if_new_msg(msg_id)
-                        parts = (vmsg.get("content") or {}).get("parts") or []
-                        if parts and isinstance(parts[0], str):
-                            new = parts[0]
-                            if is_new:
-                                # New message — yield fresh, don't dedupe against prior stream
-                                if new:
-                                    yield new
-                                    last_text = new
-                            elif new.startswith(last_text):
-                                delta = new[len(last_text) :]
-                                if delta:
-                                    yield delta
-                                last_text = new
-                            elif new:
-                                yield new
-                                last_text = new
-                        continue
+                # Format A: v1 JSON-patch stream. Output remains buffered until
+                # this message can no longer receive a late visibility patch.
+                if "v" in obj or "p" in obj or "o" in obj:
+                    _apply_patch(obj)
+                    continue
 
                 # Format B: full message replacement (history_disabled mode)
                 msg = obj.get("message")
                 if not isinstance(msg, dict):
                     continue
-                _track_message_lifecycle(msg)
-                if msg.get("author", {}).get("role") != "assistant":
-                    continue
-                content = msg.get("content") or {}
-                ct = content.get("content_type")
-                if ct not in ("text", "multimodal_text"):
-                    continue
-                parts = content.get("parts") or []
-                if not parts or not isinstance(parts[0], str):
-                    continue
-                msg_id = msg.get("id")
-                is_new = _reset_if_new_msg(msg_id)
-                new = parts[0]
-                if is_new:
-                    if new:
-                        yield new
-                        last_text = new
-                elif new.startswith(last_text):
-                    delta = new[len(last_text) :]
-                    if delta:
-                        yield delta
-                    last_text = new
-                elif new:
-                    yield new
-                    last_text = new
+                _accept_message_snapshot(msg)
 
             if not (done_received or message_completed):
-                raise _IncompleteStreamError(_conversation_id)
+                raise _IncompleteStreamError(_conversation_id, tool_activity)
 
-            # Emit conversation_id for complete() to use (agent mode async detection)
+            if have_current_message:
+                _save_current()
+            for candidate_key in candidate_order:
+                chunk = candidate_text.get(candidate_key)
+                if chunk:
+                    yield chunk
+
+            terminal: dict[str, object] = {}
             if _conversation_id:
-                yield {"_conversation_id": _conversation_id}
+                terminal["_conversation_id"] = _conversation_id
+            if tool_activity:
+                terminal["_tool_activity"] = sorted(tool_activity)
+            if terminal:
+                yield terminal
 
     async def complete(
         self,
@@ -709,21 +1759,44 @@ class ConversationClient:
         gizmo_id: str | None = None,
         temporary: bool = True,
         poll_async: bool = False,
+        thinking_effort: str | None = None,
+        auth_headers: Mapping[str, str] | None = None,
     ) -> str:
+        operation_headers = (
+            dict(auth_headers) if auth_headers is not None else self._backend.request_headers()
+        )
         chunks: list[str] = []
         conv_id: str | None = None
+        tool_activity: set[str] = set()
         try:
             async for event in self.stream(
-                model, messages, gizmo_id=gizmo_id, temporary=temporary
+                model,
+                messages,
+                gizmo_id=gizmo_id,
+                temporary=temporary,
+                thinking_effort=thinking_effort,
+                auth_headers=operation_headers,
             ):
                 if isinstance(event, dict):
                     if event.get("_conversation_id"):
                         conv_id = event["_conversation_id"]
+                    activity = event.get("_tool_activity")
+                    if isinstance(activity, list):
+                        tool_activity.update(
+                            category
+                            for category in activity
+                            if category in _TOOL_ACTIVITY_CATEGORIES
+                        )
                     continue  # never let a non-str sentinel reach "".join(chunks)
                 chunks.append(event)
         except _IncompleteStreamError as exc:
+            tool_activity.update(exc.tool_activity)
             if poll_async and exc.conversation_id:
-                recovered = await self._poll_async_response(exc.conversation_id)
+                recovered = await self._poll_async_response(
+                    exc.conversation_id,
+                    auth_headers=operation_headers,
+                    initial_tool_activity=tool_activity,
+                )
                 if recovered:
                     return recovered
             raise
@@ -735,63 +1808,88 @@ class ConversationClient:
         # stream, so an unconditional "not text and conv_id" poll would make an
         # ordinary chat that returns empty text hang for the full poll window.
         if poll_async and not text and conv_id:
-            text = await self._poll_async_response(conv_id)
+            text = await self._poll_async_response(
+                conv_id,
+                auth_headers=operation_headers,
+                initial_tool_activity=tool_activity,
+            )
+            return text
 
-        return text
+        return _append_tool_activity_receipt(text, tool_activity)
 
     async def _poll_async_response(
         self,
         conversation_id: str,
         poll_interval: float = 3.0,
         max_wait: float = 300.0,
+        *,
+        auth_headers: Mapping[str, str] | None = None,
+        initial_tool_activity: set[str] | None = None,
     ) -> str:
         """Poll for async agent-mode response after SSE stream ends with async_status."""
+        conversation_id = _backend_path_id(
+            conversation_id, adapter="agent_poll", field="conversation_id"
+        )
         detail_path = f"/backend-api/conversation/{conversation_id}"
         deadline = time.monotonic() + max_wait
         poll_errors = 0
+        tool_activity = set(initial_tool_activity or ())
 
         while time.monotonic() < deadline:
             await asyncio.sleep(poll_interval)
+            fatal_unknown = False
             try:
-                det = await asyncio.to_thread(self._backend.get, detail_path)
-            except Exception as exc:
+                det = await asyncio.to_thread(
+                    self._backend.get, detail_path, auth_headers=auth_headers
+                )
+            except BackendHTTPError:
                 poll_errors += 1
                 if poll_errors >= 5:
-                    raise RuntimeError(
-                        f"Agent poll: {poll_errors} consecutive errors, giving up"
-                    ) from exc
-                _log.warning("Agent poll error (%s) — continuing", exc)
+                    raise
+                _log.warning("Agent poll request failed — continuing")
                 continue
+            except Exception:
+                poll_errors += 1
+                fatal_unknown = poll_errors >= 5
+                if not fatal_unknown:
+                    _log.warning("Agent poll request failed — continuing")
+                    continue
+
+            if fatal_unknown:
+                raise BackendHTTPError(
+                    "GET",
+                    "/backend-api/conversation/{id}",
+                    None,
+                    code="temporarily_failed",
+                    retryable=True,
+                ) from None
 
             poll_errors = 0
 
-            mapping = (det or {}).get("mapping") or {}
-            best_text = ""
-            best_time = 0
-            for node in mapping.values():
-                msg = (node or {}).get("message")
-                if not isinstance(msg, dict):
-                    continue
-                role = (msg.get("author") or {}).get("role", "")
-                if role != "assistant":
-                    continue
-                content = msg.get("content") or {}
-                ct = content.get("content_type", "")
-                if ct not in ("text", "multimodal_text"):
-                    continue
-                parts = content.get("parts") or []
-                str_parts = [p for p in parts if isinstance(p, str)]
-                if str_parts and msg.get("status") == "finished_successfully":
-                    t = msg.get("create_time") or 0
-                    if t > best_time:
-                        best_time = t
-                        best_text = str_parts[0]
+            if not isinstance(det, dict):
+                raise BackendContractError("agent_poll", "conversation object response required")
+            mapping = det.get("mapping")
+            if mapping is None:
+                mapping = {}
+            if not isinstance(mapping, dict):
+                raise BackendContractError("agent_poll", "mapping object required")
+            lifecycles = _ordered_poll_lifecycles(mapping, adapter="agent_poll")
+            for _, message in lifecycles:
+                category = _tool_activity_category(message)
+                if category is not None:
+                    tool_activity.add(category)
 
-            if best_text:
-                return best_text
+            # Only the latest assistant/tool lifecycle can complete the poll.
+            # A newer hidden dispatch, tool node, or in-progress assistant
+            # invalidates every earlier visible terminal snapshot.
+            if lifecycles:
+                terminal_text = _poll_terminal_text(lifecycles[-1][1], adapter="agent_poll")
+                if terminal_text is not None:
+                    return _append_tool_activity_receipt(terminal_text, tool_activity)
 
-        _log.warning("Agent poll timed out after %ss for %s", max_wait, conversation_id)
-        return ""
+        _log.warning("Agent poll timed out after %ss", max_wait)
+        return _append_tool_activity_receipt("(no final assistant response)", tool_activity)
+
     async def image_gen(
         self,
         prompt: str,
@@ -799,85 +1897,157 @@ class ConversationClient:
         model: str = "gpt-5-3",
         poll_interval: float = 5.0,
         max_wait: float = 300.0,
+        auth_headers: Mapping[str, str] | None = None,
     ) -> dict:
         """Generate an image via ChatGPT's built-in image generation tool.
 
-        Sends the prompt through a non-temporary conversation (required for
-        image gen). The server auto-invokes the image tool, then processes
-        the image asynchronously. This method polls until the image is ready.
+        Uses ChatGPT's current prepare + conduit + frontend SSE flow. A returned
+        asset is accepted only when it is bound to this stream by the observed
+        assistant dispatch or a same-message marker and carries exact
+        image-generation provenance.
 
         Returns dict with keys:
           conversation_id, assets (list of {asset_pointer, width, height,
-          size_bytes, download_url, file_name, file_id}), metadata
+          size_bytes, download_url, file_name, file_id})
 
         Raises RuntimeError if image gen fails or times out.
         """
-        self._backend._reload_token_if_stale()
-        headers = dict(self._backend._session.headers)
+        operation_headers = (
+            dict(auth_headers) if auth_headers is not None else self._backend.request_headers()
+        )
+        headers = dict(operation_headers)
         headers["Accept"] = "text/event-stream"
         headers["Content-Type"] = "application/json"
 
-        sentinel = await SentinelGate(self._backend).get_tokens()
-        headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
-            "chat-requirements"
-        ]
+        sentinel = await SentinelGate(self._backend).get_tokens(headers)
+        headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel["chat-requirements"]
         if sentinel.get("proof"):
             headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
         if sentinel.get("turnstile"):
             headers["Openai-Sentinel-Turnstile-Token"] = sentinel["turnstile"]
 
-        payload = _build_payload(
-            model, [{"role": "user", "content": prompt}], temporary=False
+        prepare_payload, payload = _image_payloads(prompt, model)
+        prepare_path = "/backend-api/f/conversation/prepare"
+        prepare = await asyncio.to_thread(
+            self._backend.post,
+            prepare_path,
+            json=prepare_payload,
+            target_path=prepare_path,
+            target_route=prepare_path,
+            auth_headers=headers,
         )
+        if not isinstance(prepare, dict) or prepare.get("status") != "ok":
+            raise BackendContractError("image_generation", "prepare response must have status ok")
+        conduit_token = _private_protocol_string(prepare.get("conduit_token"), maximum=16_384)
+        if conduit_token is None:
+            raise BackendContractError(
+                "image_generation", "prepare response requires a bounded conduit token"
+            )
+        route = "/backend-api/f/conversation"
+        headers["X-Conduit-Token"] = conduit_token
+        headers["X-Oai-Turn-Trace-Id"] = str(uuid4())
+        headers["X-OpenAI-Target-Path"] = route
+        headers["X-OpenAI-Target-Route"] = route
 
         conversation_id: str | None = None
-        processing_text = ""
+        dispatch: dict[str, str | None] | None = None
+        candidate: tuple[dict, dict[str, str | None] | None] | None = None
+        marked_message_ids: set[str] = set()
+        marker_protocol_seen = False
+        done_received = False
+        current_message_id: str | None = None
 
-        async with AsyncSession(impersonate="chrome131", verify=True) as s:
-            resp = await s.post(
-                _CONV_URL, headers=headers, json=payload, timeout=300, stream=True,
+        async with _stream_session() as s:
+            resp = await _post_account_stream(
+                s,
+                _F_CONV_URL,
+                route,
+                headers=headers,
+                json=payload,
+                timeout=300,
+                stream=True,
             )
             if resp.status_code not in (200, 201):
-                body = _safe_body(resp)
-                raise RuntimeError(
-                    f"HTTP {resp.status_code} from image gen" + (f": {body}" if body else "")
-                )
+                _raise_http_status(route, resp.status_code)
 
-            async for raw_line in resp.aiter_lines():
-                if isinstance(raw_line, bytes):
-                    raw_line = raw_line.decode("utf-8", errors="replace")
+            async for raw_line in _bounded_sse_lines(resp, route=route):
                 line = raw_line.strip()
                 if not line or line.startswith(":") or not line.startswith("data:"):
                     continue
                 data = line[5:].strip()
                 if data == "[DONE]":
+                    done_received = True
                     break
-                try:
-                    obj = json.loads(data)
-                except json.JSONDecodeError:
+                obj = _decode_sse_object(data, adapter="image_generation")
+                if obj is None:
                     continue
-                if not isinstance(obj, dict):
-                    continue
-                _raise_for_sse_error(obj)
+                _raise_for_sse_error(obj, route=route)
 
                 cid = obj.get("conversation_id")
+                value = obj.get("v")
+                if isinstance(value, dict):
+                    _raise_for_sse_error(value, route=route)
+                    wrapped_cid = value.get("conversation_id")
+                    if cid is None and wrapped_cid is not None:
+                        cid = wrapped_cid
                 if cid and not conversation_id:
-                    conversation_id = cid
+                    conversation_id = _backend_path_id(
+                        cid,
+                        adapter="image_generation",
+                        field="conversation_id",
+                    )
 
-                msg = obj.get("message", {})
+                if (
+                    obj.get("type") == "message_marker"
+                    and obj.get("marker") == "user_visible_token"
+                ):
+                    marker_protocol_seen = True
+                    marker_message_id = _private_protocol_string(obj.get("message_id"))
+                    if marker_message_id is not None:
+                        marked_message_ids.add(marker_message_id)
+
+                if (
+                    candidate is not None
+                    and current_message_id == _private_protocol_string(candidate[0].get("id"))
+                    and _patch_mutates_current_message(obj)
+                ):
+                    # Do not reconstruct unbounded path patches in this closed
+                    # projection. Any later mutation of the current message
+                    # revokes the buffered candidate; polling may return a later,
+                    # independently validated full snapshot.
+                    candidate = None
+
+                msg = obj.get("message")
+                if not isinstance(msg, dict) and isinstance(value, dict):
+                    msg = value.get("message")
                 if not isinstance(msg, dict):
                     continue
-                role = msg.get("author", {}).get("role", "")
-                ct = (msg.get("content") or {}).get("content_type", "")
-                parts = (msg.get("content") or {}).get("parts", [])
+                current_message_id = _private_protocol_string(msg.get("id"))
+                if candidate is not None and current_message_id == _private_protocol_string(
+                    candidate[0].get("id")
+                ):
+                    candidate = None
+                observed_dispatch = _image_dispatch_binding(msg)
+                if observed_dispatch is not None:
+                    dispatch = observed_dispatch
+                    continue
+                if _is_image_result_candidate(
+                    msg,
+                    dispatch=dispatch,
+                    marked_message_ids=marked_message_ids,
+                    marker_protocol_seen=marker_protocol_seen,
+                ):
+                    candidate = (msg, dispatch)
 
-                if role == "tool" and ct == "multimodal_text":
-                    result = self._extract_image_result(conversation_id, msg)
-                    if result.get("assets"):
-                        return result
-
-                if role == "tool" and ct == "text" and parts and isinstance(parts[0], str):
-                    processing_text = parts[0]
+        if not done_received:
+            raise RuntimeError(_INCOMPLETE_RESPONSE_MESSAGE)
+        if candidate is not None and _is_image_result_candidate(
+            candidate[0],
+            dispatch=candidate[1],
+            marked_message_ids=marked_message_ids,
+            marker_protocol_seen=marker_protocol_seen,
+        ):
+            return self._extract_image_result(conversation_id, candidate[0])
 
         # Image is async — poll the conversation until multimodal_text arrives
         if not conversation_id:
@@ -887,34 +2057,48 @@ class ConversationClient:
             conversation_id,
             poll_interval=poll_interval,
             max_wait=max_wait,
-            processing_text=processing_text,
+            auth_headers=operation_headers,
+            dispatch=dispatch,
+            marked_message_ids=marked_message_ids,
+            marker_protocol_seen=marker_protocol_seen,
         )
 
     def _extract_image_result(self, conversation_id: str | None, msg: dict) -> dict:
-        """Extract image assets from a multimodal_text tool response."""
-        parts = (msg.get("content") or {}).get("parts", [])
-        meta = msg.get("metadata") or {}
+        """Project an image response onto the documented, scalar-only contract."""
+        content = msg.get("content")
+        if content is None:
+            content = {}
+        if not isinstance(content, dict):
+            raise BackendContractError("image_generation", "message content must be an object")
+        parts = content.get("parts")
+        if parts is None:
+            parts = []
+        if not isinstance(parts, list):
+            raise BackendContractError("image_generation", "message parts must be an array")
         assets = []
-        for p in parts:
-            if not isinstance(p, dict):
+        for part in parts:
+            if not isinstance(part, dict):
                 continue
-            if p.get("content_type") != "image_asset_pointer":
+            if not _is_generated_image_part(part):
                 continue
-            asset_pointer = p.get("asset_pointer", "")
-            file_id = asset_pointer.removeprefix("sediment://") if asset_pointer else ""
-            assets.append({
-                "asset_pointer": asset_pointer,
-                "file_id": file_id,
-                "width": p.get("width"),
-                "height": p.get("height"),
-                "size_bytes": p.get("size_bytes"),
-                "metadata": p.get("metadata"),
-            })
+            if len(assets) >= _MAX_TOOL_RECORDS:
+                raise BackendContractError(
+                    "image_generation", "image asset list exceeds 100 records"
+                )
+            assets.append(_project_tool_image_asset(part, adapter="image_generation"))
+
+        projected_conversation_id = None
+        if conversation_id is not None:
+            projected_conversation_id = _bounded_tool_string(
+                conversation_id,
+                field="conversation_id",
+                maximum=2_048,
+                adapter="image_generation",
+            )
 
         return {
-            "conversation_id": conversation_id,
+            "conversation_id": projected_conversation_id,
             "assets": assets,
-            "metadata": meta,
         }
 
     async def _poll_image_result(
@@ -924,47 +2108,105 @@ class ConversationClient:
         poll_interval: float = 5.0,
         max_wait: float = 300.0,
         processing_text: str = "",
+        auth_headers: Mapping[str, str] | None = None,
+        dispatch: dict[str, str | None] | None = None,
+        marked_message_ids: set[str] | None = None,
+        marker_protocol_seen: bool = False,
     ) -> dict:
         """Poll conversation until multimodal_text with image assets arrives."""
+        del processing_text
+        conversation_id = _backend_path_id(
+            conversation_id,
+            adapter="image_generation",
+            field="conversation_id",
+        )
         detail_path = f"/backend-api/conversation/{conversation_id}"
         deadline = time.monotonic() + max_wait
         poll_errors = 0
 
         while time.monotonic() < deadline:
             await asyncio.sleep(poll_interval)
+            fatal_unknown = False
             try:
-                det = await asyncio.to_thread(self._backend.get, detail_path)
+                det = await asyncio.to_thread(
+                    self._backend.get, detail_path, auth_headers=auth_headers
+                )
                 poll_errors = 0  # reset on success
-            except Exception as exc:
+            except BackendHTTPError:
                 poll_errors += 1
                 if poll_errors >= 5:
-                    raise RuntimeError(
-                        f"Image poll failed {poll_errors} times in a row: {exc}"
-                    ) from exc
-                backoff = min(poll_interval * (2 ** poll_errors), 30)
-                _log.warning("Image poll error (%s) — retrying in %.0fs", exc, backoff)
+                    raise
+                backoff = min(poll_interval * (2**poll_errors), 30)
+                _log.warning("Image poll request failed — retrying in %.0fs", backoff)
                 await asyncio.sleep(backoff)
                 continue
+            except Exception:
+                poll_errors += 1
+                fatal_unknown = poll_errors >= 5
+                if not fatal_unknown:
+                    backoff = min(poll_interval * (2**poll_errors), 30)
+                    _log.warning("Image poll request failed — retrying in %.0fs", backoff)
+                    await asyncio.sleep(backoff)
+                    continue
 
-            mapping = (det or {}).get("mapping") or {}
-            candidates = []
-            for node in mapping.values():
-                msg = (node or {}).get("message")
+            if fatal_unknown:
+                raise BackendHTTPError(
+                    "GET",
+                    "/backend-api/conversation/{id}",
+                    None,
+                    code="temporarily_failed",
+                    retryable=True,
+                ) from None
+
+            if not isinstance(det, dict):
+                raise BackendContractError(
+                    "image_generation", "conversation object response required"
+                )
+            mapping = det.get("mapping")
+            if mapping is None:
+                mapping = {}
+            if not isinstance(mapping, dict):
+                raise BackendContractError("image_generation", "mapping object required")
+            candidates: list[tuple[int, int | float | None, dict]] = []
+            for index, node in enumerate(mapping.values()):
+                if not isinstance(node, dict):
+                    continue
+                msg = node.get("message")
                 if not isinstance(msg, dict):
                     continue
-                role = (msg.get("author") or {}).get("role", "")
-                ct = (msg.get("content") or {}).get("content_type", "")
-                if role == "tool" and ct == "multimodal_text":
+                if _is_image_result_candidate(
+                    msg,
+                    dispatch=dispatch,
+                    marked_message_ids=marked_message_ids,
+                    marker_protocol_seen=marker_protocol_seen,
+                ):
                     result = self._extract_image_result(conversation_id, msg)
                     if result.get("assets"):
-                        candidates.append((msg.get("create_time") or 0, result))
+                        timestamp = _bounded_lifecycle_timestamp(
+                            msg.get("create_time"),
+                            adapter="image_generation",
+                        )
+                        candidates.append((index, timestamp, result))
             if candidates:
-                candidates.sort(key=lambda c: c[0])
-                return candidates[-1][1]
+                any_missing_time = any(timestamp is None for _, timestamp, _ in candidates)
+                any_present_time = any(timestamp is not None for _, timestamp, _ in candidates)
+                if any_missing_time and any_present_time:
+                    raise BackendContractError(
+                        "image_generation",
+                        "message create_time values must use one ordering mode",
+                    )
+                if any_missing_time:
+                    candidates.sort(key=lambda candidate: candidate[0])
+                else:
+                    candidates.sort(key=lambda candidate: (candidate[1], candidate[0]))
+                return candidates[-1][2]
 
-        raise RuntimeError(
-            f"Image gen timed out after {max_wait}s. "
-            f"Last status: {processing_text[:200]}"
+        raise BackendHTTPError(
+            "GET",
+            "/backend-api/conversation/{id}",
+            None,
+            code="temporarily_failed",
+            retryable=True,
         )
 
     async def tool_call(
@@ -985,23 +2227,18 @@ class ConversationClient:
           tool_responses (list of {content_type, parts}),
           multimodal_assets (list of image asset dicts if any)
         """
-        self._backend._reload_token_if_stale()
-        headers = dict(self._backend._session.headers)
+        headers = self._backend.request_headers()
         headers["Accept"] = "text/event-stream"
         headers["Content-Type"] = "application/json"
 
-        sentinel = await SentinelGate(self._backend).get_tokens()
-        headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
-            "chat-requirements"
-        ]
+        sentinel = await SentinelGate(self._backend).get_tokens(headers)
+        headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel["chat-requirements"]
         if sentinel.get("proof"):
             headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
         if sentinel.get("turnstile"):
             headers["Openai-Sentinel-Turnstile-Token"] = sentinel["turnstile"]
 
-        payload = _build_payload(
-            model, [{"role": "user", "content": prompt}], temporary=temporary
-        )
+        payload = _build_payload(model, [{"role": "user", "content": prompt}], temporary=temporary)
 
         conversation_id: str | None = None
         text_parts: list[str] = []
@@ -1010,21 +2247,40 @@ class ConversationClient:
         multimodal_assets: list[dict] = []
         done_received = False
         message_completed = False
+        retained_projected_chars = 0
+        retained_text_chars = 0
 
-        async with AsyncSession(impersonate="chrome131", verify=True) as s:
-            resp = await s.post(
-                _CONV_URL, headers=headers, json=payload, timeout=300, stream=True,
+        def project_part(value: str) -> str:
+            nonlocal retained_projected_chars
+            projected = _redacted_tool_text(value, maximum=_MAX_TOOL_PART_CHARS)
+            if retained_projected_chars + len(projected) > _MAX_TOOL_PROJECTED_CHARS:
+                raise BackendContractError("tool_call", "projected string parts exceed 4 MiB")
+            retained_projected_chars += len(projected)
+            return projected
+
+        def retain_text_fragment(value: str) -> str:
+            nonlocal retained_text_chars
+            projected = _redacted_tool_text(value, maximum=_MAX_TOOL_TEXT_CHARS)
+            remaining = _MAX_TOOL_TEXT_CHARS - retained_text_chars
+            fragment = projected[: max(remaining, 0)]
+            retained_text_chars += len(fragment)
+            return fragment
+
+        async with _stream_session() as s:
+            resp = await _post_account_stream(
+                s,
+                _CONV_URL,
+                "/backend-api/conversation",
+                headers=headers,
+                json=payload,
+                timeout=300,
+                stream=True,
             )
             if resp.status_code not in (200, 201):
-                body = _safe_body(resp)
-                raise RuntimeError(
-                    f"HTTP {resp.status_code} from tool_call" + (f": {body}" if body else "")
-                )
+                _raise_http_status("/backend-api/conversation", resp.status_code)
 
             last_text = ""
-            async for raw_line in resp.aiter_lines():
-                if isinstance(raw_line, bytes):
-                    raw_line = raw_line.decode("utf-8", errors="replace")
+            async for raw_line in _bounded_sse_lines(resp, route="/backend-api/conversation"):
                 line = raw_line.strip()
                 if not line or line.startswith(":") or not line.startswith("data:"):
                     continue
@@ -1032,92 +2288,143 @@ class ConversationClient:
                 if data == "[DONE]":
                     done_received = True
                     break
-                try:
-                    obj = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(obj, dict):
+                obj = _decode_sse_object(data, adapter="tool_call")
+                if obj is None:
                     continue
                 _raise_for_sse_error(obj)
 
                 cid = obj.get("conversation_id")
                 if cid and not conversation_id:
-                    conversation_id = cid
+                    conversation_id = _bounded_tool_string(
+                        cid, field="conversation_id", maximum=2_048
+                    )
 
-                msg = obj.get("message", {})
-                if not isinstance(msg, dict):
+                msg = obj.get("message")
+                if msg is None:
                     continue
-                role = msg.get("author", {}).get("role", "")
-                recipient = msg.get("recipient", "all")
-                content = msg.get("content") or {}
-                ct = content.get("content_type", "")
-                parts = content.get("parts") or []
-                status = msg.get("status", "")
-                # A newer assistant/tool lifecycle supersedes any earlier
-                # message-level terminal status. [DONE] remains independent.
-                if role in ("assistant", "tool"):
-                    message_completed = False
-
+                if not isinstance(msg, dict):
+                    raise BackendContractError("tool_call", "message must be an object or null")
+                # Every newer lifecycle supersedes completion from the prior
+                # snapshot. A validated terminal below can establish it again.
+                message_completed = False
+                author = msg.get("author")
+                if not isinstance(author, dict):
+                    raise BackendContractError("tool_call", "message author must be an object")
+                role = author.get("role")
+                if not isinstance(role, str) or role not in _KNOWN_MESSAGE_ROLES:
+                    raise BackendContractError("tool_call", "message author role is invalid")
+                if role in ("system", "user"):
+                    last_text = ""
+                    text_parts.clear()
+                    continue
+                if not is_user_visible_message(msg):
+                    last_text = ""
+                    text_parts.clear()
+                    continue
+                raw_recipient = msg.get("recipient")
+                recipient = (
+                    "all"
+                    if raw_recipient is None
+                    else _bounded_tool_string(raw_recipient, field="recipient", maximum=2_048)
+                )
+                content = msg.get("content")
+                if content is None:
+                    content = {}
+                if not isinstance(content, dict):
+                    raise BackendContractError("tool_call", "message content must be an object")
+                raw_content_type = content.get("content_type")
+                ct = (
+                    ""
+                    if raw_content_type is None
+                    else _bounded_tool_string(raw_content_type, field="content_type", maximum=128)
+                )
+                parts = content.get("parts")
+                if parts is None:
+                    parts = []
+                if not isinstance(parts, list) or len(parts) > _MAX_TOOL_PARTS:
+                    raise BackendContractError(
+                        "tool_call", "message parts must be an array of at most 100 items"
+                    )
+                raw_status = msg.get("status")
+                status = (
+                    ""
+                    if raw_status is None
+                    else _bounded_tool_string(raw_status, field="status", maximum=128)
+                )
+                is_assistant_output = (
+                    role == "assistant"
+                    and recipient == "all"
+                    and ct in ("text", "multimodal_text")
+                )
+                if not is_assistant_output:
+                    last_text = ""
+                    text_parts.clear()
                 # Assistant text (to "all")
-                if role == "assistant" and recipient == "all" and ct in ("text", "multimodal_text"):
+                if is_assistant_output:
                     str_parts = [p for p in parts if isinstance(p, str)]
                     message_completed = status == "finished_successfully"
                     if str_parts and status == "finished_successfully":
-                        last_text = str_parts[0]
+                        last_text = _redacted_tool_text(str_parts[0], maximum=_MAX_TOOL_TEXT_CHARS)
                     elif str_parts:
-                        new = str_parts[0]
+                        new = _redacted_tool_text(str_parts[0], maximum=_MAX_TOOL_TEXT_CHARS)
                         if new.startswith(last_text):
-                            delta = new[len(last_text):]
+                            delta = new[len(last_text) :]
                             if delta:
-                                text_parts.append(delta)
+                                retained = retain_text_fragment(delta)
+                                if retained:
+                                    text_parts.append(retained)
                         else:
-                            text_parts.append(new)
+                            retained = retain_text_fragment(new)
+                            if retained:
+                                text_parts.append(retained)
                         last_text = new
 
                 # Tool call (assistant to non-all recipient)
                 elif role == "assistant" and recipient != "all":
-                    call_parts = []
-                    for p in parts:
-                        if isinstance(p, str) and p:
-                            call_parts.append(p)
-                        elif isinstance(p, dict):
-                            call_parts.append(json.dumps(p, ensure_ascii=False))
-                    tool_calls.append({
-                        "recipient": recipient,
-                        "content_type": ct,
-                        "parts": call_parts,
-                    })
+                    if len(tool_calls) >= _MAX_TOOL_RECORDS:
+                        raise BackendContractError(
+                            "tool_call", "tool call list exceeds 100 records"
+                        )
+                    call_parts = [
+                        project_part(part) for part in parts if isinstance(part, str) and part
+                    ]
+                    tool_calls.append(
+                        {
+                            "recipient": recipient,
+                            "content_type": ct,
+                            "parts": call_parts,
+                        }
+                    )
 
                 # Tool response
                 elif role == "tool" and recipient == "all":
                     message_completed = status == "finished_successfully"
-                    resp_parts = []
-                    img_assets = []
-                    for p in parts:
-                        if isinstance(p, str):
-                            resp_parts.append(p)
-                        elif isinstance(p, dict):
-                            if p.get("content_type") == "image_asset_pointer":
-                                asset_pointer = p.get("asset_pointer", "")
-                                file_id = asset_pointer.replace("sediment://", "")
-                                img_assets.append({
-                                    "asset_pointer": asset_pointer,
-                                    "file_id": file_id,
-                                    "width": p.get("width"),
-                                    "height": p.get("height"),
-                                    "size_bytes": p.get("size_bytes"),
-                                })
-                            else:
-                                resp_parts.append(json.dumps(p, ensure_ascii=False))
-                    tool_responses.append({
-                        "content_type": ct,
-                        "parts": resp_parts,
-                    })
+                    if len(tool_responses) >= _MAX_TOOL_RECORDS:
+                        raise BackendContractError(
+                            "tool_call", "tool response list exceeds 100 records"
+                        )
+                    resp_parts = [project_part(part) for part in parts if isinstance(part, str)]
+                    img_assets = [
+                        _project_tool_image_asset(part)
+                        for part in parts
+                        if isinstance(part, dict)
+                        and part.get("content_type") == "image_asset_pointer"
+                    ]
+                    if len(multimodal_assets) + len(img_assets) > _MAX_TOOL_RECORDS:
+                        raise BackendContractError(
+                            "tool_call", "multimodal asset list exceeds 100 records"
+                        )
+                    tool_responses.append(
+                        {
+                            "content_type": ct,
+                            "parts": resp_parts,
+                        }
+                    )
                     multimodal_assets.extend(img_assets)
 
         if not (done_received or message_completed):
             raise RuntimeError(_INCOMPLETE_RESPONSE_MESSAGE)
-        final_text = last_text or "".join(text_parts)
+        final_text = (last_text or "".join(text_parts))[:_MAX_TOOL_TEXT_CHARS]
 
         return {
             "conversation_id": conversation_id,
@@ -1137,7 +2444,8 @@ class ConversationClient:
 
         Yields dicts of shape:
           {"type": "progress", "text": <partial_text>}   — intermediate text deltas
-          {"type": "tool",     "call": <search_call>}    — tool invocations (search/browse)
+          {"type": "tool", "call": "web_search", "category": "web"}
+              — static receipt for search/browse dispatch
           {"type": "done",     "text": <full_text>,
            "content_references": [...], "search_result_groups": [...]}
           {"type": "clarification_auto_reply", "round": N, "question": <text>}
@@ -1153,24 +2461,20 @@ class ConversationClient:
         of starting research immediately. ``max_clarification_rounds`` caps how
         many auto-replies the wrapper sends before giving up (default 2).
         """
+        _raw_dump({}, phase="startup")
         conversation_id: str | None = None
         last_assistant_msg_id: str | None = None
         current_query = query
+        operation_headers = self._backend.request_headers()
 
         for round_num in range(max_clarification_rounds + 1):
-            # Re-read codex token + fetch fresh sentinel each round. The Bearer
-            # in _session.headers may have been refreshed by a concurrent
-            # backend.get/post; the sentinel is single-use and short-lived,
-            # so reusing the round-1 sentinel for a later auto-proceed POST
-            # silently 403s ("token may have expired").
-            self._backend._reload_token_if_stale()
-            headers = dict(self._backend._session.headers)
+            # Sentinel tokens are single-use, but every round deliberately keeps
+            # the same immutable bearer snapshot for this logical operation.
+            headers = dict(operation_headers)
             headers["Accept"] = "text/event-stream"
             headers["Content-Type"] = "application/json"
-            sentinel = await SentinelGate(self._backend).get_tokens()
-            headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
-                "chat-requirements"
-            ]
+            sentinel = await SentinelGate(self._backend).get_tokens(operation_headers)
+            headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel["chat-requirements"]
             if sentinel.get("proof"):
                 headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
             if sentinel.get("turnstile"):
@@ -1182,75 +2486,130 @@ class ConversationClient:
                 parent_message_id=last_assistant_msg_id,
             )
 
-            async with AsyncSession(impersonate="chrome131", verify=True) as s:
-                resp = await s.post(
+            async with _stream_session() as s:
+                resp = await _post_account_stream(
+                    s,
                     _CONV_URL,
+                    "/backend-api/conversation",
                     headers=headers,
                     json=payload,
                     timeout=1800,
                     stream=True,
                 )
-                if resp.status_code == 401:
-                    raise RuntimeError("401 Unauthorized — run `codex login`")
-                if resp.status_code == 403:
-                    raise RuntimeError("403 Forbidden — token may have expired")
                 if resp.status_code not in (200, 201):
-                    body = ""
-                    async for chunk in resp.aiter_content():
-                        body += (
-                            chunk.decode("utf-8", errors="replace")
-                            if isinstance(chunk, bytes)
-                            else chunk
-                        )
-                        if len(body) > 500:
-                            break
-                    raise RuntimeError(
-                        f"HTTP {resp.status_code} from /backend-api/conversation: "
-                        f"{_redact_error(body, max_len=500)}"
-                    )
+                    _raise_http_status("/backend-api/conversation", resp.status_code)
 
                 last_text = ""
                 done_text = ""
+                pending_progress: list[str] = []
+                done_event: dict | None = None
+                current_assistant_msg_id: str | None = None
                 round_completed_successfully = False
                 stream_succeeded = False
                 try:
-                    async for raw_line in resp.aiter_lines():
-                        if isinstance(raw_line, bytes):
-                            raw_line = raw_line.decode("utf-8", errors="replace")
+                    async for raw_line in _bounded_sse_lines(
+                        resp, route="/backend-api/conversation"
+                    ):
                         line = raw_line.strip()
                         if not line or not line.startswith("data:"):
                             continue
                         data = line[5:].strip()
                         if data == "[DONE]":
                             break
-                        try:
-                            obj = json.loads(data)
-                        except json.JSONDecodeError:
-                            continue
-                        if not isinstance(obj, dict):
+                        obj = _decode_sse_object(data, adapter="deep_research")
+                        if obj is None:
                             continue
                         _raise_for_sse_error(obj)
 
                         # Capture conversation_id for multi-turn continuation.
                         cid = obj.get("conversation_id")
                         if cid and not conversation_id:
-                            conversation_id = cid
+                            conversation_id = _backend_path_id(
+                                cid,
+                                adapter="deep_research",
+                                field="conversation_id",
+                            )
 
                         msg = obj.get("message", {})
                         if not isinstance(msg, dict):
                             continue
-
-                        role = msg.get("author", {}).get("role", "")
-                        content = msg.get("content", {})
+                        author = msg.get("author")
+                        if not isinstance(author, dict):
+                            raise BackendContractError(
+                                "deep_research", "message author must be an object"
+                            )
+                        role = author.get("role")
+                        if not isinstance(role, str) or role not in _KNOWN_MESSAGE_ROLES:
+                            raise BackendContractError(
+                                "deep_research", "message author role is invalid"
+                            )
+                        content = msg.get("content")
+                        if content is None:
+                            content = {}
+                        if not isinstance(content, dict):
+                            raise BackendContractError(
+                                "deep_research", "message content must be an object"
+                            )
                         ct = content.get("content_type", "")
                         status = msg.get("status", "")
-                        meta = msg.get("metadata", {})
+                        meta = msg.get("metadata")
+                        if meta is None:
+                            meta = {}
+                        if not isinstance(meta, dict):
+                            raise BackendContractError(
+                                "deep_research", "message metadata must be an object"
+                            )
+                        _validate_metadata_bounds(meta, adapter="deep_research")
                         recipient = msg.get("recipient")
+                        visible = is_user_visible_message(msg)
+
+                        # Any newer non-output lifecycle or hidden assistant proves
+                        # that the earlier report candidate is stale, even though
+                        # its private body must never be emitted.
+                        if role != "assistant" or not visible:
+                            round_completed_successfully = False
+                            done_text = ""
+                            last_text = ""
+                            pending_progress = []
+                            done_event = None
+
+                        is_dispatch = role == "assistant" and (
+                            ct == "code"
+                            or recipient not in (None, "all")
+                            or _message_connector_dispatch_category(msg) is not None
+                        )
+                        if is_dispatch:
+                            round_completed_successfully = False
+                            done_text = ""
+                            last_text = ""
+                            pending_progress = []
+                            done_event = None
+                            yield {
+                                "type": "tool",
+                                "call": "web_search",
+                                "category": "web",
+                            }
+                            continue
+
+                        if not visible:
+                            continue
 
                         # Capture latest assistant message id so the next turn
                         # (auto-proceed reply) can use it as parent_message_id.
                         msg_id = msg.get("id")
                         if msg_id and role == "assistant":
+                            if (
+                                current_assistant_msg_id is not None
+                                and msg_id != current_assistant_msg_id
+                            ):
+                                # A new assistant lifecycle supersedes buffered
+                                # text from the prior message in this round.
+                                round_completed_successfully = False
+                                done_text = ""
+                                last_text = ""
+                                pending_progress = []
+                                done_event = None
+                            current_assistant_msg_id = msg_id
                             last_assistant_msg_id = msg_id
 
                         # Completion belongs to the latest relevant lifecycle,
@@ -1260,45 +2619,38 @@ class ConversationClient:
                             round_completed_successfully = False
                             done_text = ""
                             last_text = ""
+                            pending_progress = []
+                            done_event = None
 
                         # Tool invocation events (search/browse). Assistant
                         # messages addressed to a tool are dispatch envelopes,
                         # even when the backend represents them as plain text.
-                        if role == "assistant" and (
-                            ct == "code" or recipient not in (None, "all")
-                        ):
-                            round_completed_successfully = False
-                            done_text = ""
-                            last_text = ""
-                            parts = content.get("parts") or []
-                            call_text = content.get("text", "") or (
-                                parts[0]
-                                if parts and isinstance(parts[0], str)
-                                else ""
-                            )
-                            if call_text:
-                                yield {"type": "tool", "call": call_text}
-                            continue
-
                         # Text streaming — assistant in-progress or finished
                         if role == "assistant" and ct == "text":
-                            parts = content.get("parts") or []
-                            new = (
-                                parts[0]
-                                if parts and isinstance(parts[0], str)
-                                else ""
-                            )
+                            parts = content.get("parts")
+                            if parts is None:
+                                parts = []
+                            if not isinstance(parts, list) or len(parts) > _MAX_TOOL_PARTS:
+                                raise BackendContractError(
+                                    "deep_research",
+                                    "message parts must be an array of at most 100 items",
+                                )
+                            if parts and not isinstance(parts[0], str):
+                                raise BackendContractError(
+                                    "deep_research", "assistant first part must be a string"
+                                )
+                            new = parts[0] if parts else ""
+                            if len(new) > _MAX_TOOL_TEXT_CHARS:
+                                raise BackendContractError(
+                                    "deep_research", "assistant text exceeds the size limit"
+                                )
 
                             if status == "finished_successfully":
-                                yield {
+                                done_event = {
                                     "type": "done",
                                     "text": new,
-                                    "content_references": meta.get(
-                                        "content_references", []
-                                    ),
-                                    "search_result_groups": meta.get(
-                                        "search_result_groups", []
-                                    ),
+                                    "content_references": meta.get("content_references", []),
+                                    "search_result_groups": meta.get("search_result_groups", []),
                                 }
                                 round_completed_successfully = True
                                 last_text = new
@@ -1308,6 +2660,7 @@ class ConversationClient:
                                 # supersedes an earlier completed candidate.
                                 round_completed_successfully = False
                                 done_text = ""
+                                done_event = None
                                 if status != "in_progress":
                                     last_text = new
                                     continue
@@ -1316,9 +2669,9 @@ class ConversationClient:
                                 if new.startswith(last_text):
                                     delta = new[len(last_text) :]
                                     if delta:
-                                        yield {"type": "progress", "text": delta}
+                                        pending_progress.append(delta)
                                 else:
-                                    yield {"type": "progress", "text": new}
+                                    pending_progress.append(new)
                                 last_text = new
                             elif status == "in_progress":
                                 last_text = ""
@@ -1330,18 +2683,27 @@ class ConversationClient:
                     # On exception, propagate without faking a done event,
                     # so the caller doesn't mistake partial output for a
                     # complete answer (cf. code-review medium #2).
-                    if stream_succeeded and not round_completed_successfully:
-                        terminal = {
-                            "type": "done",
-                            "text": last_text,
-                            "content_references": [],
-                            "search_result_groups": [],
-                            "terminated_abnormally": True,
-                        }
-                        if round_num > 0:
-                            terminal["clarification_followup_incomplete"] = True
-                        yield terminal
-                        done_text = last_text
+                    if stream_succeeded:
+                        # User text stays buffered until this round's stream is
+                        # closed, because a later hidden/tool lifecycle can
+                        # revoke every earlier visible snapshot.
+                        for progress_text in pending_progress:
+                            if progress_text:
+                                yield {"type": "progress", "text": progress_text}
+                        if round_completed_successfully and done_event is not None:
+                            yield done_event
+                        else:
+                            terminal = {
+                                "type": "done",
+                                "text": last_text,
+                                "content_references": [],
+                                "search_result_groups": [],
+                                "terminated_abnormally": True,
+                            }
+                            if round_num > 0:
+                                terminal["clarification_followup_incomplete"] = True
+                            yield terminal
+                            done_text = last_text
 
             # End of one round — decide whether to continue.
             if not round_completed_successfully:
@@ -1404,8 +2766,10 @@ class ConversationClient:
 
         Yields dicts of shape:
           {"type": "progress", "text": <partial>}   — streaming text deltas
-          {"type": "tool",     "call": <call_text>} — tool/connector invocations
-          {"type": "meta",     "data": <ste_meta>}  — server_ste_metadata events
+          {"type": "tool", "call": "web_search", "category": "web"}
+              — static tool-activity receipt; private dispatch text is withheld
+          {"type": "meta", "tool_invoked": bool,
+           "tool_category": "connector"} — bounded server metadata receipt
           {"type": "done",     "text": <full_text>,
            "content_references": [...], "search_result_groups": [...]}
 
@@ -1417,6 +2781,9 @@ class ConversationClient:
         (the orchestration layer). The actual heavy reasoning runs inside the
         connector_openai_deep_research tool call.
         """
+        _raw_dump({}, phase="startup")
+        operation_headers = self._backend.request_headers()
+
         # --- Quota guard ---
         # Probe /backend-api/conversation/init (POST) to check deep_research quota.
         # Response shape: limits_progress: [{"feature_name": "deep_research", ...}].
@@ -1428,6 +2795,7 @@ class ConversationClient:
                 self._backend.post,
                 _INIT_PATH,
                 json={"conversation_mode_kind": "primary_assistant"},
+                auth_headers=operation_headers,
             )
             limits = (init_data or {}).get("limits_progress") or []
             for lim in limits:
@@ -1436,25 +2804,23 @@ class ConversationClient:
                     if raw is not None:
                         remaining = int(raw)
                     break
-        except Exception as _exc:
-            _log.warning("DR quota check failed (%s) — proceeding anyway", _exc)
+        except Exception:
+            _log.warning("DR quota check failed — proceeding anyway")
         if remaining is not None and remaining <= 0:
-            raise RuntimeError(
-                f"Deep Research quota exhausted. "
-                f"Check {_BASE}{_INIT_PATH} (POST) to verify quota reset."
+            raise BackendHTTPError(
+                "CHECK",
+                _INIT_PATH,
+                None,
+                code="unavailable",
+                retryable=False,
             )
 
-        # Re-read codex token before snapshotting headers — heavy DR runs
-        # for 5–30 min and codex may refresh ~/.codex/auth.json mid-stream.
-        self._backend._reload_token_if_stale()
-        headers = dict(self._backend._session.headers)
+        headers = dict(operation_headers)
         headers["Accept"] = "text/event-stream"
         headers["Content-Type"] = "application/json"
 
-        sentinel = await SentinelGate(self._backend).get_tokens()
-        headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
-            "chat-requirements"
-        ]
+        sentinel = await SentinelGate(self._backend).get_tokens(operation_headers)
+        headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel["chat-requirements"]
         if sentinel.get("proof"):
             headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
         if sentinel.get("turnstile"):
@@ -1475,8 +2841,12 @@ class ConversationClient:
             "asst_text": "",
             "asst_status": "",
             "asst_metadata": {},
+            "asst_visible": False,
+            "patch_target_visible": False,
+            "pending_progress": [],
             "last_path": None,
             "tool_invoked": False,
+            "web_tool_event_emitted": False,
             "tool_failed": False,
             "done_emitted": False,
             "citation_metadata": {},
@@ -1488,8 +2858,15 @@ class ConversationClient:
             "is_connector_dispatch": False,
         }
 
+        def _emit_web_tool_once(events: list) -> None:
+            state["tool_invoked"] = True
+            if state["web_tool_event_emitted"]:
+                return
+            events.append({"type": "tool", "call": "web_search", "category": "web"})
+            state["web_tool_event_emitted"] = True
+
         def _emit_done(events: list) -> None:
-            if state["done_emitted"]:
+            if state["done_emitted"] or not state["asst_visible"]:
                 return
             md = state["asst_metadata"] or {}
             citation_md = state["citation_metadata"] or {}
@@ -1502,129 +2879,271 @@ class ConversationClient:
             }
             if state["tool_failed"]:
                 payload["connector_failed"] = True
+            events.extend(
+                {"type": "progress", "text": text} for text in state["pending_progress"] if text
+            )
+            state["pending_progress"] = []
             events.append(payload)
             state["done_emitted"] = True
 
+        def _invalidate_report_candidate() -> None:
+            state["current_asst_id"] = None
+            state["asst_text"] = ""
+            state["asst_status"] = ""
+            state["asst_metadata"] = {}
+            state["citation_metadata"] = {}
+            state["asst_visible"] = False
+            state["patch_target_visible"] = False
+            state["pending_progress"] = []
+            state["is_connector_dispatch"] = False
+
         def _on_envelope(env: dict, events: list) -> None:
-            msg = env.get("message") or {}
-            role = (msg.get("author") or {}).get("role")
+            msg = env.get("message")
+            if not isinstance(msg, dict):
+                raise BackendContractError(
+                    "heavy_deep_research", "message envelope must be an object"
+                )
+            author = msg.get("author")
+            if not isinstance(author, dict):
+                raise BackendContractError(
+                    "heavy_deep_research", "message author must be an object"
+                )
+            role = author.get("role")
+            if not isinstance(role, str) or role not in _KNOWN_MESSAGE_ROLES:
+                raise BackendContractError("heavy_deep_research", "message author role is invalid")
             recipient = msg.get("recipient")
-            content = msg.get("content") or {}
+            if recipient is not None and not isinstance(recipient, str):
+                raise BackendContractError(
+                    "heavy_deep_research", "message recipient must be a string or null"
+                )
+            # A full envelope always changes the subsequent JSON-patch target.
+            # Only a validated visible assistant report may accept text/status
+            # deltas; tool/widget envelopes must not inherit the prior target.
+            state["patch_target_visible"] = False
+            content = msg.get("content")
+            if content is None:
+                content = {}
+            if not isinstance(content, dict):
+                raise BackendContractError(
+                    "heavy_deep_research", "message content must be an object"
+                )
+            metadata = msg.get("metadata")
+            if metadata is None:
+                metadata = {}
+            if not isinstance(metadata, dict):
+                raise BackendContractError(
+                    "heavy_deep_research", "message metadata must be an object"
+                )
+            _validate_metadata_bounds(metadata, adapter="heavy_deep_research")
+            parts = content.get("parts")
+            if parts is None:
+                parts = []
+            if not isinstance(parts, list) or len(parts) > _MAX_TOOL_PARTS:
+                raise BackendContractError(
+                    "heavy_deep_research",
+                    "message parts must be an array of at most 100 items",
+                )
+            status = msg.get("status")
+            if status is None:
+                status = ""
+            if not isinstance(status, str) or len(status) > 128:
+                raise BackendContractError(
+                    "heavy_deep_research", "message status must be a bounded string"
+                )
             ct = content.get("content_type")
-            if (
+            is_report_message = (
                 role == "assistant"
-                and recipient == "all"
+                and recipient in (None, "all")
                 and ct in ("text", "multimodal_text")
-            ):
+            )
+            if role == "assistant":
+                # Every new assistant envelope supersedes the previous patch
+                # target. Reset even when it is hidden so later path deltas
+                # cannot append to an earlier visible report.
+                _invalidate_report_candidate()
                 state["current_asst_id"] = msg.get("id")
-                parts = content.get("parts") or []
+            elif role == "tool":
+                # A tool lifecycle proves any prior report snapshot was only
+                # provisional. Keep no stale text/citations while the connector
+                # is still running, even when this envelope is private.
+                _invalidate_report_candidate()
+                state["tool_invoked"] = True
+            else:
+                # User/system lifecycles supersede every earlier report candidate.
+                _invalidate_report_candidate()
+            if not is_user_visible_message(msg):
+                # A hidden connector dispatch may still prove that polling is
+                # required, but none of its private payload is public output.
+                if (
+                    role == "assistant"
+                    and isinstance(recipient, str)
+                    and recipient.startswith("api_tool")
+                ):
+                    state["tool_invoked"] = True
+                return
+            if is_report_message:
+                state["asst_visible"] = True
+                state["patch_target_visible"] = True
                 initial = parts[0] if parts and isinstance(parts[0], str) else ""
+                if len(initial) > _MAX_TOOL_TEXT_CHARS:
+                    raise BackendContractError(
+                        "heavy_deep_research", "assistant text exceeds the size limit"
+                    )
                 state["asst_text"] = initial
-                state["asst_status"] = msg.get("status") or ""
-                state["asst_metadata"] = msg.get("metadata") or {}
+                state["asst_status"] = status
+                state["asst_metadata"] = metadata
                 if _has_citation_payload(state["asst_metadata"]):
                     state["citation_metadata"] = state["asst_metadata"]
                 state["is_connector_dispatch"] = _is_connector_dispatch_text(initial)
+                if state["is_connector_dispatch"]:
+                    _emit_web_tool_once(events)
                 if initial and not state["is_connector_dispatch"]:
-                    events.append({"type": "progress", "text": initial})
-                # Suppress _emit_done on:
-                #   (a) connector-dispatch envelope (matches text heuristic), OR
-                #   (b) any assistant envelope arriving with EMPTY text +
-                #       finished_successfully — the dispatch placeholder for
-                #       async DR (observed in production: heavy DR opens with
-                #       parts=[""], status=finished_successfully, then the
-                #       real report streams later via path patches or arrives
-                #       in Phase 2 polling).
-                if (
-                    state["asst_status"] == "finished_successfully"
-                    and not state["is_connector_dispatch"]
-                    and state["asst_text"]
-                ):
-                    _emit_done(events)
+                    state["pending_progress"].append(initial)
             elif (
                 role == "assistant"
                 and isinstance(recipient, str)
                 and recipient.startswith("api_tool")
             ):
-                parts = content.get("parts") or []
-                call = parts[0] if parts and isinstance(parts[0], str) else ""
-                if call:
-                    events.append({"type": "tool", "call": call})
-                state["tool_invoked"] = True
+                _emit_web_tool_once(events)
             elif role == "tool" and recipient == "all":
                 # Tool response — detect connector-not-available errors so
                 # the caller can distinguish "DR ran" from "DR silently
                 # fell through to i-mini-m because the connector isn't
                 # provisioned on this account".
-                parts = content.get("parts") or []
                 text = parts[0] if parts and isinstance(parts[0], str) else ""
                 if text and ("Resource not found" in text or text.startswith("Error")):
-                    events.append({"type": "tool_error", "message": text})
+                    events.append({"type": "tool_error", "code": "connector_unavailable"})
                     state["tool_failed"] = True
 
         def _apply_path(path: str, op: str, value, events: list) -> None:
             if path == "/message/content/parts/0":
+                if not state["patch_target_visible"]:
+                    return
                 if op == "append" and isinstance(value, str):
                     next_text = state["asst_text"] + value
+                    if len(next_text) > _MAX_TOOL_TEXT_CHARS:
+                        raise BackendContractError(
+                            "heavy_deep_research",
+                            "assistant text exceeds the size limit",
+                        )
                     was_dispatch = bool(state["is_connector_dispatch"])
                     next_is_dispatch = was_dispatch or _is_connector_dispatch_text(next_text)
                     state["asst_text"] = next_text
                     state["is_connector_dispatch"] = next_is_dispatch
+                    if next_is_dispatch and not was_dispatch:
+                        state["pending_progress"] = []
+                        _emit_web_tool_once(events)
                     if value and not next_is_dispatch:
-                        events.append({"type": "progress", "text": value})
+                        state["pending_progress"].append(value)
                 elif op == "replace" and isinstance(value, str):
+                    if len(value) > _MAX_TOOL_TEXT_CHARS:
+                        raise BackendContractError(
+                            "heavy_deep_research",
+                            "assistant text exceeds the size limit",
+                        )
                     new_is_dispatch = _is_connector_dispatch_text(value)
                     if not new_is_dispatch and value.startswith(state["asst_text"]):
                         delta = value[len(state["asst_text"]) :]
                         if delta:
-                            events.append({"type": "progress", "text": delta})
+                            state["pending_progress"].append(delta)
                     elif value and not new_is_dispatch:
-                        events.append({"type": "progress", "text": value})
+                        state["pending_progress"].append(value)
                     state["asst_text"] = value
                     state["is_connector_dispatch"] = new_is_dispatch
+                    if new_is_dispatch:
+                        state["pending_progress"] = []
+                        _emit_web_tool_once(events)
+                else:
+                    _invalidate_report_candidate()
             elif path == "/message/status":
-                if op == "replace" and isinstance(value, str):
+                if not state["patch_target_visible"]:
+                    return
+                if op in {"add", "replace"} and isinstance(value, str):
                     state["asst_status"] = value
-                    # Same empty-text guard as in _on_envelope: a status flip
-                    # to finished_successfully on an empty assistant text
-                    # buffer is the dispatch placeholder, not the real report.
-                    if (
-                        value == "finished_successfully"
-                        and not state["is_connector_dispatch"]
-                        and state["asst_text"]
-                    ):
-                        _emit_done(events)
+                else:
+                    _invalidate_report_candidate()
             elif path == "/message/metadata" or path.startswith("/message/metadata/"):
+                if not state["patch_target_visible"]:
+                    return
+                if op not in {"add", "append", "patch", "replace"}:
+                    _invalidate_report_candidate()
+                    return
+                if path == "/message/metadata" and not isinstance(value, dict):
+                    _invalidate_report_candidate()
+                    return
                 state["asst_metadata"] = _merge_metadata_path(
-                    state["asst_metadata"], path, op, value
+                    state["asst_metadata"],
+                    path,
+                    op,
+                    value,
+                    adapter="heavy_deep_research",
                 )
+                if not is_user_visible_message({"metadata": state["asst_metadata"]}):
+                    state["asst_visible"] = False
+                    state["patch_target_visible"] = False
+                    state["asst_text"] = ""
+                    state["asst_status"] = ""
+                    state["pending_progress"] = []
+                    state["is_connector_dispatch"] = False
+                    return
                 if _has_citation_payload(state["asst_metadata"]):
                     state["citation_metadata"] = state["asst_metadata"]
+            elif path == "/message" or path.startswith("/message/"):
+                # Unsupported message mutations may change recipient, author,
+                # content type, or another exposure boundary after report text
+                # was buffered. They invalidate the candidate fail-closed.
+                _invalidate_report_candidate()
 
         def _apply_patch(obj: dict, events: list) -> None:
             t = obj.get("type")
+            if t is not None and any(field in obj for field in ("p", "o", "v")):
+                _invalidate_report_candidate()
+                raise BackendContractError(
+                    "heavy_deep_research", "typed event must not contain message patch fields"
+                )
             if t == "resume_conversation_token":
                 state["resume_token"] = obj.get("token")
                 if obj.get("conversation_id"):
-                    state["conversation_id"] = obj["conversation_id"]
+                    state["conversation_id"] = _backend_path_id(
+                        obj["conversation_id"],
+                        adapter="heavy_deep_research",
+                        field="conversation_id",
+                    )
                 return
             if t in ("message_marker", "message_stream_complete"):
                 if obj.get("conversation_id"):
-                    state["conversation_id"] = obj["conversation_id"]
+                    state["conversation_id"] = _backend_path_id(
+                        obj["conversation_id"],
+                        adapter="heavy_deep_research",
+                        field="conversation_id",
+                    )
                 return
             if t == "server_ste_metadata":
-                md = obj.get("metadata") or {}
-                if md.get("tool_invoked"):
+                md = obj.get("metadata")
+                tool_invoked = isinstance(md, dict) and md.get("tool_invoked") is True
+                if tool_invoked:
                     state["tool_invoked"] = True
-                events.append({"type": "meta", "data": md})
+                event: dict = {"type": "meta", "tool_invoked": tool_invoked}
+                if tool_invoked:
+                    event["tool_category"] = "connector"
+                events.append(event)
                 return
             if t == "input_message":
+                _invalidate_report_candidate()
                 return
             if t is not None:
-                return
+                _invalidate_report_candidate()
+                raise BackendContractError(
+                    "heavy_deep_research", "typed event type is not supported"
+                )
 
             p = obj.get("p")
             o = obj.get("o")
+            p, o = _validated_patch_tokens(
+                p,
+                o,
+                adapter="heavy_deep_research",
+            )
             has_v = "v" in obj
             v = obj.get("v")
 
@@ -1633,7 +3152,7 @@ class ConversationClient:
             if (
                 isinstance(v, dict)
                 and "message" in v
-                and ((p == "" and o == "add") or (p is None and o is None))
+                and ((p == "" and o in {"add", "replace"}) or (p is None and o is None))
             ):
                 _on_envelope(v, events)
                 state["last_path"] = None
@@ -1644,11 +3163,18 @@ class ConversationClient:
                 for sub in v:
                     if isinstance(sub, dict):
                         _apply_patch(sub, events)
+                    else:
+                        _invalidate_report_candidate()
+                return
+
+            if p == "":
+                _invalidate_report_candidate()
+                state["last_path"] = None
                 return
 
             # Path-scoped patch
             if isinstance(p, str) and p:
-                _apply_path(p, o or "replace", v, events)
+                _apply_path(p, o if o is not None else "replace", v, events)
                 state["last_path"] = p
                 return
 
@@ -1657,36 +3183,20 @@ class ConversationClient:
                 _apply_path(state["last_path"], "append", v, events)
                 return
 
-        async with AsyncSession(impersonate="chrome131", verify=True) as s:
-            resp = await s.post(
+        async with _stream_session() as s:
+            resp = await _post_account_stream(
+                s,
                 _F_CONV_URL,
+                "/backend-api/f/conversation",
                 headers=headers,
                 json=payload,
                 timeout=1800,
                 stream=True,
             )
-            if resp.status_code == 401:
-                raise RuntimeError("401 Unauthorized — run `codex login`")
-            if resp.status_code == 403:
-                raise RuntimeError("403 Forbidden — token may have expired")
             if resp.status_code not in (200, 201):
-                body = ""
-                async for chunk in resp.aiter_content():
-                    body += (
-                        chunk.decode("utf-8", errors="replace")
-                        if isinstance(chunk, bytes)
-                        else chunk
-                    )
-                    if len(body) > 500:
-                        break
-                raise RuntimeError(
-                    f"HTTP {resp.status_code} from {_F_CONV_URL}: "
-                    f"{_redact_error(body, max_len=500)}"
-                )
+                _raise_http_status("/backend-api/f/conversation", resp.status_code)
 
-            async for raw_line in resp.aiter_lines():
-                if isinstance(raw_line, bytes):
-                    raw_line = raw_line.decode("utf-8", errors="replace")
+            async for raw_line in _bounded_sse_lines(resp, route="/backend-api/f/conversation"):
                 line = raw_line.strip()
                 if not line or line.startswith(":") or line.startswith("event:"):
                     continue
@@ -1695,13 +3205,10 @@ class ConversationClient:
                 data = line[5:].strip()
                 if data == "[DONE]":
                     break
-                try:
-                    obj = json.loads(data)
-                except json.JSONDecodeError:
+                obj = _decode_sse_object(data, adapter="heavy_deep_research")
+                if obj is None:
                     continue
-                if not isinstance(obj, dict):
-                    continue
-                _raise_for_sse_error(obj)
+                _raise_for_sse_error(obj, route="/backend-api/f/conversation")
                 # Capture conversation_id from ANY frame that carries it at top
                 # level. _apply_patch only sets it from a few typed events
                 # (resume_conversation_token / message_marker /
@@ -1713,33 +3220,49 @@ class ConversationClient:
                 if not state["conversation_id"]:
                     cid = obj.get("conversation_id")
                     if cid:
-                        state["conversation_id"] = cid
-                _raw_dump(obj, phase="heavy_sse")
-
+                        state["conversation_id"] = _backend_path_id(
+                            cid,
+                            adapter="heavy_deep_research",
+                            field="conversation_id",
+                        )
                 events: list[dict] = []
                 _apply_patch(obj, events)
                 for e in events:
                     yield e
 
+        # Do not release buffered report text until the stream has ended and
+        # its final visibility/status metadata can no longer be revised by a
+        # later patch. This trades incremental text timing for a fail-closed
+        # hidden-message boundary.
+        terminal_events: list[dict] = []
+        if (
+            state["asst_visible"]
+            and state["asst_status"] == "finished_successfully"
+            and not state["is_connector_dispatch"]
+            and state["asst_text"]
+        ):
+            _emit_done(terminal_events)
+        for event in terminal_events:
+            yield event
+
         # --- Phase 2: Async polling fallback ---
         # If the stream closed without finished_successfully AND the DR
         # connector fired, poll /backend-api/conversation/{id} until the
         # real answer lands.
-        if (
-            not state["done_emitted"]
-            and state["conversation_id"]
-            and state["tool_invoked"]
-        ):
+        if not state["done_emitted"] and state["conversation_id"] and state["tool_invoked"]:
             async for evt in self._poll_dr_completion(
                 state["conversation_id"],
                 seed_text=state["asst_text"],
                 connector_failed=state["tool_failed"],
+                auth_headers=operation_headers,
             ):
                 yield evt
             return
 
-        if not state["done_emitted"] and state["asst_text"]:
-            # Stream ended mid-text without finalize — surface what we have.
+        if not state["done_emitted"] and (state["asst_text"] or state["tool_invoked"]):
+            # Stream ended mid-lifecycle without a pollable conversation or
+            # finalized report. Emit one explicit abnormal terminal, never an
+            # older report that a newer tool lifecycle invalidated.
             yield {
                 "type": "done",
                 "text": state["asst_text"],
@@ -1756,6 +3279,7 @@ class ConversationClient:
         connector_failed: bool = False,
         interval: float = 120.0,
         max_wait: float = 1800.0,
+        auth_headers: Mapping[str, str] | None = None,
     ) -> AsyncIterator[dict]:
         """Poll /backend-api/conversation/{id} until the DR answer lands.
 
@@ -1766,63 +3290,85 @@ class ConversationClient:
         state and recover the report from ``widget_state.report_message`` (see
         :func:`_dr_report_from_widget_state`).
         """
+        conv_id = _backend_path_id(
+            conv_id,
+            adapter="heavy_deep_research",
+            field="conversation_id",
+        )
         detail_path = (
             f"/backend-api/conversation/{conv_id}"
             "?include_visually_hidden_messages=true&include_widget_state=true"
         )
         deadline = time.monotonic() + max_wait
-        last_emitted = "" if _is_connector_dispatch_text(seed_text) else seed_text
+        # A seed came from a stream that did not reach an authoritative
+        # terminal.  Retain it only for delta comparison at a later safe
+        # terminal; never emit it on its own or on timeout.
+        seed_candidate = "" if _is_connector_dispatch_text(seed_text) else seed_text
 
         while time.monotonic() < deadline:
             await asyncio.sleep(interval)
             try:
-                det = await asyncio.to_thread(self._backend.get, detail_path)
-            except Exception as exc:
-                _log.warning("DR poll error (%s) — continuing", exc)
-                if "HTTP 429" in str(exc):
+                det = await asyncio.to_thread(
+                    self._backend.get, detail_path, auth_headers=auth_headers
+                )
+            except BackendHTTPError as exc:
+                if not exc.retryable:
+                    raise
+                _log.warning("DR poll request failed — continuing")
+                if exc.status_code == 429:
                     await asyncio.sleep(max(interval * 2, 300.0))
                 continue
-            if isinstance(det, dict):
-                _raw_dump(det, phase="heavy_poll")
-
-            mapping = (det or {}).get("mapping") or {}
-            candidates = []
-            citation_candidates = []
-            for node in mapping.values():
-                msg = (node or {}).get("message")
-                if not isinstance(msg, dict):
-                    continue
-                meta = msg.get("metadata") or {}
-                if _has_citation_payload(meta):
-                    citation_candidates.append((msg.get("create_time") or 0, meta))
-                if (msg.get("author") or {}).get("role") != "assistant":
-                    continue
-                recipient = msg.get("recipient")
-                if recipient and recipient != "all":
-                    continue
-                content = msg.get("content") or {}
-                if content.get("content_type") not in ("text", "multimodal_text"):
-                    continue
-                parts = content.get("parts") or []
-                text = parts[0] if parts and isinstance(parts[0], str) else ""
-                if not text:
-                    continue
-                if _is_connector_dispatch_text(text):
-                    continue
-                candidates.append(
-                    (
-                        msg.get("create_time") or 0,
-                        msg.get("status") or "",
-                        text,
-                        meta,
-                    )
+            except Exception:
+                _log.warning("DR poll request failed — continuing")
+                continue
+            if not isinstance(det, dict):
+                raise BackendContractError(
+                    "heavy_deep_research", "conversation object response required"
                 )
+            mapping = det.get("mapping")
+            if mapping is None:
+                mapping = {}
+            if not isinstance(mapping, dict):
+                raise BackendContractError("heavy_deep_research", "mapping object required")
+            lifecycles = _ordered_poll_lifecycles(mapping, adapter="heavy_deep_research")
+            citation_candidates: list[tuple[tuple[int | float, int], dict]] = []
+            turn_boundary_order: tuple[int | float, int] | None = None
+            for order_key, message in lifecycles:
+                metadata = message.get("metadata")
+                if metadata is None:
+                    metadata = {}
+                if not isinstance(metadata, dict):
+                    raise BackendContractError(
+                        "heavy_deep_research", "message metadata must be an object"
+                    )
+                author = message["author"]
+                if author["role"] in {"system", "user"}:
+                    turn_boundary_order = order_key
+                if (
+                    author["role"] in {"assistant", "tool"}
+                    and is_user_visible_message(message)
+                    and _has_citation_payload(metadata)
+                ):
+                    citation_candidates.append((order_key, metadata))
+
+            if not lifecycles:
+                continue
+            latest_message = lifecycles[-1][1]
+
             # Deep Research App connector: the report is not an assistant text
-            # node — it lives in the hidden widget state. If it's present, the
-            # connector has finished; emit it as the final answer.
-            widget_text, widget_refs = _dr_report_from_widget_state(det)
-            if widget_text:
-                if widget_text != last_emitted:
+            # node — it lives in the hidden widget state. A completed widget is
+            # authoritative only when its carrier is also the newest lifecycle;
+            # otherwise a newer tool/assistant message has superseded it.
+            latest_widget_candidates = [
+                (text, refs)
+                for carrier, text, refs in _dr_widget_report_candidates(det)
+                if carrier is latest_message
+            ]
+            if latest_widget_candidates:
+                widget_text, widget_refs = max(
+                    latest_widget_candidates, key=lambda candidate: len(candidate[0])
+                )
+                if widget_text != seed_candidate:
                     yield {"type": "progress", "text": widget_text}
                 yield {
                     "type": "done",
@@ -1833,36 +3379,31 @@ class ConversationClient:
                 }
                 return
 
-            if not candidates:
-                continue
-            candidates.sort(key=lambda c: c[0])
-            _, latest_status, latest_text, latest_meta = candidates[-1]
-
-            if latest_text != last_emitted:
-                if latest_text.startswith(last_emitted):
-                    delta = latest_text[len(last_emitted) :]
-                    if delta:
-                        yield {"type": "progress", "text": delta}
-                else:
-                    yield {"type": "progress", "text": latest_text}
-                last_emitted = latest_text
-
-            if latest_status == "finished_successfully":
+            latest_text = _poll_terminal_text(latest_message, adapter="heavy_deep_research")
+            if latest_text is not None:
+                latest_meta = latest_message.get("metadata")
+                if latest_meta is None:
+                    latest_meta = {}
+                assert isinstance(latest_meta, dict)
                 refs = latest_meta.get("content_references") or []
                 groups = latest_meta.get("search_result_groups") or []
                 if citation_candidates and (not refs or not groups):
+                    current_turn_candidates = [
+                        (order_key, meta)
+                        for order_key, meta in citation_candidates
+                        if turn_boundary_order is None or order_key > turn_boundary_order
+                    ]
                     turn_keys = ("working_turn_id", "turn_exchange_id")
                     same_turn = [
                         meta
-                        for _, meta in sorted(citation_candidates, key=lambda c: c[0])
+                        for _, meta in current_turn_candidates
                         if any(
                             latest_meta.get(k) and latest_meta.get(k) == meta.get(k)
                             for k in turn_keys
                         )
                     ]
                     fallback_metas = same_turn or [
-                        meta
-                        for _, meta in sorted(citation_candidates, key=lambda c: c[0])
+                        meta for _, meta in current_turn_candidates
                     ]
                     for meta in reversed(fallback_metas):
                         if not refs:
@@ -1871,6 +3412,13 @@ class ConversationClient:
                             groups = meta.get("search_result_groups") or []
                         if refs and groups:
                             break
+                if latest_text != seed_candidate:
+                    if latest_text.startswith(seed_candidate):
+                        progress = latest_text[len(seed_candidate) :]
+                    else:
+                        progress = latest_text
+                    if progress:
+                        yield {"type": "progress", "text": progress}
                 yield {
                     "type": "done",
                     "text": latest_text,
@@ -1882,7 +3430,7 @@ class ConversationClient:
 
         yield {
             "type": "done",
-            "text": last_emitted,
+            "text": "",
             "content_references": [],
             "search_result_groups": [],
             "connector_failed": connector_failed,

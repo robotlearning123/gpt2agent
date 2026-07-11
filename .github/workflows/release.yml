@@ -18,6 +18,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: release
@@ -27,9 +28,14 @@ jobs:
   verify:
     name: Verify release source and metadata
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     outputs:
       version: ${{ steps.metadata.outputs.version }}
       distribution_version: ${{ steps.metadata.outputs.distribution_version }}
+      tag_object: ${{ steps.provenance.outputs.tag_object }}
+      commit: ${{ steps.provenance.outputs.commit }}
+      tree: ${{ steps.provenance.outputs.tree }}
+      receipt_sha256: ${{ steps.provenance.outputs.receipt_sha256 }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -41,6 +47,7 @@ jobs:
           python-version: "3.12"
 
       - name: Require the tagged commit to be on origin/main
+        id: provenance
         run: |
           set -euo pipefail
           VERIFY_REF="refs/release-verification/tag"
@@ -59,6 +66,25 @@ jobs:
             echo "::error::Release tag commit $TAG_COMMIT is not reachable from origin/main"
             exit 1
           fi
+          TAG_MESSAGE="$(git for-each-ref --format="%(contents)" "$VERIFY_REF")"
+          mapfile -t RECEIPT_LINES < <(
+            printf '%s\n' "$TAG_MESSAGE" | grep '^account-receipt-sha256:' || true
+          )
+          if [ "${#RECEIPT_LINES[@]}" -ne 1 ]; then
+            echo "::error::Annotated release tag must contain exactly one account receipt SHA-256"
+            exit 1
+          fi
+          RECEIPT_SHA256="${RECEIPT_LINES[0]#account-receipt-sha256: }"
+          if ! [[ "$RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Account receipt SHA-256 must be 64 lowercase hex characters"
+            exit 1
+          fi
+          {
+            echo "tag_object=$(git rev-parse "$VERIFY_REF")"
+            echo "commit=$TAG_COMMIT"
+            echo "tree=$(git rev-parse "$TAG_COMMIT^{tree}")"
+            echo "receipt_sha256=$RECEIPT_SHA256"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Verify tag, manifests, and changelog
         id: metadata
@@ -67,8 +93,19 @@ jobs:
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           python scripts/verify_release.py --tag "$GITHUB_REF_NAME"
           DIST_VERSION="$(python scripts/verify_release.py --tag "$GITHUB_REF_NAME" --print-distribution-version)"
-          echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
-          echo "distribution_version=$DIST_VERSION" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$TAG_VERSION"
+            echo "distribution_version=$DIST_VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Require successful main CI for the exact tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python scripts/verify_main_ci.py
+          --repository "$GITHUB_REPOSITORY"
+          --commit "${{ steps.provenance.outputs.commit }}"
+          --attempts 180 --delay 10
 
   test:
     name: Tests must pass before publish
@@ -113,63 +150,7 @@ jobs:
         env:
           PROJECT_VERSION: ${{ needs.verify.outputs.version }}
           DIST_VERSION: ${{ needs.verify.outputs.distribution_version }}
-        run: |
-          set -euo pipefail
-          TMP_ROOT=$(mktemp -d)
-          trap 'rm -rf "$TMP_ROOT"' EXIT
-          WHEEL=$(find "$GITHUB_WORKSPACE/dist" -maxdepth 1 -name '*.whl' -print -quit)
-          SDIST=$(find "$GITHUB_WORKSPACE/dist" -maxdepth 1 -name '*.tar.gz' -print -quit)
-          test -n "$WHEEL"
-          test -n "$SDIST"
-
-          python -m venv "$TMP_ROOT/wheel-venv"
-          "$TMP_ROOT/wheel-venv/bin/python" -m pip install --upgrade pip
-          "$TMP_ROOT/wheel-venv/bin/python" -m pip install "$WHEEL"
-          "$TMP_ROOT/wheel-venv/bin/python" -m pip check
-          (
-            cd "$TMP_ROOT"
-            test "$("$TMP_ROOT/wheel-venv/bin/gpt2agent" --version)" = "gpt2agent $PROJECT_VERSION"
-            test "$("$TMP_ROOT/wheel-venv/bin/python" -m gpt2agent --version)" = "gpt2agent $PROJECT_VERSION"
-            "$TMP_ROOT/wheel-venv/bin/python" - "$DIST_VERSION" <<'PY'
-          from importlib.metadata import version
-          from importlib.resources import files
-          import sys
-
-          expected_distribution = sys.argv[1]
-          assert version("gpt2agent") == expected_distribution
-          root = files("gpt2agent")
-          required = [
-              "skills/deep-research/SKILL.md",
-              "skills/deep-research/bin/deep_research.py",
-              "skills/deep-research/bin/quota.sh",
-              "skills/deep-research/bin/run.sh",
-              "skills/gpt2agent/SKILL.md",
-              "skills/gpt2agent/tools-reference.md",
-          ]
-          assert all(root.joinpath(path).is_file() for path in required)
-          PY
-          )
-          mkdir -p "$TMP_ROOT/home"
-          HOME="$TMP_ROOT/home" "$TMP_ROOT/wheel-venv/bin/gpt2agent" install --client claude-code
-          test -f "$TMP_ROOT/home/.claude/skills/deep-research/SKILL.md"
-          if find "$TMP_ROOT/home/.claude/skills" -type f \( -name '*.pyc' -o -name '*.pyo' \) -print -quit | grep -q .; then
-            echo "::error::Installed skills contain generated bytecode"
-            exit 1
-          fi
-
-          mkdir -p "$TMP_ROOT/sdist"
-          tar -xzf "$SDIST" -C "$TMP_ROOT/sdist"
-          SDIST_ROOT=$(find "$TMP_ROOT/sdist" -mindepth 1 -maxdepth 1 -type d -print -quit)
-          test -f "$SDIST_ROOT/tests/fixtures/heavy_dr_conversation_detail_h2.json"
-          test -f "$SDIST_ROOT/tests/fixtures/heavy_dr_widget_state.json"
-          python -m venv "$TMP_ROOT/sdist-venv"
-          "$TMP_ROOT/sdist-venv/bin/python" -m pip install --upgrade pip
-          "$TMP_ROOT/sdist-venv/bin/python" -m pip install "$SDIST" pytest pytest-asyncio
-          (
-            cd "$SDIST_ROOT"
-            SKIP_LIVE=1 "$TMP_ROOT/sdist-venv/bin/python" -m pytest -q \
-              tests/test_heavy_dr_parser.py
-          )
+        run: scripts/package_smoke.sh dist "$PROJECT_VERSION" "$DIST_VERSION"
 
       - name: Require the PyPI version to be absent before publication
         env:
@@ -178,10 +159,39 @@ jobs:
           python scripts/verify_pypi_artifacts.py --version "$VERSION"
           --dist dist --require-absent --attempts 3 --delay 5
 
+      - name: Bind artifacts to tag, source, and account receipt evidence
+        env:
+          TAG_OBJECT: ${{ needs.verify.outputs.tag_object }}
+          SOURCE_COMMIT: ${{ needs.verify.outputs.commit }}
+          SOURCE_TREE: ${{ needs.verify.outputs.tree }}
+          RECEIPT_SHA256: ${{ needs.verify.outputs.receipt_sha256 }}
+        run: |
+          python scripts/release_evidence.py create \
+            --dist dist \
+            --output release-evidence/release-workflow-artifacts.json \
+            --tag "$GITHUB_REF_NAME" \
+            --tag-object "$TAG_OBJECT" \
+            --commit "$SOURCE_COMMIT" \
+            --tree "$SOURCE_TREE" \
+            --receipt-sha256 "$RECEIPT_SHA256" \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --job build
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist
           path: dist/
+          overwrite: true
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-evidence
+          path: release-evidence/release-workflow-artifacts.json
+          overwrite: true
+          if-no-files-found: error
 
   pypi-publish:
     name: Publish to PyPI
@@ -215,6 +225,10 @@ jobs:
         with:
           name: dist
           path: dist/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-evidence
+          path: release-evidence/
       - name: Match every published filename and SHA-256
         env:
           VERSION: ${{ needs.verify.outputs.distribution_version }}
@@ -222,9 +236,93 @@ jobs:
           python scripts/verify_pypi_artifacts.py --version "$VERSION"
           --dist dist --require-complete --attempts 7 --delay 10
 
+      - name: Verify release workflow evidence
+        env:
+          TAG_OBJECT: ${{ needs.verify.outputs.tag_object }}
+          SOURCE_COMMIT: ${{ needs.verify.outputs.commit }}
+          SOURCE_TREE: ${{ needs.verify.outputs.tree }}
+          RECEIPT_SHA256: ${{ needs.verify.outputs.receipt_sha256 }}
+        run: |
+          python scripts/release_evidence.py verify \
+            --manifest release-evidence/release-workflow-artifacts.json \
+            --dist dist \
+            --tag "$GITHUB_REF_NAME" \
+            --tag-object "$TAG_OBJECT" \
+            --commit "$SOURCE_COMMIT" \
+            --tree "$SOURCE_TREE" \
+            --receipt-sha256 "$RECEIPT_SHA256" \
+            --repository "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT"
+
+  pypi-canary:
+    name: Verify PyPI install in a clean environment
+    needs: [verify-pypi, verify]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install the published release from PyPI
+        working-directory: ${{ runner.temp }}
+        env:
+          DIST_VERSION: ${{ needs.verify.outputs.distribution_version }}
+          PROJECT_VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          python -m venv pypi-canary
+          pypi-canary/bin/python -m pip install --upgrade pip
+          installed=false
+          for attempt in 1 2 3 4 5 6 7; do
+            if pypi-canary/bin/python -m pip install --no-cache-dir \
+              --index-url https://pypi.org/simple "gpt2agent==$DIST_VERSION"; then
+              installed=true
+              break
+            fi
+            if [ "$attempt" -lt 7 ]; then sleep 10; fi
+          done
+          test "$installed" = true
+          pypi-canary/bin/python -m pip check
+          test "$(pypi-canary/bin/gpt2agent --version)" = "gpt2agent $PROJECT_VERSION"
+          test "$(pypi-canary/bin/python -m gpt2agent --version)" = "gpt2agent $PROJECT_VERSION"
+          pypi-canary/bin/python - "$DIST_VERSION" <<'PY'
+          from importlib.metadata import version
+          from importlib.resources import files
+          from importlib.util import find_spec
+          import json
+          import re
+          import sys
+
+          assert version("gpt2agent") == sys.argv[1]
+          match = re.match(r"^(\d+)\.(\d+)\.(\d+)", sys.argv[1])
+          assert match is not None
+          requires_account_manifest = tuple(map(int, match.groups())) >= (0, 0, 12)
+          root = files("gpt2agent")
+          assert root.joinpath("skills/deep-research/SKILL.md").is_file()
+          assert root.joinpath("skills/gpt2agent/SKILL.md").is_file()
+          manifest_spec = find_spec("gpt2agent.tool_manifest")
+          if requires_account_manifest:
+              assert manifest_spec is not None
+          if manifest_spec is not None:
+              from gpt2agent.tool_manifest import TOOL_NAMES
+
+              assert len(TOOL_NAMES) == 32
+              assert len(set(TOOL_NAMES)) == 32
+          resources_dir = root.joinpath("resources")
+          if requires_account_manifest:
+              assert resources_dir.is_dir()
+          if resources_dir.is_dir():
+              for name in ("feature-coverage.v1.json", "update-evidence.v1.json"):
+                  payload = json.loads(
+                      resources_dir.joinpath(name).read_text(encoding="utf-8")
+                  )
+                  assert payload["schema_version"] == "1"
+          PY
+
   github-release:
     name: Create GitHub Release
-    needs: [verify-pypi, verify]
+    needs: [pypi-canary, verify]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -234,23 +332,18 @@ jobs:
         with:
           name: dist
           path: dist/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-evidence
+          path: release-evidence/
 
       - name: Extract CHANGELOG section for this version
         id: changelog
-        env:
-          VERSION: ${{ needs.verify.outputs.version }}
         run: |
           set -euo pipefail
-          awk -v ver="$VERSION" '
-            BEGIN { p = 0 }
-            /^## \[/{
-              if (p) exit
-              if ($0 ~ "## \\[" ver "\\]") { p = 1; print; next }
-            }
-            p { print }
-          ' CHANGELOG.md > release_notes.md
+          python scripts/verify_release.py --print-changelog-section > release_notes.md
           if [ ! -s release_notes.md ]; then
-            echo "::error::CHANGELOG.md has no section for $VERSION"
+            echo "::error::CHANGELOG.md has no exact release section"
             exit 1
           fi
           echo "----- release notes -----"
@@ -260,6 +353,8 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           body_path: release_notes.md
-          files: dist/*
+          files: |
+            dist/*
+            release-evidence/release-workflow-artifacts.json
           draft: false
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}

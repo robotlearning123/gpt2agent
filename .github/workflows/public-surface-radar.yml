@@ -1,0 +1,113 @@
+name: Public surface radar
+
+on:
+  schedule:
+    - cron: "17 13 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: public-surface-radar
+  cancel-in-progress: true
+
+jobs:
+  radar:
+    name: No-secret public compatibility radar
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Restore prior default-branch radar evidence
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! run_id="$(
+            gh api -X GET \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/public-surface-radar.yml/runs" \
+              -f branch="$DEFAULT_BRANCH" \
+              -f status=completed \
+              -f per_page=10 \
+              --jq '.workflow_runs[0].id // empty'
+          )"; then
+            echo "::warning title=Prior radar evidence unavailable::Workflow history could not be read"
+            exit 0
+          fi
+          if [ -z "$run_id" ]; then
+            echo "::notice title=Prior radar evidence unavailable::No completed default-branch run exists yet"
+            exit 0
+          fi
+          if ! artifact_id="$(
+            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts" \
+              --jq '[.artifacts[] | select(.expired == false and (.name | startswith("public-surface-radar-")))] | .[0].id // empty'
+          )"; then
+            echo "::warning title=Prior radar evidence unavailable::Prior artifacts could not be read"
+            exit 0
+          fi
+          if [ -z "$artifact_id" ]; then
+            echo "::notice title=Prior radar evidence unavailable::The prior run has no retained radar artifact"
+            exit 0
+          fi
+          archive="$RUNNER_TEMP/public-surface-radar-previous.zip"
+          if ! gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "$archive"; then
+            rm -f "$archive"
+            echo "::warning title=Prior radar evidence unavailable::The prior artifact could not be downloaded"
+            exit 0
+          fi
+          entry="$(unzip -Z1 "$archive" | grep -E '(^|/)public-surface-radar\.json$' | head -n 1 || true)"
+          if [ -n "$entry" ]; then
+            unzip -p "$archive" "$entry" > "$RUNNER_TEMP/public-surface-radar-previous.json"
+          else
+            echo "::warning title=Prior radar evidence unavailable::The prior artifact has no JSON report"
+          fi
+          rm -f "$archive"
+
+      - name: Check bounded public surfaces
+        id: radar
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(
+            --json-output "$RUNNER_TEMP/public-surface-radar.json"
+            --markdown-output "$RUNNER_TEMP/public-surface-radar.md"
+          )
+          if [ -s "$RUNNER_TEMP/public-surface-radar-previous.json" ]; then
+            args+=(--previous-report "$RUNNER_TEMP/public-surface-radar-previous.json")
+          fi
+          python scripts/public_surface_radar.py "${args[@]}"
+
+      - name: Publish the redacted summary
+        if: ${{ always() }}
+        run: |
+          if [ -f "$RUNNER_TEMP/public-surface-radar.md" ]; then
+            cat "$RUNNER_TEMP/public-surface-radar.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Public surface radar did not produce a report." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Retain redacted evidence for 30 days
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: public-surface-radar-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/public-surface-radar.json
+            ${{ runner.temp }}/public-surface-radar.md
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Fail on public contract marker loss
+        if: ${{ steps.radar.outcome != 'success' }}
+        run: exit 1

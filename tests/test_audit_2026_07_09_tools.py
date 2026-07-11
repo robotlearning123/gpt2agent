@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from gpt2agent.errors import BackendContractError
 from gpt2agent.tools import (
     account,
     apps,
@@ -43,6 +44,10 @@ class _Client:
     def __init__(self, *, gets: dict[str, Any] | None = None) -> None:
         self.get_results = gets or {}
         self.requests: list[tuple[str, str, Any]] = []
+
+    def request_headers(self) -> dict[str, str]:
+        """Match BackendClient's immutable compound-operation snapshot contract."""
+        return {"Authorization": "Bearer SYNTHETIC-TEST-TOKEN"}
 
     def get(self, path: str, **kwargs: Any) -> Any:
         self.requests.append(("GET", path, kwargs))
@@ -100,14 +105,16 @@ async def test_file_tools_reject_control_and_overlong_ids(bad: str) -> None:
 @pytest.mark.asyncio
 async def test_generated_asset_rejects_invalid_backend_file_id_before_request() -> None:
     class _ImageConversation:
-        async def image_gen(self, prompt: str, model: str) -> dict:
+        async def image_gen(
+            self, prompt: str, model: str, auth_headers: dict[str, str] | None = None
+        ) -> dict:
             return {"assets": [{"file_id": "../me"}]}
 
     client = _Client()
     mcp = _MCP()
     images.register(mcp, client, conv=_ImageConversation())
 
-    with pytest.raises(ValueError, match="invalid file ID"):
+    with pytest.raises(BackendContractError, match="invalid file ID"):
         await mcp.tools["generate_image"]("draw a test", "gpt-5-3")
     assert client.requests == []
 

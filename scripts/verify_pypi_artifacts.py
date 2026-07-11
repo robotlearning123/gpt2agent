@@ -16,13 +16,16 @@ from pathlib import Path
 
 def artifact_hashes(dist: Path) -> dict[str, str]:
     """Return SHA-256 hashes for wheel and sdist files in *dist*."""
-    artifacts = sorted(
-        path
-        for path in dist.iterdir()
-        if path.is_file() and (path.name.endswith(".whl") or path.name.endswith(".tar.gz"))
-    )
-    if not artifacts:
-        raise ValueError(f"no wheel or sdist artifacts found in {dist}")
+    entries = set(dist.iterdir())
+    wheels = sorted(path for path in entries if path.name.endswith(".whl"))
+    sdists = sorted(path for path in entries if path.name.endswith(".tar.gz"))
+    artifacts = [*sdists, *wheels]
+    if len(wheels) != 1 or len(sdists) != 1 or entries != set(artifacts):
+        raise ValueError(
+            f"expected exactly one wheel and one sdist and no other entries in {dist}"
+        )
+    if any(path.is_symlink() or not path.is_file() for path in artifacts):
+        raise ValueError("release artifacts must be regular files, not symlinks")
 
     hashes: dict[str, str] = {}
     for path in artifacts:

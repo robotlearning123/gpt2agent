@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import argparse
-import logging
-import os
+import ipaddress
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
 try:
     import tomllib
 except ImportError:
     import tomli as tomllib  # type: ignore
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
+
+from gpt2agent.tool_contracts import tool_annotations
+from gpt2agent.tools._redact import redact
+from gpt2agent.tools._errors import SafeFastMCP as FastMCP
 
 # ── config ──────────────────────────────────────────────────────────────────
 
@@ -26,26 +30,318 @@ _CONFIG_SEARCH = [
 _DEFAULTS: dict[str, Any] = {
     # Loopback by default: the HTTP transport has no authentication and proxies a
     # full ChatGPT account, so binding all interfaces would expose the account to
-    # the LAN/WAN. Set host explicitly (and GPT2AGENT_ALLOW_REMOTE=1) to opt in.
+    # the LAN/WAN. Version 0.0.12 refuses every non-loopback bind.
     "server": {"host": "127.0.0.1", "port": 9000},
     "models": {"chat": "gpt-5-3"},
 }
 
 # Hosts that keep the unauthenticated HTTP transport reachable only from the
-# local machine. Anything else requires an explicit GPT2AGENT_ALLOW_REMOTE opt-in.
+# local machine. Remote serving requires a future authenticated transport.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "::ffff:127.0.0.1"})
 
+# Citation metadata comes from an upstream widget payload, not from a typed API
+# contract. Keep every input and output bounded before rendering it into MCP
+# Markdown. These are deliberately module-level so the limits are visible to
+# focused regression tests.
+_MAX_CITATION_GROUPS = 50
+_MAX_CITATION_ITEMS_INSPECTED = 200
+_MAX_RENDERED_CITATIONS = 50
+_MAX_CITATION_INPUT_URL_LENGTH = 4_096
+_MAX_CITATION_URL_LENGTH = 2_048
+_MAX_CITATION_TITLE_INPUT_LENGTH = 4_096
+_MAX_CITATION_TITLE_LENGTH = 256
+_MAX_CITATION_QUERY_FIELDS = 64
+_MAX_CITATION_QUERY_KEY_LENGTH = 128
+_MAX_CITATION_QUERY_VALUE_LENGTH = 512
+_INTERNAL_CITATION_SUFFIXES = frozenset(
+    {"corp", "home", "home.arpa", "internal", "lan", "local", "localdomain", "localhost"}
+)
 
-def _http_bind_decision(host: str, allow_remote: bool) -> str:
-    """Classify an HTTP bind request: ``ok-loopback`` | ``ok-remote`` | ``refuse``.
+_MARKDOWN_TITLE_ESCAPES = frozenset("\\`*_[]{}()<>#+!|")
+_SENSITIVE_QUERY_NAMES = frozenset(
+    {
+        "auth",
+        "authorization",
+        "bearer",
+        "code",
+        "cookie",
+        "csrf",
+        "jwt",
+        "key",
+        "policy",
+        "secret",
+        "session",
+        "sig",
+        "signature",
+        "state",
+        "token",
+        "xsrf",
+    }
+)
+_SENSITIVE_QUERY_COMPACT_PARTS = (
+    "accesstoken",
+    "apikey",
+    "authorization",
+    "authtoken",
+    "bearer",
+    "credential",
+    "idtoken",
+    "jwt",
+    "oauth",
+    "password",
+    "passwd",
+    "privatekey",
+    "secretkey",
+    "securitytoken",
+    "sessionid",
+    "sessionkey",
+    "signature",
+)
+_TRACKING_QUERY_NAMES = frozenset(
+    {"dclid", "fbclid", "gclid", "mc_cid", "mc_eid", "msclkid", "yclid"}
+)
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def _valid_percent_encoding(value: str) -> bool:
+    """Reject malformed percent escapes instead of rendering an ambiguous URL."""
+    for index, char in enumerate(value):
+        if char == "%" and (
+            index + 2 >= len(value)
+            or value[index + 1] not in _HEX_DIGITS
+            or value[index + 2] not in _HEX_DIGITS
+        ):
+            return False
+    return True
+
+
+def _contains_percent_escape(value: str) -> bool:
+    """Detect a second encoded layer after the one permitted URL decode."""
+    return any(
+        char == "%"
+        and index + 2 < len(value)
+        and value[index + 1] in _HEX_DIGITS
+        and value[index + 2] in _HEX_DIGITS
+        for index, char in enumerate(value)
+    )
+
+
+def _sensitive_citation_query_name(name: str) -> bool:
+    """Return whether a query field is unsafe or nonessential to expose."""
+    folded = name.casefold()
+    if folded.startswith("utm_") or folded in _TRACKING_QUERY_NAMES:
+        return True
+    segments = tuple(part for part in folded.replace("-", "_").split("_") if part)
+    if any(part in _SENSITIVE_QUERY_NAMES for part in segments):
+        return True
+    compact = "".join(char for char in folded if char.isascii() and char.isalnum())
+    return any(part in compact for part in _SENSITIVE_QUERY_COMPACT_PARTS)
+
+
+def _project_citation_host(hostname: str) -> str | None:
+    """Canonicalize a URL host without accepting ambiguous host syntax."""
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        pass
+    else:
+        return None
+    try:
+        host = hostname.encode("idna").decode("ascii").casefold().rstrip(".")
+    except UnicodeError:
+        return None
+    if not host or len(host) > 253:
+        return None
+    labels = host.split(".")
+    if (
+        len(labels) < 2
+        or all(label.isdigit() for label in labels)
+        or any(
+            host == suffix or host.endswith(f".{suffix}")
+            for suffix in _INTERNAL_CITATION_SUFFIXES
+        )
+        or any(
+        not label
+        or len(label) > 63
+        or not label[0].isalnum()
+        or not label[-1].isalnum()
+        or any(not (char.isalnum() or char == "-") for char in label)
+            for label in labels
+        )
+    ):
+        return None
+    return host
+
+
+def _project_citation_url(value: object) -> str | None:
+    """Return a bounded, normalized public HTTP(S) citation URL.
+
+    Userinfo and fragments are never useful citation metadata. Sensitive,
+    tracking, PII-bearing, and overlong query fields are discarded while benign
+    fields are retained so links such as document selectors can keep working.
+    """
+    if type(value) is not str:
+        return None
+    raw = value.strip()
+    if (
+        not raw
+        or len(raw) > _MAX_CITATION_INPUT_URL_LENGTH
+        or any(ord(char) < 32 or ord(char) == 127 for char in raw)
+    ):
+        return None
+
+    try:
+        parsed = urlsplit(raw)
+        scheme = parsed.scheme.casefold()
+        if scheme not in {"http", "https"}:
+            return None
+        # Even empty userinfo (``https://@host``) makes a URL ambiguous and is
+        # omitted rather than rewritten into a different authority.
+        if parsed.username is not None or parsed.password is not None:
+            return None
+        hostname = parsed.hostname
+        port = parsed.port
+    except (TypeError, UnicodeError, ValueError):
+        return None
+    if hostname is None:
+        return None
+
+    host = _project_citation_host(hostname)
+    if host is None:
+        return None
+    if port is not None and not (
+        (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
+    ):
+        return None
+
+    # Inspect exactly one decoded layer. A second percent-encoded layer is
+    # ambiguous because a downstream service may decode it again; omit it rather
+    # than risk exposing a doubly encoded secret. Query fields can instead be
+    # filtered individually below.
+    if not _valid_percent_encoding(parsed.path):
+        return None
+    try:
+        decoded_path = unquote(parsed.path, errors="strict")
+    except UnicodeDecodeError:
+        return None
+    if _contains_percent_escape(decoded_path):
+        return None
+    for path_value in (parsed.path, decoded_path):
+        path_redacted = redact(path_value)
+        if type(path_redacted) is not str or path_redacted != path_value:
+            return None
+    path = quote(parsed.path, safe="/:@!$&'()*+,;=-._~%")
+
+    safe_query: list[tuple[str, str]] = []
+    if parsed.query:
+        try:
+            fields = parse_qsl(
+                parsed.query,
+                keep_blank_values=True,
+                max_num_fields=_MAX_CITATION_QUERY_FIELDS,
+            )
+        except ValueError:
+            fields = []
+        for key, query_value in fields:
+            if (
+                not key
+                or len(key) > _MAX_CITATION_QUERY_KEY_LENGTH
+                or len(query_value) > _MAX_CITATION_QUERY_VALUE_LENGTH
+                or _sensitive_citation_query_name(key)
+                or redact(key) != key
+                or redact(query_value) != query_value
+            ):
+                continue
+            safe_query.append((key, query_value))
+
+    projected = urlunsplit((scheme, host, path, urlencode(safe_query), ""))
+    if len(projected) > _MAX_CITATION_URL_LENGTH:
+        return None
+    return projected
+
+
+def _project_citation_title(value: object) -> str:
+    """Return a redacted, bounded Markdown-safe citation label."""
+    if type(value) is not str:
+        return "Source"
+    bounded = value[:_MAX_CITATION_TITLE_INPUT_LENGTH]
+    redacted = redact(bounded)
+    if type(redacted) is not str:
+        return "Source"
+    title = " ".join(redacted.split())[:_MAX_CITATION_TITLE_LENGTH]
+    if not title:
+        return "Source"
+    return "".join(f"\\{char}" if char in _MARKDOWN_TITLE_ESCAPES else char for char in title)
+
+
+def _render_dr_sources(refs: object) -> str:
+    """Project untrusted Deep Research references into a safe Sources block."""
+    if type(refs) is not list:
+        return ""
+
+    entries: list[str] = []
+    seen: set[str] = set()
+    inspected = 0
+    for ref in refs[:_MAX_CITATION_GROUPS]:
+        if type(ref) is not dict:
+            continue
+        items = ref.get("items")
+        if type(items) is not list:
+            continue
+        for item in items:
+            if inspected >= _MAX_CITATION_ITEMS_INSPECTED:
+                break
+            inspected += 1
+            if type(item) is not dict:
+                continue
+            url = _project_citation_url(item.get("url"))
+            if url is None or url in seen:
+                continue
+            seen.add(url)
+            title = _project_citation_title(item.get("title"))
+            entries.append(f"- [{title}](<{url}>)")
+            if len(entries) >= _MAX_RENDERED_CITATIONS:
+                break
+        if inspected >= _MAX_CITATION_ITEMS_INSPECTED or len(entries) >= _MAX_RENDERED_CITATIONS:
+            break
+
+    if not entries:
+        return ""
+    return "\n\n---\n**Sources:**\n" + "\n".join(entries)
+
+
+def _canonical_loopback_host(host: object) -> str | None:
+    normalized = str(host).strip().casefold()
+    return normalized if normalized in _LOOPBACK_HOSTS else None
+
+
+def _http_bind_decision(host: str, _legacy_allow_remote: bool = False) -> str:
+    """Classify an HTTP bind request as ``ok-loopback`` or ``refuse``.
 
     The HTTP transport is unauthenticated and proxies a full ChatGPT account, so
-    binding a non-loopback interface is refused unless the operator explicitly
-    opts in via ``GPT2AGENT_ALLOW_REMOTE=1`` (``allow_remote``).
+    version 0.0.12 has no non-loopback bypass. The second argument remains only
+    so older callers fail closed rather than changing call shape.
     """
-    if host in _LOOPBACK_HOSTS:
+    if _canonical_loopback_host(host) is not None:
         return "ok-loopback"
-    return "ok-remote" if allow_remote else "refuse"
+    return "refuse"
+
+
+def _transport_security_settings() -> TransportSecuritySettings:
+    """Return MCP SDK native DNS-rebinding protection for local HTTP."""
+    host_names = ("127.0.0.1", "localhost", "[::1]", "[::ffff:127.0.0.1]")
+    allowed_hosts = [value for host in host_names for value in (host, f"{host}:*")]
+    allowed_origins = [
+        value
+        for scheme in ("http", "https")
+        for host in host_names
+        for value in (f"{scheme}://{host}", f"{scheme}://{host}:*")
+    ]
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
 
 
 def load_config(path: Path | None = None) -> dict[str, Any]:
@@ -94,18 +390,24 @@ def _dr_incomplete_note(timed_out: bool) -> str:
 def build_server(cfg: dict[str, Any]) -> FastMCP:
     srv = cfg["server"]
     models = cfg["models"]
+    host = _canonical_loopback_host(srv.get("host", "127.0.0.1"))
+    if host is None:
+        raise ValueError("server.host must be a loopback address")
 
     from gpt2agent.backend import BackendClient
+    from gpt2agent.model_catalog import ModelCatalog
     from gpt2agent.sse import ConversationClient
 
     _backend = BackendClient()
+    model_catalog = ModelCatalog(_backend)
     conv = ConversationClient(_backend)
 
     mcp = FastMCP(
         "gpt2agent",
-        host=str(srv.get("host", "127.0.0.1")),
+        host=host,
         port=int(srv.get("port", 9000)),
         log_level="WARNING",
+        transport_security=_transport_security_settings(),
     )
 
     chat_model = models.get("chat", "gpt-5-3")
@@ -117,8 +419,13 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         "Do not ask clarifying questions; proceed with the best interpretation. "
     )
 
-    @mcp.tool()
-    async def chat(prompt: str, model: str = chat_model, temporary: bool = True) -> str:
+    @mcp.tool(annotations=tool_annotations("chat"))
+    async def chat(
+        prompt: str,
+        model: str = chat_model,
+        temporary: bool = True,
+        thinking_effort: str | None = None,
+    ) -> str:
         """Chat with any ChatGPT model on your account.
 
         Pass `model` to switch slugs — e.g. `gpt-5-5-pro` (410K, pro reasoning),
@@ -127,30 +434,48 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
         Set `temporary=False` to allow tool-based features (image gen, code
         interpreter, canvas). Temporary chats (default) cannot use these tools.
+        Every completion ends with one authoritative final activity receipt,
+        using a bounded category or `none`. Trust only the final footer; private
+        dispatch and response payloads are never included.
         """
+        auth_snapshot = _backend.auth_snapshot()
+        await model_catalog.validate_general(
+            model, thinking_effort, auth_snapshot=auth_snapshot
+        )
         text = await conv.complete(
-            model, [{"role": "user", "content": prompt}], temporary=temporary
+            model,
+            [{"role": "user", "content": prompt}],
+            temporary=temporary,
+            thinking_effort=thinking_effort,
+            auth_headers=auth_snapshot[1],
         )
         return text or "(no response)"
 
-    @mcp.tool()
+    @mcp.tool(annotations=tool_annotations("agent"))
     async def agent(prompt: str) -> str:
         """ChatGPT Agent Mode — 262K context with autonomous browsing, code
         execution, and tool use. Best for multi-step tasks (literature gathering,
         document workflows, browser automation). SSE-only (no REST endpoint).
 
-        Returns "(no response)" if the agent run times out rather than an empty
-        string, so callers can tell a timeout apart from a real empty answer.
+        If polling times out without a completed assistant message, returns
+        "(no final assistant response)" followed by the authoritative final
+        activity receipt. The receipt uses a bounded category or `none` and
+        never exposes hidden dispatch or response payloads.
         """
+        auth_snapshot = _backend.auth_snapshot()
+        await model_catalog.validate_general(
+            agent_model, None, auth_snapshot=auth_snapshot
+        )
         text = await conv.complete(
             agent_model,
             [{"role": "user", "content": prompt}],
             temporary=False,
             poll_async=True,  # agent mode runs async — poll the conversation
+            auth_headers=auth_snapshot[1],
         )
         return text or "(no response)"
 
-    @mcp.tool()
+    @mcp.tool(annotations=tool_annotations("deep_research"))
     async def deep_research(query: str, auto_confirm: bool = True) -> str:
         """Search the web and synthesize a detailed report with citations.
 
@@ -163,7 +488,7 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         q = _DR_IMPERATIVE_PREFIX + query if auto_confirm else query
         final_text = ""
         tool_calls: list[str] = []
-        refs: list = []
+        refs: object = []
         truncated = False
         timed_out = False
 
@@ -176,25 +501,14 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
                 truncated = bool(event.get("terminated_abnormally"))
                 timed_out = bool(event.get("timeout"))
 
-        # Append a brief sources section if citations were returned
-        if refs:
-            lines = ["\n\n---\n**Sources:**"]
-            seen: set[str] = set()
-            for ref in refs:
-                for item in ref.get("items", []):
-                    url = item.get("url", "")
-                    title = item.get("title", url)
-                    if url and url not in seen:
-                        seen.add(url)
-                        lines.append(f"- [{title}]({url})")
-            final_text += "\n".join(lines)
+        final_text += _render_dr_sources(refs)
 
         if truncated:
             final_text += _dr_incomplete_note(timed_out)
 
         return final_text or "(no response)"
 
-    @mcp.tool()
+    @mcp.tool(annotations=tool_annotations("deep_research_heavy"))
     async def deep_research_heavy(query: str, auto_confirm: bool = True) -> str:
         """Long-form Deep Research using gpt-5-5-pro (5–30 min, uses monthly DR quota — check /backend-api/conversation/init for remaining). For short web-augmented answers use `deep_research` instead.
 
@@ -208,9 +522,8 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         """
         q = _DR_IMPERATIVE_PREFIX + query if auto_confirm else query
         final_text = ""
-        refs: list = []
+        refs: object = []
         connector_failed = False
-        tool_error_msg = ""
         truncated = False
         timed_out = False
 
@@ -223,20 +536,8 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
                     connector_failed = True
                 truncated = bool(event.get("terminated_abnormally"))
                 timed_out = bool(event.get("timeout"))
-            elif etype == "tool_error":
-                tool_error_msg = event.get("message", "")
 
-        if refs:
-            lines = ["\n\n---\n**Sources:**"]
-            seen: set[str] = set()
-            for ref in refs:
-                for item in ref.get("items", []):
-                    url = item.get("url", "")
-                    title = item.get("title", url)
-                    if url and url not in seen:
-                        seen.add(url)
-                        lines.append(f"- [{title}]({url})")
-            final_text += "\n".join(lines)
+        final_text += _render_dr_sources(refs)
 
         if connector_failed:
             warning = (
@@ -247,9 +548,6 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
                 "Research source at chatgpt.com → Settings → Connectors, then "
                 "retry."
             )
-            if tool_error_msg:
-                first_line = tool_error_msg.splitlines()[0][:200]
-                warning += f"\n\n*Server message:* `{first_line}`"
             final_text += warning
 
         if truncated:
@@ -257,7 +555,7 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
         return final_text or "(no response)"
 
-    @mcp.tool()
+    @mcp.tool(annotations=tool_annotations("gpt_chat"))
     async def gpt_chat(gizmo_id: str, prompt: str) -> str:
         """Chat through one of your private Custom GPTs.
 
@@ -267,7 +565,8 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
         EXPERIMENTAL: passes `gizmo_id` into the conversation payload via the
         `conversation_origin` field reverse-engineered from chatgpt.com web
-        bundles. Returns "(no response)" on timeout.
+        bundles. Every completion ends with one authoritative final bounded
+        category receipt, including `none`; hidden payloads are withheld.
         """
         text = await conv.complete(
             chat_model,
@@ -277,7 +576,7 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         )
         return text or "(no response)"
 
-    @mcp.tool()
+    @mcp.tool(annotations=tool_annotations("memory_create_via_chat"))
     async def memory_create_via_chat(content: str) -> str:
         """Add an entry to your ChatGPT memories.
 
@@ -295,15 +594,9 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         )
         return text or "(no response)"
 
-    try:
-        from gpt2agent.tools import register_all
+    from gpt2agent.tools import register_all
 
-        register_all(mcp, _backend, conv)
-    except Exception:
-        # P0 #4 fix — log the traceback (was bare warning, hid the cause)
-        logging.getLogger(__name__).exception(
-            "backend tools registration failed — some MCP tools will be unavailable"
-        )
+    register_all(mcp, _backend, conv, model_catalog=model_catalog)
 
     return mcp
 
@@ -368,15 +661,25 @@ def main() -> None:
     run_p.add_argument("--config", type=Path, help="Path to config.toml")
     run_p.add_argument("--port", type=int)
     run_p.add_argument("--host")
-    run_p.add_argument(
-        "--stdio", action="store_true", help="stdio transport (Claude Code legacy)"
+    run_transport = run_p.add_mutually_exclusive_group()
+    run_transport.add_argument(
+        "--stdio",
+        action="store_true",
+        help="stdio transport (default; preferred for local MCP clients)",
+    )
+    run_transport.add_argument(
+        "--http",
+        action="store_true",
+        help="loopback-only Streamable HTTP transport",
     )
 
     # bare flags for backward compat: gpt2agent --stdio --config ...
     parser.add_argument("--config", type=Path)
     parser.add_argument("--port", type=int)
     parser.add_argument("--host")
-    parser.add_argument("--stdio", action="store_true")
+    bare_transport = parser.add_mutually_exclusive_group()
+    bare_transport.add_argument("--stdio", action="store_true")
+    bare_transport.add_argument("--http", action="store_true")
 
     args = parser.parse_args()
 
@@ -406,41 +709,36 @@ def main() -> None:
     if getattr(args, "host", None):
         cfg["server"]["host"] = args.host
 
+    requested_host = cfg["server"]["host"]
+    port = cfg["server"]["port"]
+    http = getattr(args, "http", False)
+    canonical_host = _canonical_loopback_host(requested_host)
+    if http and canonical_host is None:
+        # The HTTP transport has no authentication and proxies a full ChatGPT
+        # account. Version 0.0.12 has no non-loopback escape hatch.
+        raise SystemExit(
+            f"Refusing non-loopback server.host {requested_host!r}: this could expose your "
+            "full ChatGPT account to the network with no auth.\n"
+            "  • Keep server.host on 127.0.0.1, localhost, or ::1.\n"
+            "  • Remote HTTP is unavailable until authenticated transport support "
+            "is implemented."
+        )
+
+    # The host is unused by stdio. Canonicalizing it to a safe loopback keeps
+    # legacy HTTP-era configs (for example host=0.0.0.0) usable without letting
+    # programmatic FastMCP construction retain an unsafe bind target.
+    host = canonical_host if http else "127.0.0.1"
+    assert host is not None
+    cfg["server"]["host"] = host
+
     mcp = build_server(cfg)
     tools = list(cfg["models"].keys())
-    stdio = getattr(args, "stdio", False)
 
-    if stdio:
-        mcp.run(transport="stdio")
-    else:
-        host = cfg["server"]["host"]
-        port = cfg["server"]["port"]
-        # The HTTP transport has NO authentication and proxies a full ChatGPT
-        # account (read history, spend DR quota, overwrite custom instructions,
-        # launch Codex tasks). Refuse to bind a non-loopback interface unless the
-        # operator explicitly opts in, so a stray `gpt2agent run` can't expose the
-        # account to the LAN/WAN.
-        decision = _http_bind_decision(
-            host, os.environ.get("GPT2AGENT_ALLOW_REMOTE") == "1"
-        )
-        if decision == "refuse":
-            raise SystemExit(
-                f"Refusing to start the unauthenticated HTTP server on non-loopback "
-                f"host {host!r}: this would expose your full ChatGPT account to the "
-                f"network with no auth.\n"
-                f"  • For local clients (Claude Code/Codex) use stdio: gpt2agent run --stdio\n"
-                f"  • To bind {host!r} anyway (e.g. behind your own auth proxy), set "
-                f"GPT2AGENT_ALLOW_REMOTE=1."
-            )
-        if decision == "ok-remote":
-            print(
-                f"⚠ gpt2agent: serving an UNAUTHENTICATED account proxy on {host}:{port} "
-                f"(GPT2AGENT_ALLOW_REMOTE=1). Anyone who can reach this port controls "
-                f"your ChatGPT account. Put it behind your own auth/firewall.",
-                flush=True,
-            )
+    if http:
         print(f"gpt2agent  http://{host}:{port}/mcp  [{', '.join(tools)}]", flush=True)
         mcp.run(transport="streamable-http")
+    else:
+        mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":

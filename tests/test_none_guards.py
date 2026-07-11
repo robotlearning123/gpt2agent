@@ -17,6 +17,7 @@ import asyncio
 
 import pytest
 
+from gpt2agent.errors import BackendContractError
 from gpt2agent.tools import account, apps, codex, conversations, gpts, images
 from gpt2agent.tools import instructions, memory, writes
 
@@ -41,28 +42,31 @@ def _run(fn, *args, **kwargs):
     return asyncio.run(fn(*args, **kwargs))
 
 
-# ── read tools: None → empty result, no AttributeError ───────────────────────
+# ── collection reads: blank 2xx is malformed, not an honest empty result ────
 
 
-def test_memory_tools_tolerate_none() -> None:
+def test_memory_tools_reject_blank_2xx() -> None:
     mcp = _tools(memory)
-    assert _run(mcp.tools["memory_list"]) == []
-    assert _run(mcp.tools["memory_search"], "anything") == []
+    with pytest.raises(BackendContractError, match="memories list envelope"):
+        _run(mcp.tools["memory_list"])
+    with pytest.raises(BackendContractError, match="memories list envelope"):
+        _run(mcp.tools["memory_search"], "anything")
 
 
-def test_conversation_tools_tolerate_none() -> None:
-    """cx review 2026-07-02 P2: the guarded conversation/task sites lacked the
-    same None-contract coverage the newly-guarded modules got."""
+def test_conversation_collection_tools_reject_blank_2xx() -> None:
     mcp = _tools(conversations)
-    assert _run(mcp.tools["list_conversations"]) == []
-    assert _run(mcp.tools["get_conversation"], "conv-1") == {}
-    assert _run(mcp.tools["list_tasks"]) == []
+    with pytest.raises(BackendContractError, match="items list envelope"):
+        _run(mcp.tools["list_conversations"])
+    with pytest.raises(BackendContractError, match="tasks list envelope"):
+        _run(mcp.tools["list_tasks"])
 
 
-def test_file_tools_tolerate_none() -> None:
+def test_file_tools_reject_blank_2xx() -> None:
     mcp = _tools(images)
-    assert _run(mcp.tools["get_file_info"], "f1") == {}
-    assert _run(mcp.tools["get_file_download_url"], "f1") == ""
+    with pytest.raises(BackendContractError, match="file object response required"):
+        _run(mcp.tools["get_file_info"], "f1")
+    with pytest.raises(BackendContractError, match="download object response required"):
+        _run(mcp.tools["get_file_download_url"], "f1")
 
 
 def test_custom_instructions_get_tolerates_none() -> None:
@@ -72,26 +76,32 @@ def test_custom_instructions_get_tolerates_none() -> None:
     assert out["enabled"] is None
 
 
-def test_account_tools_tolerate_none() -> None:
+def test_account_tools_reject_blank_2xx() -> None:
     mcp = _tools(account)
-    status = _run(mcp.tools["account_status"])
-    assert status["email"] == ""
-    assert status["features_count"] == 0
-    assert _run(mcp.tools["list_models"]) == []
+    with pytest.raises(BackendContractError, match="account_status"):
+        _run(mcp.tools["account_status"])
+    # The v0.0.12 model catalog distinguishes a malformed/empty-2xx envelope
+    # from an honestly empty {"models": []} catalog.
+    with pytest.raises(BackendContractError, match="models list envelope"):
+        _run(mcp.tools["list_models"])
 
 
-def test_list_custom_gpts_tolerates_none() -> None:
-    assert _run(_tools(gpts).tools["list_custom_gpts"]) == []
+def test_list_custom_gpts_rejects_blank_2xx() -> None:
+    with pytest.raises(BackendContractError, match="items list envelope"):
+        _run(_tools(gpts).tools["list_custom_gpts"])
 
 
-def test_list_apps_tolerates_none() -> None:
-    assert _run(_tools(apps).tools["list_apps"]) == []
+def test_list_apps_rejects_blank_2xx() -> None:
+    with pytest.raises(BackendContractError, match="apps list envelope"):
+        _run(_tools(apps).tools["list_apps"])
 
 
-def test_codex_list_tools_tolerate_none() -> None:
+def test_codex_list_tools_reject_blank_2xx() -> None:
     mcp = _tools(codex)
-    assert _run(mcp.tools["list_codex_envs"]) == []
-    assert _run(mcp.tools["list_codex_tasks"]) == []
+    with pytest.raises(BackendContractError, match="environments list envelope"):
+        _run(mcp.tools["list_codex_envs"])
+    with pytest.raises(BackendContractError, match="tasks items list envelope"):
+        _run(mcp.tools["list_codex_tasks"])
 
 
 # ── write tool: None current state → refuse, do NOT clobber ─────────────────
@@ -121,7 +131,7 @@ def test_codex_task_create_env_lookup_tolerates_none() -> None:
     client = NoneClient()
     mcp = FakeMCP()
     writes.register(mcp, client)
-    with pytest.raises(ValueError, match="No Codex environment"):
+    with pytest.raises(BackendContractError, match="environments list envelope"):
         _run(mcp.tools["codex_task_create"], repo_label="myrepo", prompt="do things")
     assert client.posted == []
 

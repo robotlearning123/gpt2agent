@@ -26,9 +26,9 @@ class _FrameResponse:
     def __init__(self, lines: list[str]) -> None:
         self._lines = lines
 
-    async def aiter_lines(self):
+    async def aiter_content(self):
         for line in self._lines:
-            yield line
+            yield (line + "\n").encode()
 
 
 class _Backend:
@@ -39,6 +39,9 @@ class _Backend:
 
     def _reload_token_if_stale(self) -> None:
         pass
+
+    def request_headers(self) -> dict[str, str]:
+        return dict(self._session.headers)
 
     def post(self, *_: Any, **__: Any) -> dict:
         return {
@@ -52,7 +55,9 @@ class _SentinelStub:
     def __init__(self, *_: Any, **__: Any) -> None:
         pass
 
-    async def get_tokens(self) -> dict[str, str]:
+    async def get_tokens(
+        self, _operation_headers: dict[str, str] | None = None
+    ) -> dict[str, str]:
         return {"chat-requirements": "stub", "proof": "", "turnstile": ""}
 
 
@@ -90,33 +95,51 @@ def _assistant_frame(text: str, status: str) -> str:
     )
 
 
-def test_raw_dump_creates_private_file_under_permissive_umask(
+def test_legacy_raw_dump_fails_closed_without_creating_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     dump = tmp_path / "raw.jsonl"
     monkeypatch.setenv("GPT2AGENT_RAW_DUMP", str(dump))
 
-    previous_umask = os.umask(0o022)
-    try:
+    with pytest.raises(RuntimeError, match="no longer supported.*[Uu]nset"):
         sse_mod._raw_dump({"secret": "value"}, phase="test")
-    finally:
-        os.umask(previous_umask)
 
-    assert stat.S_IMODE(dump.stat().st_mode) == 0o600
+    assert not dump.exists()
 
 
-def test_raw_dump_tightens_existing_permissive_file(
+def test_legacy_raw_dump_fails_closed_without_modifying_existing_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     dump = tmp_path / "raw.jsonl"
-    dump.write_text("old\n", encoding="utf-8")
+    original = b"old unredacted data\n"
+    dump.write_bytes(original)
     dump.chmod(0o644)
     monkeypatch.setenv("GPT2AGENT_RAW_DUMP", str(dump))
 
-    sse_mod._raw_dump({"new": True}, phase="test")
+    with pytest.raises(RuntimeError, match="no longer supported.*[Uu]nset"):
+        sse_mod._raw_dump({"new": True}, phase="test")
 
-    assert stat.S_IMODE(dump.stat().st_mode) == 0o600
-    assert len(dump.read_text(encoding="utf-8").splitlines()) == 2
+    assert dump.read_bytes() == original
+    assert stat.S_IMODE(dump.stat().st_mode) == 0o644
+
+
+@pytest.mark.parametrize("method_name", ["deep_research", "deep_research_heavy"])
+def test_legacy_raw_dump_fails_before_account_access(
+    monkeypatch: pytest.MonkeyPatch, method_name: str
+) -> None:
+    class _NoAccountAccess:
+        def request_headers(self) -> dict[str, str]:
+            raise AssertionError("account access must not start")
+
+    monkeypatch.setenv("GPT2AGENT_RAW_DUMP", "ignored-legacy-path")
+    client = sse_mod.ConversationClient(_NoAccountAccess())  # type: ignore[arg-type]
+
+    async def _start() -> None:
+        stream = getattr(client, method_name)("query")
+        await anext(stream)
+
+    with pytest.raises(RuntimeError, match="no longer supported.*[Uu]nset"):
+        asyncio.run(_start())
 
 
 def test_complete_rejects_partial_text_at_raw_eof(
@@ -145,7 +168,42 @@ def test_complete_accepts_explicit_success_at_eof(
         client.complete("gpt-5-3", [{"role": "user", "content": "question"}])
     )
 
-    assert result == "complete answer"
+    assert result == (
+        "complete answer\n\n---\nTool activity receipt: `none`. "
+        "Private dispatch payloads were withheld."
+    )
+
+
+def test_complete_redacts_tool_dispatch_and_discloses_activity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "sk-" + "d" * 24
+    dispatch = json.loads(
+        _assistant_frame(secret, "finished_successfully")[6:]
+    )
+    dispatch["message"]["id"] = "dispatch"
+    dispatch["message"]["recipient"] = "api_tool.private_connector"
+    final = json.loads(_assistant_frame("safe answer", "finished_successfully")[6:])
+    final["message"]["id"] = "final"
+    _patch_sse_frames(
+        monkeypatch,
+        [
+            "data: " + json.dumps(dispatch),
+            "data: " + json.dumps(final),
+            "data: [DONE]",
+        ],
+    )
+    client = sse_mod.ConversationClient(_Backend())  # type: ignore[arg-type]
+
+    result = asyncio.run(
+        client.complete("gpt-5-3", [{"role": "user", "content": "question"}])
+    )
+
+    assert result == (
+        "safe answer\n\n---\nTool activity receipt: `connector`. "
+        "Private dispatch payloads were withheld."
+    )
+    assert secret not in result
 
 
 def test_complete_rejects_newer_partial_after_earlier_success_at_raw_eof(
@@ -202,6 +260,7 @@ def test_light_research_marks_newer_partial_after_done_as_abnormal(
     assert events[-1]["type"] == "done"
     assert events[-1]["text"] == "newer partial report"
     assert events[-1]["terminated_abnormally"] is True
+    assert "earlier completed candidate" not in repr(events)
 
 
 def test_light_research_marks_tool_activity_after_done_as_abnormal(
@@ -238,9 +297,49 @@ def test_light_research_marks_tool_activity_after_done_as_abnormal(
         return events
 
     events = asyncio.run(_go())
+    done_events = [event for event in events if event["type"] == "done"]
+    assert done_events == [events[-1]]
+    assert done_events[0]["text"] == ""
+    assert done_events[0]["terminated_abnormally"] is True
+    assert "earlier completed candidate" not in repr(events)
+
+
+def test_light_research_buffers_progress_that_a_hidden_dispatch_later_revokes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_progress = "private provisional progress"
+    provisional = json.loads(_assistant_frame(private_progress, "in_progress")[6:])
+    provisional["conversation_id"] = "conv-progress-stale"
+    provisional["message"]["id"] = "msg-progress"
+    dispatch = {
+        "conversation_id": "conv-progress-stale",
+        "message": {
+            "id": "msg-hidden-dispatch",
+            "author": {"role": "assistant"},
+            "recipient": "api_tool.deep_research",
+            "content": {"content_type": "text", "parts": ["private dispatch"]},
+            "status": "in_progress",
+            "metadata": {"is_visually_hidden_from_conversation": True},
+        },
+    }
+    _patch_sse_frames(
+        monkeypatch,
+        [
+            "data: " + json.dumps(provisional),
+            "data: " + json.dumps(dispatch),
+            "data: [DONE]",
+        ],
+    )
+    client = sse_mod.ConversationClient(_Backend())  # type: ignore[arg-type]
+
+    async def _go() -> list[dict]:
+        return [event async for event in client.deep_research("query")]
+
+    events = asyncio.run(_go())
+
     assert events[-1]["type"] == "done"
-    assert events[-1]["text"] == ""
     assert events[-1]["terminated_abnormally"] is True
+    assert private_progress not in repr(events)
 
 
 def test_light_research_treats_text_addressed_to_tool_as_dispatch(
@@ -272,7 +371,11 @@ def test_light_research_treats_text_addressed_to_tool_as_dispatch(
         return events
 
     events = asyncio.run(_go())
-    assert events[0] == {"type": "tool", "call": '{"query": "research topic"}'}
+    assert events[0] == {
+        "type": "tool",
+        "call": "web_search",
+        "category": "web",
+    }
     assert events[-1]["type"] == "done"
     assert events[-1]["text"] == ""
     assert events[-1]["terminated_abnormally"] is True
@@ -340,7 +443,58 @@ def test_complete_uses_only_verified_poll_recovery_after_raw_eof(
         )
     )
 
-    assert result == "verified final answer"
+    assert result == (
+        "verified final answer\n\n---\nTool activity receipt: `none`. "
+        "Private dispatch payloads were withheld."
+    )
+
+
+def test_async_poll_redacts_dispatch_and_discloses_activity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "sk-" + "p" * 24
+
+    class _PollingBackend(_Backend):
+        def get(self, *_: Any, **__: Any) -> dict:
+            return {
+                "mapping": {
+                    "dispatch": {
+                        "message": {
+                            "author": {"role": "assistant"},
+                            "recipient": "api_tool.private_connector",
+                            "content": {"content_type": "text", "parts": [secret]},
+                            "status": "finished_successfully",
+                            "create_time": 1,
+                        }
+                    },
+                    "final": {
+                        "message": {
+                            "author": {"role": "assistant"},
+                            "recipient": "all",
+                            "content": {
+                                "content_type": "text",
+                                "parts": ["safe answer"],
+                            },
+                            "status": "finished_successfully",
+                            "create_time": 2,
+                        }
+                    },
+                }
+            }
+
+    async def _no_sleep(*_: Any, **__: Any) -> None:
+        return None
+
+    monkeypatch.setattr(sse_mod.asyncio, "sleep", _no_sleep)
+    client = sse_mod.ConversationClient(_PollingBackend())  # type: ignore[arg-type]
+
+    result = asyncio.run(client._poll_async_response("conversation-safe"))
+
+    assert result == (
+        "safe answer\n\n---\nTool activity receipt: `connector`. "
+        "Private dispatch payloads were withheld."
+    )
+    assert secret not in result
 
 
 def test_tool_call_rejects_partial_text_at_raw_eof(
@@ -365,6 +519,99 @@ def test_tool_call_accepts_explicit_success_at_eof(
     result = asyncio.run(client.tool_call("run the tool"))
 
     assert result["text"] == "complete tool answer"
+
+
+def test_tool_call_projects_redacted_strings_and_drops_opaque_dict_parts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "sk-" + "q" * 24
+    frames = [
+        {
+            "conversation_id": secret,
+            "message": {
+                "author": {"role": "assistant"},
+                "recipient": secret,
+                "content": {
+                    "content_type": "json",
+                    "parts": [secret, {"access_token": secret}],
+                },
+                "status": "finished_successfully",
+            },
+        },
+        {
+            "message": {
+                "author": {"role": "tool"},
+                "recipient": "all",
+                "content": {
+                    "content_type": "json",
+                    "parts": [
+                        secret,
+                        {"internal": {"token": secret}},
+                        {
+                            "content_type": "image_asset_pointer",
+                            "asset_pointer": "sediment://file-safe",
+                            "width": 4,
+                            "height": 2,
+                            "size_bytes": 8,
+                            "opaque": {"access_token": secret},
+                        },
+                    ],
+                },
+                "status": "finished_successfully",
+            },
+        },
+        json.loads(_assistant_frame(secret, "finished_successfully")[6:]),
+    ]
+    _patch_sse_frames(
+        monkeypatch,
+        [*("data: " + json.dumps(frame) for frame in frames), "data: [DONE]"],
+    )
+    client = sse_mod.ConversationClient(_Backend())  # type: ignore[arg-type]
+
+    result = asyncio.run(client.tool_call("run the tool"))
+
+    assert secret not in repr(result)
+    assert result == {
+        "conversation_id": "<APIKEY>",
+        "text": "<APIKEY>",
+        "tool_calls": [
+            {
+                "recipient": "<APIKEY>",
+                "content_type": "json",
+                "parts": ["<APIKEY>"],
+            }
+        ],
+        "tool_responses": [{"content_type": "json", "parts": ["<APIKEY>"]}],
+        "multimodal_assets": [
+            {
+                "asset_pointer": "sediment://file-safe",
+                "file_id": "file-safe",
+                "width": 4,
+                "height": 2,
+                "size_bytes": 8,
+            }
+        ],
+    }
+
+
+def test_tool_call_rejects_opaque_message_scalars_without_echoing_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "sk-" + "z" * 24
+    frame = {
+        "message": {
+            "author": {"role": "assistant"},
+            "recipient": {"access_token": secret},
+            "content": {"content_type": "json", "parts": ["safe"]},
+            "status": "finished_successfully",
+        }
+    }
+    _patch_sse_frames(monkeypatch, ["data: " + json.dumps(frame)])
+    client = sse_mod.ConversationClient(_Backend())  # type: ignore[arg-type]
+
+    with pytest.raises(sse_mod.BackendContractError) as caught:
+        asyncio.run(client.tool_call("run the tool"))
+    assert secret not in str(caught.value)
 
 
 def test_tool_call_rejects_partial_summary_after_finished_tool_at_raw_eof(
@@ -538,6 +785,7 @@ def test_widget_report_rejects_assistant_carrier_and_keeps_tool_fixture() -> Non
 def test_phase_two_done_preserves_phase_one_connector_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    secret = "SYNTHETIC_TOOL_ERROR_SECRET account@example.com"
     frames = [
         "data: "
         + json.dumps(
@@ -565,7 +813,7 @@ def test_phase_two_done_preserves_phase_one_connector_failure(
                         "recipient": "all",
                         "content": {
                             "content_type": "text",
-                            "parts": ["Error: connector unavailable"],
+                            "parts": [f"Error: connector unavailable {secret}"],
                         },
                         "status": "finished_successfully",
                         "metadata": {},
@@ -594,7 +842,9 @@ def test_phase_two_done_preserves_phase_one_connector_failure(
         return events
 
     events = asyncio.run(_collect())
-    assert any(event.get("type") == "tool_error" for event in events)
+    tool_errors = [event for event in events if event.get("type") == "tool_error"]
+    assert tool_errors == [{"type": "tool_error", "code": "connector_unavailable"}]
+    assert secret not in json.dumps(events)
     done = [event for event in events if event.get("type") == "done"][-1]
     assert done["connector_failed"] is True
 
@@ -605,6 +855,9 @@ class _SentinelBackend:
 
     _session = _Session()
 
+    def request_headers(self) -> dict[str, str]:
+        return dict(self._session.headers)
+
 
 def _patch_sentinel_response(
     monkeypatch: pytest.MonkeyPatch, payload: dict
@@ -612,6 +865,8 @@ def _patch_sentinel_response(
     class _Response:
         status_code = 200
         text = json.dumps(payload)
+        content = text.encode()
+        headers: dict[str, str] = {}
 
         def json(self) -> dict:
             return payload
@@ -626,7 +881,10 @@ def _patch_sentinel_response(
         async def __aexit__(self, *exc: Any) -> None:
             return None
 
-        async def post(self, *_: Any, **__: Any) -> _Response:
+        async def post(self, *_: Any, **kwargs: Any) -> _Response:
+            callback = kwargs.get("content_callback")
+            if callback is not None:
+                callback(_Response.content)
             return _Response()
 
     monkeypatch.setattr(sentinel_mod, "AsyncSession", _Session)
@@ -643,7 +901,7 @@ def test_pow_solver_does_not_block_event_loop(
             "proofofwork": {
                 "required": True,
                 "seed": "seed",
-                "difficulty": "difficulty",
+                "difficulty": "0fffff",
             },
         },
     )
@@ -699,7 +957,7 @@ def test_required_pow_unsolved_fails_closed(
             "proofofwork": {
                 "required": True,
                 "seed": "seed",
-                "difficulty": "difficulty",
+                "difficulty": "0fffff",
             },
         },
     )
@@ -720,7 +978,7 @@ def test_required_turnstile_unsolved_fails_closed(
         {
             "token": "chat-token",
             "proofofwork": {"required": False},
-            "turnstile": {"required": True, "dx": "challenge"},
+            "turnstile": {"required": True, "dx": "W10="},
         },
     )
     monkeypatch.setattr(sentinel_mod._turn, "solve_turnstile", lambda *_: None)
@@ -779,7 +1037,7 @@ def _patch_runner_events(
 
 
 @pytest.mark.parametrize("preexisting", [False, True], ids=["new", "preexisting"])
-def test_bundled_runner_keeps_events_file_private(
+def test_bundled_runner_never_writes_legacy_events_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     preexisting: bool,
@@ -796,6 +1054,7 @@ def test_bundled_runner_keeps_events_file_private(
         out_dir.mkdir()
         events_path.write_text("old unredacted data\n", encoding="utf-8")
         events_path.chmod(0o644)
+    before = events_path.read_bytes() if preexisting else None
 
     previous_umask = os.umask(0o022)
     try:
@@ -804,7 +1063,11 @@ def test_bundled_runner_keeps_events_file_private(
         os.umask(previous_umask)
 
     assert status == 0
-    assert stat.S_IMODE(events_path.stat().st_mode) == 0o600
+    if preexisting:
+        assert events_path.read_bytes() == before
+        assert stat.S_IMODE(events_path.stat().st_mode) == 0o644
+    else:
+        assert not events_path.exists()
 
 
 @pytest.mark.parametrize("preexisting", [False, True], ids=["new", "preexisting"])
@@ -823,7 +1086,7 @@ def test_bundled_runner_keeps_all_output_artifacts_private(
     out_dir = tmp_path / "private-output"
     if preexisting:
         out_dir.mkdir(mode=0o755)
-        for name in ("events.jsonl", "report.md", "meta.json", "status.txt"):
+        for name in ("report.md", "status.txt"):
             path = out_dir / name
             path.write_text("old data\n", encoding="utf-8")
             path.chmod(0o644)
@@ -836,8 +1099,10 @@ def test_bundled_runner_keeps_all_output_artifacts_private(
 
     assert status == 0
     assert stat.S_IMODE(out_dir.stat().st_mode) == 0o700
-    for name in ("events.jsonl", "report.md", "meta.json", "status.txt"):
+    for name in ("report.md", "status.txt"):
         assert stat.S_IMODE((out_dir / name).stat().st_mode) == 0o600
+    assert not (out_dir / "events.jsonl").exists()
+    assert not (out_dir / "meta.json").exists()
 
 
 def test_bundled_runner_default_output_directories_are_unique_and_private(
@@ -868,7 +1133,7 @@ def test_bundled_runner_records_backend_initialization_failure(
     monkeypatch.setattr(runner, "BackendClient", _fail_backend)
     out_dir = tmp_path / "backend-error"
     out_dir.mkdir()
-    for name in ("events.jsonl", "report.md", "meta.json", "status.txt"):
+    for name in ("report.md", "status.txt"):
         path = out_dir / name
         path.write_text(f"stale {name}\n", encoding="utf-8")
         path.chmod(0o644)
@@ -876,17 +1141,17 @@ def test_bundled_runner_records_backend_initialization_failure(
     status = asyncio.run(runner._run("query", "light", out_dir))
 
     assert status != 0
-    assert (out_dir / "status.txt").read_text(encoding="utf-8").startswith(
-        "ERROR\tRuntimeError: invalid saved token"
-    )
-    assert (out_dir / "events.jsonl").read_text(encoding="utf-8") == ""
+    status_text = (out_dir / "status.txt").read_text(encoding="utf-8")
+    assert status_text.startswith("ERROR\terror_type=RuntimeError\t")
+    assert "invalid saved token" not in status_text
     assert (out_dir / "report.md").read_text(encoding="utf-8") == ""
-    assert (out_dir / "meta.json").read_text(encoding="utf-8") == "[]\n"
-    for name in ("events.jsonl", "report.md", "meta.json", "status.txt"):
+    assert not (out_dir / "events.jsonl").exists()
+    assert not (out_dir / "meta.json").exists()
+    for name in ("report.md", "status.txt"):
         assert stat.S_IMODE((out_dir / name).stat().st_mode) == 0o600
 
 
-def test_bundled_runner_clears_stale_meta_when_run_emits_no_meta(
+def test_bundled_runner_does_not_modify_preexisting_legacy_meta(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runner = _load_runner()
@@ -897,12 +1162,14 @@ def test_bundled_runner_clears_stale_meta_when_run_emits_no_meta(
     )
     out_dir = tmp_path / "no-meta"
     out_dir.mkdir()
-    (out_dir / "meta.json").write_text('{"request_id": "stale"}\n')
+    meta_path = out_dir / "meta.json"
+    original = b'{"request_id": "stale"}\n'
+    meta_path.write_bytes(original)
 
     status = asyncio.run(runner._run("query", "light", out_dir))
 
     assert status == 0
-    assert (out_dir / "meta.json").read_text(encoding="utf-8") == "[]\n"
+    assert meta_path.read_bytes() == original
 
 
 @pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="O_NOFOLLOW unavailable")

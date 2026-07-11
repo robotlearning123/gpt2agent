@@ -30,8 +30,23 @@ import pytest
 # or desyncing on subsequent frames.
 
 _FRAMES = [
-    # msg-1 deltas (string v-patch — continuation of current id, which is None
-    # initially; our parser treats string v as "continue current msg")
+    # Establish the visible assistant message before accepting string-only
+    # deltas. An unscoped string patch must not be assumed to be user-visible;
+    # it could belong to a tool-targeted dispatch.
+    "data: "
+    + json.dumps(
+        {
+            "v": {
+                "message": {
+                    "id": "msg-1",
+                    "author": {"role": "assistant"},
+                    "recipient": "all",
+                    "content": {"content_type": "text", "parts": []},
+                }
+            }
+        }
+    ),
+    # msg-1 deltas (string v-patch — continuation of the visible message)
     'data: {"v":"Hello "}',
     'data: {"v":"world"}',
     # msg-2: Format B full-message frame, new id
@@ -72,9 +87,9 @@ class _FakeResp:
     def __init__(self, lines: list[str]) -> None:
         self._lines = lines
 
-    async def aiter_lines(self):
+    async def aiter_content(self):
         for ln in self._lines:
-            yield ln
+            yield (ln + "\n").encode()
 
 
 class _FakeSession:
@@ -100,12 +115,17 @@ class _FakeBackend:
     def _reload_token_if_stale(self) -> None:  # mirrors BackendClient
         pass
 
+    def request_headers(self) -> dict[str, str]:
+        return dict(self._session.headers)
+
 
 class _FakeSentinel:
     def __init__(self, *_: Any, **__: Any) -> None:
         pass
 
-    async def get_tokens(self) -> dict[str, str]:
+    async def get_tokens(
+        self, _operation_headers: dict[str, str] | None = None
+    ) -> dict[str, str]:
         return {"chat-requirements": "stub", "proof": "", "turnstile": ""}
 
 

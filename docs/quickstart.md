@@ -44,23 +44,30 @@ No codex? Run `gpt2agent setup` to paste a ChatGPT token once
 ## 4. Verify
 
 ```bash
-gpt2agent --version          # confirms the install
+gpt2agent --version          # 0.0.12 prints: gpt2agent 0.0.12
 gpt2agent run --stdio        # smoke test: should start and wait on stdin (Ctrl-C to exit)
 ```
 
 Then **restart your MCP client** (Claude Code spawns the server fresh on restart;
-Codex picks it up on next run). Ask your agent to call `account_status` — it should
-return your plan and feature count.
+Codex picks it up on next run). Ask your agent to call `account_status`, then
+list the server's MCP tools and resources. Version 0.0.12 exposes exactly 32
+tools plus the static `chatgpt://feature-coverage` and
+`chatgpt://update-evidence` resources.
 
 ## 5. First calls
 
 - `chat` — talk to any model on your account (`model="gpt-5-5-pro"`, `o3-pro`, …).
 - `deep_research` — web-augmented research with citations (~1 min).
-- `generate_image` — DALL·E image generation.
+- `generate_image` — ChatGPT's built-in image generation through the observed,
+  undocumented private prepare/conduit flow.
+- `account_capabilities` — get shape-only, explicit current account truth.
+- `list_scheduled_tasks` — inspect scheduled automations; use `list_tasks` for
+  generic background jobs.
 
 > **Heads up:** `chat` defaults to `temporary=True`, which disables image gen / code
 > interpreter / canvas. Use the dedicated tools (`generate_image`, `code_interpreter`,
 > `canvas_execute`) for those — they handle the flag for you.
 
 Stuck? See [troubleshooting.md](./troubleshooting.md). Worried about account safety?
-See the README's **Security & risk** section and [faq.md](./faq.md).
+See the README's **Security & risk** section and [faq.md](./faq.md). Upgrading an
+older service? Read [the 0.0.12 migration guide](./migration-0.0.12.md).

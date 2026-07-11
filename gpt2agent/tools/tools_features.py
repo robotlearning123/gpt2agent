@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 from gpt2agent.backend import BackendClient
+from gpt2agent.tool_contracts import tool_annotations
 
 
 def register(mcp, client: BackendClient, conv=None) -> None:
 
-    @mcp.tool()
+    @mcp.tool(annotations=tool_annotations("code_interpreter"))
     async def code_interpreter(
         prompt: str,
         model: str = "gpt-5-3",
@@ -32,7 +33,7 @@ def register(mcp, client: BackendClient, conv=None) -> None:
 
         return await _conv.tool_call(prompt, model=model, temporary=False)
 
-    @mcp.tool()
+    @mcp.tool(annotations=tool_annotations("canvas_execute"))
     async def canvas_execute(
         prompt: str,
         model: str = "gpt-5-3",

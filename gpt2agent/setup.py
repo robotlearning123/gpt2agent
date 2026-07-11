@@ -133,15 +133,24 @@ def save_token(token: str) -> None:
 # ── plan detection ──────────────────────────────────────────────────────────
 
 
-def detect_plan() -> str:
-    """Probe chatgpt.com/backend-api/me via BackendClient. Returns pro/plus/free."""
+def detect_plan(client=None) -> str:
+    """Measure the authenticated account entitlement. Returns pro/plus/free."""
+    owns_client = client is None
     try:
         from gpt2agent.backend import BackendClient
 
-        bc = BackendClient()
+        bc = BackendClient() if client is None else client
         acct = bc.get("/backend-api/accounts/check/v4-2023-04-27")
     except Exception as exc:
         raise RuntimeError(f"Could not verify ChatGPT account: {exc}") from exc
+    finally:
+        if owns_client and "bc" in locals():
+            close = getattr(getattr(bc, "_session", None), "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
 
     accounts = (acct or {}).get("accounts") if isinstance(acct, dict) else None
     if not isinstance(accounts, dict) or not accounts:
@@ -153,16 +162,14 @@ def detect_plan() -> str:
             ent = a.get("entitlement")
             if not isinstance(ent, dict):
                 continue
-            plan = str(ent.get("subscription_plan") or "").lower()
+            plan = str(ent.get("subscription_plan") or "").strip().lower()
             active = ent.get("has_active_subscription")
             if active is False:
                 verified_plans.append("free")
-            elif "pro" in plan:
+            elif active is True and plan in {"pro", "chatgptpro"}:
                 verified_plans.append("pro")
-            elif "plus" in plan:
+            elif active is True and plan in {"plus", "chatgptplus"}:
                 verified_plans.append("plus")
-            elif "free" in plan:
-                verified_plans.append("free")
 
     for plan in ("pro", "plus", "free"):
         if plan in verified_plans:
@@ -181,8 +188,8 @@ def write_mcp_config(plan: str) -> None:
 
     chat_model = "gpt-5-5-pro" if plan == "pro" else "gpt-5-3"
     cfg = f"""[server]
-# Loopback only — the HTTP transport is unauthenticated and proxies your full
-# ChatGPT account. To expose it, set host explicitly AND GPT2AGENT_ALLOW_REMOTE=1.
+# Loopback only: the HTTP transport is unauthenticated and proxies your full
+# ChatGPT account. Version 0.0.12 refuses every non-loopback host.
 host = "127.0.0.1"
 port = {MCP_PORT}
 

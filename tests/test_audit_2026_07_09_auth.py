@@ -111,13 +111,15 @@ def test_backend_switches_to_new_preferred_codex_source(tmp_path, monkeypatch) -
     _write_token(saved, "SAVED_OLD", codex=False)
 
     client = backend.BackendClient()
-    assert client._session.headers["Authorization"] == "Bearer SAVED_OLD"
+    assert "Authorization" not in client._session.headers
+    assert client.request_headers()["Authorization"] == "Bearer SAVED_OLD"
     assert client._token_source == saved
 
     _write_token(codex, "CODEX_NEW", codex=True)
     client._reload_token_if_stale()
 
-    assert client._session.headers["Authorization"] == "Bearer CODEX_NEW"
+    assert "Authorization" not in client._session.headers
+    assert client.request_headers()["Authorization"] == "Bearer CODEX_NEW"
     assert client._token_source == codex
 
 
@@ -137,7 +139,8 @@ def test_backend_falls_back_when_codex_source_disappears(tmp_path, monkeypatch) 
     codex.unlink()
     client._reload_token_if_stale()
 
-    assert client._session.headers["Authorization"] == "Bearer SAVED_FALLBACK"
+    assert "Authorization" not in client._session.headers
+    assert client.request_headers()["Authorization"] == "Bearer SAVED_FALLBACK"
     assert client._token_source == saved
 
 
@@ -214,6 +217,51 @@ def test_setup_detects_verified_free_account(monkeypatch) -> None:
     monkeypatch.setattr(backend, "BackendClient", lambda: _PlanClient(response))
 
     assert setup.detect_plan() == "free"
+
+
+def test_setup_detect_plan_uses_injected_authenticated_client() -> None:
+    from gpt2agent import setup
+
+    response = {
+        "accounts": {
+            "acct": {
+                "entitlement": {
+                    "subscription_plan": "pro",
+                    "has_active_subscription": True,
+                }
+            }
+        }
+    }
+    client = _PlanClient(response)
+
+    assert setup.detect_plan(client) == "pro"
+
+
+def test_setup_detects_live_pro_slug_only_with_explicit_active_entitlement() -> None:
+    from gpt2agent import setup
+
+    active = _PlanClient(
+        {
+            "accounts": {
+                "acct": {
+                    "entitlement": {
+                        "subscription_plan": "chatgptpro",
+                        "has_active_subscription": True,
+                    }
+                }
+            }
+        }
+    )
+    assert setup.detect_plan(active) == "pro"
+
+    for untrusted in (
+        {"subscription_plan": "chatgptpro"},
+        {"subscription_plan": "promotional", "has_active_subscription": True},
+        {"subscription_plan": "chatgptpro", "has_active_subscription": "true"},
+    ):
+        client = _PlanClient({"accounts": {"acct": {"entitlement": untrusted}}})
+        with pytest.raises(RuntimeError, match="plan"):
+            setup.detect_plan(client)
 
 
 @pytest.mark.parametrize("stale_plan", ["plus", "pro"])

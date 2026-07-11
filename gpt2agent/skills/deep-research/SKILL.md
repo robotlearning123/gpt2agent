@@ -50,12 +50,12 @@ test -f "${CODEX_HOME:-$HOME/.codex}/auth.json" || test -f "$HOME/.gpt2agent/tok
 
 The script writes:
 - `report.md` — final report (reconstructed for heavy mode)
-- `events.jsonl` — all raw SSE events (for debugging / re-extraction)
-- `status.txt` — START / DONE / INCOMPLETE / ERROR with elapsed seconds + event counts
-- `meta.json` — server metadata (model slug, request id, etc.)
+- `status.txt` — shape-only START / DONE / INCOMPLETE / ERROR diagnostics with
+  elapsed seconds and event-category counts
 
+The runner deliberately does not persist raw SSE events or server metadata.
 The run directory is restricted to mode `0700` and its artifacts to `0600` on
-POSIX systems because queries, reports, and metadata may be sensitive.
+POSIX systems because reports may be sensitive.
 
 ## When to invoke
 
@@ -85,8 +85,8 @@ explicitly wants you to handle locally, anything covered by `context7`
    EOF
    ```
 3. Use `run_in_background: true` for heavy mode — it takes minutes. Tail
-   `status.txt` or `events.jsonl` `wc -l` to monitor progress; the bash
-   completion notification will arrive when finished.
+   `status.txt` to monitor shape-only progress; the bash completion notification
+   will arrive when finished.
 4. After completion: Read `report.md`, summarize key findings in 5-8
    bullets for the user, point to the full file path.
 
@@ -112,8 +112,8 @@ widget state is delivered via two carriers, both handled by
 
 `_poll_dr_completion` now checks the widget state each poll and emits the report
 as a `done` event the moment it appears. Verified by recovering three real
-completed reports headlessly (45.6K / 52.4K / 51.5K chars). Set
-`GPT2AGENT_RAW_DUMP=<path>` to capture the raw heavy stream + polls.
+completed reports headlessly (45.6K / 52.4K / 51.5K chars). Raw stream and poll
+payloads are intentionally never written to disk.
 
 > **Light mode TODO:** the light `deep_research` (`model=research`) path uses the
 > SearchGPT web-search backend, a *different* mechanism. It can still save the
@@ -151,7 +151,7 @@ one account collide.
 **Observed failure (2026-06-03):** running a heavy DR concurrently with several
 `codex` jobs caused sustained **HTTP 429** on the poll for ~30 min, then the run
 died with `ERROR  RuntimeError: DR polling timed out after 1800.0s waiting for
-conv <id>` and `events.jsonl` had only the initial `meta` event. The exact
+conv <id>` after only the initial metadata event was observed. The exact
 per-account request-rate limit is not officially documented — do not assume a
 number; just keep account access serial.
 

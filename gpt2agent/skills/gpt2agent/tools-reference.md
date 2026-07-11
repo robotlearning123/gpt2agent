@@ -1,7 +1,11 @@
 # gpt2agent MCP Tools Reference
 
-Complete parameter reference for all 25 MCP tools exposed by the gpt2agent server.
+Complete parameter reference for all 32 MCP tools and 2 static resources exposed by the gpt2agent server.
 Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
+
+Every tool declares all four standard MCP annotations: read-only, destructive,
+idempotent, and open-world hints. They help clients present and approve calls;
+they are not an authorization boundary.
 
 ---
 
@@ -10,9 +14,10 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - [Chat & Reasoning (5)](#chat--reasoning)
 - [Image & File (3)](#image--file)
 - [Code Execution (2)](#code-execution)
-- [Account Introspection (7)](#account-introspection)
+- [Account Discovery (14)](#account-discovery)
 - [Memory & Instructions (5)](#memory--instructions)
 - [Codex (3)](#codex)
+- [Static Resources (2)](#static-resources)
 
 ---
 
@@ -25,18 +30,24 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
   - `prompt` (str, required) -- the user message to send.
   - `model` (str, default: value from `config.toml` `[models].chat`, fallback `"gpt-5-3"`) -- model slug. Run `list_models` to see all available slugs.
   - `temporary` (bool, default: `True`) -- when `True`, sets `history_and_training_disabled=True` which prevents the conversation from being saved and **blocks tool-based features** (image gen, code interpreter, canvas, memory persistence). Set `False` to enable those features.
-- **Returns**: `str` -- the assistant's reply text.
+  - `thinking_effort` (str or None, default: `None`) -- optional effort advertised by the selected general model's live `thinking_efforts`. Omitted from the payload when unset.
+- **Returns**: `str` -- the assistant's reply text followed by one
+  server-appended final `Tool activity receipt`. It names fixed safe categories
+  or `none`; only this final footer is authoritative. Private dispatch and
+  response payloads are withheld.
 - **When to use**: General Q&A, text generation, translation, summarization. Default choice for single-turn queries.
 - **Example**:
   ```python
   chat("Explain the difference between LTP and LTD in hippocampal neurons.")
   chat("Summarize this abstract:", model="o3")
+  chat("Prove or disprove this conjecture", model="o3-pro", thinking_effort="high")
   chat("Generate a chart of this data", model="gpt-5-3", temporary=False)
   ```
 - **Notes**:
   - `temporary=True` (default) means the conversation is ephemeral -- not saved to ChatGPT history, cannot use image gen / code interpreter / canvas.
   - If you need tool-based features (image gen, code interpreter, canvas), you **must** pass `temporary=False`.
-  - Available model slugs depend on your subscription tier. Pro plan unlocks `gpt-5-5-pro`, `gpt-5-4-pro`, `o3-pro`, etc.
+  - The selected slug must exist in the live general catalog. A Work-only slug is rejected unless the exact same slug independently appears in `list_models`.
+  - Model metadata is cached for 60 seconds per auth generation. A rejected effort forces one refresh before returning `invalid_input`; a non-general or non-configurable model returns `unsupported`.
 
 ---
 
@@ -45,7 +56,11 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Purpose**: ChatGPT Agent Mode -- autonomous browsing, code execution, and tool use with 262K context window.
 - **Parameters**:
   - `prompt` (str, required) -- the task description.
-- **Returns**: `str` -- the agent's response text.
+- **Returns**: `str` -- the agent's response text followed by one authoritative
+  final `Tool activity receipt`, including `none` when no activity was observed.
+  If polling ends without a final assistant message, the body is
+  `(no final assistant response)` followed by the receipt. Private dispatch and
+  response bodies are withheld.
 - **When to use**: Multi-step tasks requiring browsing, code execution, or tool orchestration. Literature gathering, document workflows, browser automation.
 - **Example**:
   ```python
@@ -55,6 +70,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Notes**:
   - Always uses `temporary=False` internally (tool-based features required).
   - Uses the `agent-mode` slug by default (configurable via `[models].agent` in `config.toml`).
+  - The configured slug is validated against the live general model catalog before dispatch. Agent has no per-call `thinking_effort` parameter in 0.0.12.
   - SSE-only transport (no REST fallback).
   - Long-running tasks may take several minutes.
 
@@ -79,6 +95,8 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
   - `history_and_training_disabled` is forced to `False` for DR (ChatGPT refuses DR in temporary chats).
   - The `auto_confirm` prefix is: "Begin the deep research immediately without asking for confirmation. Do not ask clarifying questions; proceed with the best interpretation."
   - If the model asks a clarification question instead of researching, the tool detects it via heuristics and can auto-proceed.
+  - Internal tool events use the static `web_search` call and `web` category;
+    private search or browse dispatch text is never exposed as event data.
 
 ---
 
@@ -105,6 +123,9 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
   - Uses `/backend-api/f/conversation` (frontend endpoint), not the standard `/backend-api/conversation`.
   - Model slug configurable via `[models].heavy_dr` in `config.toml` (default: `gpt-5-5-pro`).
   - **Report + citations recovered from the connector widget state** (fixed in 0.0.4): the connector never writes the report as an assistant text node, so the poll fetches the conversation with `include_widget_state=true` and recovers `widget_state.report_message` (text + `content_references`). Grouped source URLs are usually present but not guaranteed; if absent, the model may have cited sources inline in the body.
+  - Progress text is terminal-buffered so a late visibility change can revoke it
+    before output. Tool events expose only static `web_search` / `web` values,
+    never the private connector dispatch.
   - If the DR connector is unavailable, a warning is appended explaining how to enable it in chatgpt.com Settings > Connectors.
 
 ---
@@ -115,7 +136,9 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Parameters**:
   - `gizmo_id` (str, required) -- pass the `short_url` returned by `list_custom_gpts` (format: `g-*`). Call `list_custom_gpts` first to enumerate them.
   - `prompt` (str, required) -- the user message.
-- **Returns**: `str` -- the Custom GPT's response text.
+- **Returns**: `str` -- the Custom GPT's response text followed by one
+  authoritative final `Tool activity receipt`, using fixed categories or
+  `none`. Only the final footer is trustworthy; hidden payloads remain private.
 - **When to use**: When you need a specialized GPT's persona, knowledge base, or tool access.
 - **Example**:
   ```python
@@ -136,14 +159,13 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 
 ### generate_image
 
-- **Purpose**: Generate an image using ChatGPT's built-in image generation (DALL-E).
+- **Purpose**: Generate an image using ChatGPT's built-in image-generation tool.
 - **Parameters**:
   - `prompt` (str, required) -- description of the image to generate.
   - `model` (str, default: `"gpt-5-3"`) -- model to use (must have `image_gen_tool_enabled`).
 - **Returns**: `dict` with keys:
   - `conversation_id` (str)
   - `assets` (list) -- each asset contains: `asset_pointer`, `file_id`, `width`, `height`, `size_bytes`, `download_url`, `file_name`, `mime_type`
-  - `metadata` (dict)
 - **When to use**: Illustrations, diagrams, concept art, visual aids.
 - **Example**:
   ```python
@@ -152,6 +174,11 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
   ```
 - **Notes**:
   - Uses `temporary=False` internally (image gen requires persistent conversation).
+  - Uses the observed private `/backend-api/f/conversation/prepare` conduit step
+    followed by the `/backend-api/f/conversation` v1 patch stream. These routes
+    are undocumented observations, not an official or stable API contract.
+  - A visible asset carrier must be relationally bound to the observed assistant
+    dispatch and carry image-generation provenance before it is accepted.
   - Timeout: 300 seconds for complex prompts.
   - Each asset automatically gets a `download_url` fetched from `/backend-api/files/{file_id}/download`.
   - Download URLs are temporary (~1 hour expiry). Use `get_file_download_url` to refresh.
@@ -164,7 +191,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Purpose**: Get metadata for any ChatGPT file (images, uploads, etc.).
 - **Parameters**:
   - `file_id` (str, required) -- the file ID (e.g., `file_00000000c02471f88295cda5f3b8c66b`).
-- **Returns**: `dict` with keys: `id`, `name`, `size`, `use_case`, `state`, `creation_time`, `mime_type`, etc.
+- **Returns**: `dict` with exactly: `id`, `name`, `size`, `file_size_bytes`, `use_case`, `state`, `creation_time`, and `mime_type`.
 - **When to use**: Inspect a file's metadata before downloading, check file state, get file name.
 - **Example**:
   ```python
@@ -172,7 +199,8 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
   ```
 - **Notes**:
   - Async handler; offloads `GET /backend-api/files/{file_id}` to the synchronous backend client.
-  - Returns `{}` if the file doesn't exist or the request fails.
+  - Unknown backend fields and private URLs are never returned. A malformed or
+    blank 2xx response fails as `contract_changed`.
 
 ---
 
@@ -181,7 +209,9 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Purpose**: Get a temporary download URL for a ChatGPT file.
 - **Parameters**:
   - `file_id` (str, required) -- the file ID.
-- **Returns**: `str` -- the download URL. Empty string if not found.
+- **Returns**: `str` -- an absolute public HTTPS download URL, with a valid
+  signed query preserved byte-for-byte. Empty string if not found; unsafe,
+  internal, malformed, or non-HTTPS destinations fail as changed contracts.
 - **When to use**: Download an image or file generated by ChatGPT. Refresh expired download URLs.
 - **Example**:
   ```python
@@ -249,7 +279,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 
 ---
 
-## Account Introspection
+## Account Discovery
 
 ### account_status
 
@@ -276,6 +306,44 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 
 ---
 
+### account_capabilities
+
+- **Purpose**: Return live, shape-only capability truth without exposing account content or raw private responses.
+- **Parameters**: None.
+- **Returns**: `dict` with:
+  - `schema_version` (`"1"`)
+  - `observed_at` (UTC ISO-8601 timestamp)
+  - `capabilities` (list), where every record contains `id`, `surface`,
+    `entitled`, `reachable_now`, `reachability_scope`, `exposed_by_mcp`,
+    `officially_supported`, `evidence_source`, `observed_at`, `status`, `reason`,
+    and `item_contract_status`.
+- **When to use**: Decide what the current account can prove now, distinguish an
+  unavailable feature from a temporarily failed or changed private adapter, and
+  audit rollout drift without fetching account content.
+- **Example**:
+  ```python
+  truth = account_capabilities()
+  available = [
+      item["id"] for item in truth["capabilities"]
+      if item["entitled"] is True and item["reachable_now"] is True
+  ]
+  ```
+- **Notes**:
+  - `entitled` and `reachable_now` are independent tri-state values: `True`,
+    `False`, or `None` when the release cannot prove an answer safely.
+  - `status` uses typed outcomes such as `ok`, `unavailable`, `unsupported`,
+    `contract_changed`, `temporarily_failed`, `access_indeterminate`,
+    `login_required`, and `unverified`.
+  - Collection item evidence is `live_verified`, `public_bundle_only`,
+    `unverified_live`, or `not_applicable`.
+  - The tool shares one auth snapshot and a 90-second total budget across an
+    explicit GET-only route table. It never probes Voice/realtime, transcripts,
+    conversation bodies, writes, unknown routes, or off-host redirects.
+  - `officially_supported=False` describes this project's private adapter path;
+    an underlying ChatGPT product may still be officially documented.
+
+---
+
 ### list_models
 
 - **Purpose**: Return all available ChatGPT models with full metadata.
@@ -299,7 +367,30 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
   ```
 - **Notes**:
   - Returns models for `history_and_training_disabled=false` variant. Some models may differ in capabilities between temporary/non-temporary modes.
+  - General metadata shares a 60-second cache keyed by auth generation with
+    `chat` validation, but never merges the separate Work namespace.
   - Async handler; offloads the REST call to the synchronous backend client.
+
+---
+
+### list_work_models
+
+- **Purpose**: Return account-visible Work model metadata without treating Work-only identifiers as general chat models.
+- **Parameters**: None.
+- **Returns**: `dict` with `items`; every item contains `surface: "work"`, `slug`,
+  `title`, `max_tokens`, `reasoning_type`, `configurable_thinking_effort`,
+  `default_thinking_effort`, and bounded `thinking_efforts` entries.
+- **When to use**: Discover the Work product catalog or compare Work reasoning metadata separately from `list_models`.
+- **Example**:
+  ```python
+  work = list_work_models()
+  for model in work["items"]:
+      print(model["slug"], model["default_thinking_effort"])
+  ```
+- **Notes**:
+  - Uses `/backend-api/tpp/models/` and a Work-only 60-second cache keyed by auth generation.
+  - A returned slug is opaque and Work-only unless the exact slug also appears independently in `list_models`.
+  - Do not pass a Work-only slug to `chat` or configure it for `agent`.
 
 ---
 
@@ -329,10 +420,10 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 
 ### get_conversation
 
-- **Purpose**: Get full details of a ChatGPT conversation including all messages.
+- **Purpose**: Get a bounded, redacted projection of a ChatGPT conversation's visible messages.
 - **Parameters**:
   - `conversation_id` (str, required) -- the conversation ID from `list_conversations`.
-  - `max_messages` (int, default: `100`) -- maximum number of messages to return.
+  - `max_messages` (int, default: `100`) -- maximum number of messages to return, from 1 through 100.
 - **Returns**: `dict` with keys:
   - `id` (str)
   - `title` (str) -- PII-redacted
@@ -354,6 +445,8 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
   ```
 - **Notes**:
   - Text parts are truncated to 2000 characters, code parts to 500 characters.
+  - IDs, recipients, status, timestamps, and image dimensions are validated as
+    bounded scalars; unknown nested backend fields are never returned.
   - Only includes messages with role `user`, `assistant`, or `tool` (skips system messages).
   - Async handler; offloads the REST call to the synchronous backend client. Large conversations can still take time to transfer and parse.
 
@@ -361,7 +454,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 
 ### list_tasks
 
-- **Purpose**: Return scheduled/completed ChatGPT tasks with full metadata.
+- **Purpose**: Return generic background/asynchronous ChatGPT jobs with bounded metadata. This is not the scheduled-automation surface.
 - **Parameters**:
   - `limit` (int, default: `20`) -- maximum number of tasks to return.
 - **Returns**: `list[dict]` -- each dict contains:
@@ -374,7 +467,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
   - `conversation_id` (str)
   - `image_gen_message` (bool) -- whether the task involves image generation
   - `interruptions_disabled` (bool)
-- **When to use**: Check scheduled task status, review completed tasks, manage automated workflows.
+- **When to use**: Check generic background-job status or review completed asynchronous jobs. Use `list_scheduled_tasks` for scheduled automations.
 - **Example**:
   ```python
   tasks = list_tasks(limit=10)
@@ -382,7 +475,32 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
   ```
 - **Notes**:
   - Titles and prompts are PII-redacted.
+  - `limit` accepts integers from 1 through 100. Booleans and other types are rejected.
+  - Reads `/backend-api/tasks`; it does not claim to enumerate `/backend-api/automations`.
   - Async handler; offloads the REST call to the synchronous backend client.
+
+---
+
+### list_scheduled_tasks
+
+- **Purpose**: Return one page of scheduled ChatGPT automations from the dedicated automation surface.
+- **Parameters**:
+  - `cursor` (str or None, default: `None`) -- opaque continuation cursor from a previous page.
+- **Returns**: `dict` with:
+  - `items` -- records containing `id`, `updated_at`, `next_run_times`,
+    `is_enabled`, and `target_time_utc`.
+  - `cursor` -- the next opaque cursor or `None`.
+- **When to use**: Inspect scheduled automation state and next-run metadata without confusing it with generic jobs.
+- **Example**:
+  ```python
+  page = list_scheduled_tasks()
+  if page["cursor"]:
+      next_page = list_scheduled_tasks(cursor=page["cursor"])
+  ```
+- **Notes**:
+  - Sends the fixed `filter=scheduled` query to `/backend-api/automations`.
+  - Returns one page only. It does not create, mutate, enable, or disable an automation.
+  - IDs and cursors are bounded; malformed items fail with `contract_changed` rather than leaking a raw response.
 
 ---
 
@@ -403,7 +521,95 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
   ```
 - **Notes**:
   - App names are not resolvable from the API -- only IDs are returned. The `type` field is inferred from the ID prefix.
+  - Accepts the observed string and object entry variants while preserving order and duplicates.
+  - Apps/connectors are not Plugins. Use `list_plugins` and `list_installed_plugins` for Plugin state.
   - Async handler; offloads the REST call to the synchronous backend client.
+
+---
+
+### list_plugins
+
+- **Purpose**: Return one bounded page of the account Plugin catalog.
+- **Parameters**:
+  - `scope` (str, default: `"USER"`) -- `USER` or `WORKSPACE`.
+  - `limit` (int, default: `50`) -- page size from 1 through 50.
+  - `cursor` (str or None, default: `None`) -- opaque backend or gpt2agent local cursor.
+- **Returns**: `dict` with `items` and `cursor`. Items contain only bounded
+  allowlisted scalar/list fields such as IDs, redacted names, scope/status,
+  `release_version`, skill/app/connector IDs, MCP server keys, and capability names.
+- **When to use**: Browse Plugins available to the account or workspace without inspecting connected-App state.
+- **Example**:
+  ```python
+  page = list_plugins(scope="USER", limit=20)
+  while page["cursor"]:
+      page = list_plugins(scope="USER", limit=20, cursor=page["cursor"])
+  ```
+- **Notes**:
+  - Supports both the observed root-array catalog and the current
+    `plugins`/`pagination.next_page_token` envelope.
+  - Root-array pagination uses a fingerprinted local cursor and fails closed if
+    the catalog changes between pages.
+  - Unknown nested data is not returned. Malformed known envelopes are `contract_changed`.
+
+---
+
+### list_installed_plugins
+
+- **Purpose**: Return installed Plugins using bounded, non-identifying fields.
+- **Parameters**: None.
+- **Returns**: `dict` with `items`, normalized to the same allowlist used by `list_plugins`.
+- **When to use**: Determine which Plugins and bounded skill/app identifiers are installed.
+- **Example**:
+  ```python
+  installed = list_installed_plugins()["items"]
+  enabled = [item for item in installed if item["enabled"] is True]
+  ```
+- **Notes**:
+  - Accepts the observed root `plugins` list and nested
+    `plugins.results`/`plugins.page` variants.
+  - A nested page that reports `has_more=True` fails with `contract_changed`;
+    the observed installed-plugin contract has no supported continuation request.
+  - Marketplace, Apps, and Skills objects are never returned; only bounded scalar IDs/names may be derived.
+
+---
+
+### sites_access
+
+- **Purpose**: Return non-identifying Sites access state for the account.
+- **Parameters**: None.
+- **Returns**: `dict` with nullable booleans `enabled`,
+  `custom_domains_enabled`, and `requires_workspace_slug`.
+- **When to use**: Check whether Sites appears available before listing bounded Site metadata.
+- **Example**:
+  ```python
+  access = sites_access()
+  if access["enabled"] is True:
+      sites = list_sites(limit=20)
+  ```
+- **Notes**:
+  - Does not return a workspace slug, identity, URL, or page content.
+  - A missing boolean remains `None`; it is not guessed as false.
+
+---
+
+### list_sites
+
+- **Purpose**: Return one bounded Sites page without content or private URLs.
+- **Parameters**:
+  - `limit` (int, default: `20`) -- page size from 1 through 100.
+  - `cursor` (str or None, default: `None`) -- opaque continuation cursor.
+- **Returns**: `dict` with `items` and `cursor`. Items contain bounded `id`,
+  redacted `title`/`slug`, `status`, `updated_at`, redacted `disabled_by`, sharing
+  mode/counts, and booleans indicating whether live, preview, or screenshot URLs exist.
+- **When to use**: Inventory Sites and sharing counts without retrieving content or signed/private URLs.
+- **Example**:
+  ```python
+  page = list_sites(limit=20)
+  visible = [site for site in page["items"] if site["has_live_url"]]
+  ```
+- **Notes**:
+  - URL values are reduced to presence booleans; their strings are never returned.
+  - The tool is read-only and does not publish, mutate, share, or create a Site.
 
 ---
 
@@ -599,7 +805,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
   - `prompt` (str, required) -- the task description / instruction.
   - `environment_id` (str or None, default: `None`) -- explicit environment ID. If `None`, resolved from `repo_label`.
   - `branch` (str, default: `"main"`) -- the git branch to work on.
-- **Returns**: `dict` -- the server's response from `POST /backend-api/codex/tasks`.
+- **Returns**: `dict` with exactly `id` and `status`; the opaque server response is not exposed.
 - **When to use**: Dispatch a coding task to Codex (bug fix, feature implementation, refactoring).
 - **Example**:
   ```python
@@ -612,9 +818,38 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
   ```
 - **Notes**:
   - If `environment_id` is not provided, the tool fetches all environments and matches by `repo_label`.
-  - Raises `ValueError` if no environment matches the label, or if the label is ambiguous (matches multiple environments).
+  - Returns `invalid_input` if no environment matches the label, or if the label is ambiguous (matches multiple environments).
   - The payload shape is: `new_task={environment_id, branch}` + `input_items=[{type: "message", role: "user", content: [{content_type: "text", text: prompt}]}]`.
   - Async handler; offloads the REST calls to the synchronous backend client.
+
+---
+
+## Static Resources
+
+Resource reads are deterministic package reads. They perform no account or
+network request and contain no cookies, bearer tokens, account identity, prompts,
+responses, or private URLs.
+
+### chatgpt://feature-coverage
+
+- **MIME type**: `application/json`
+- **Purpose**: Versioned 0.0.12 contract snapshot containing the exact 32-tool
+  manifest plus bounded feature status. Voice catalog/transcript/GPT-Live are
+  deferred and Projects is unsupported; those records do not claim live reachability.
+- **Use instead of**: Hard-coding a tool count or inferring that every ChatGPT
+  product is exposed by this adapter.
+
+### chatgpt://update-evidence
+
+- **MIME type**: `application/json`
+- **Purpose**: Public-surface evidence snapshot with source URLs and check time.
+  `account_contract_status` and `private_adapter_status` remain `not_checked`
+  because a public no-secret radar cannot verify a private account adapter.
+- **Use instead of**: Treating a documentation or web-bundle check as live
+  account proof.
+
+For current account state, call `account_capabilities`; do not reinterpret a
+static resource as a live receipt.
 
 ---
 
@@ -625,7 +860,23 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 models = list_models()
 slugs = [m["slug"] for m in models]
 if "o3-pro" in slugs:
-    response = chat("Complex analysis task", model="o3-pro")
+    selected = next(m for m in models if m["slug"] == "o3-pro")
+    efforts = [e["thinking_effort"] for e in selected.get("thinking_efforts", [])]
+    response = chat(
+        "Complex analysis task",
+        model="o3-pro",
+        thinking_effort="high" if "high" in efforts else None,
+    )
+```
+
+### Separating static coverage from live truth
+```python
+# Read chatgpt://feature-coverage through MCP resource discovery for the
+# deterministic release contract. Then call the tool for current account state:
+truth = account_capabilities()
+by_id = {item["id"]: item for item in truth["capabilities"]}
+if by_id["sites"]["entitled"] is True:
+    page = list_sites(limit=20)
 ```
 
 ### Image generation + download workflow
@@ -659,9 +910,14 @@ results = memory_search("keyword from new fact")
 
 1. **`temporary=True` blocks features**: Image gen, code interpreter, canvas, and memory persistence all require `temporary=False`. The `chat` tool defaults to `True`; all other SSE-based tools force `False`.
 
-2. **PII redaction**: `list_conversations`, `get_conversation`, `list_tasks`, `memory_list`, `memory_search`, `custom_instructions_get`, `list_custom_gpts`, and `list_codex_tasks` all redact emails and phone numbers from returned text.
+2. **Redaction is bounded, not anonymization**: conversation, job, memory,
+instruction, Custom GPT, Codex, Plugin, and Site text fields redact configured
+PII/secret shapes. Names, addresses, identifiers, and other sensitive content
+may remain.
 
-3. **Sync vs async**: Registered REST handlers (account, memory, instructions, codex, conversations, apps, gpts) are async and offload the synchronous backend client. SSE-based tools (chat, agent, deep_research, deep_research_heavy, gpt_chat, generate_image, code_interpreter, canvas_execute) are async.
+3. **Sync vs async**: Registered REST handlers are async and offload the
+synchronous backend client. SSE-based tools (`chat`, `agent`, both Deep Research
+tools, `gpt_chat`, image generation, code interpreter, and canvas) are async.
 
 4. **Memory creation is model-initiated only**: `POST /backend-api/memories` returns 405. Use `memory_create_via_chat` which asks the model to store the memory through conversation.
 
@@ -669,6 +925,41 @@ results = memory_search("keyword from new fact")
 
 6. **Heavy DR citations**: Recovered from the connector's hidden widget state (`widget_state.report_message`) since 0.0.4. Grouped source URLs are usually present but not guaranteed; if absent, the model may have cited sources inline in the report body.
 
-7. **Codex label resolution**: `codex_task_create` resolves `environment_id` from `repo_label` by fetching all environments. Raises `ValueError` on no match or ambiguous match.
+7. **Codex label resolution**: `codex_task_create` resolves `environment_id` from `repo_label` by fetching all environments. Returns `invalid_input` on no match or ambiguous match.
 
 8. **Download URL expiry**: File download URLs from `get_file_download_url` and `generate_image` expire after approximately 1 hour.
+
+9. **Generic jobs are not scheduled automations**: `list_tasks` reads generic
+background jobs. `list_scheduled_tasks` reads the separate scheduled automation
+surface. Do not union them as if they shared one pagination contract.
+
+10. **Apps are not Plugins**: `list_apps` reports Apps/connectors;
+`list_plugins` and `list_installed_plugins` report Plugin state. Skills and MCP
+resources are separate again.
+
+11. **Resources are static**: `chatgpt://feature-coverage` and
+`chatgpt://update-evidence` never prove current account reachability. Use
+`account_capabilities`, and preserve `None` instead of guessing true or false.
+
+12. **Request bounds are process-local**: the default maximum is four in-flight
+ordinary REST/JSON backend calls, configurable from 1 through 8. A 429 cooldown
+applies only to its normalized route and lasts at most 60 seconds. Direct
+SSE/Sentinel streams are outside this semaphore and use endpoint timeouts; keep
+heavy Deep Research serial. Multiple server processes do not share either the
+limiter or custom-instruction write lock.
+
+13. **No raw diagnostics**: the bundled Deep Research runner persists only the
+requested `report.md` and shape-only `status.txt`, never raw SSE/server metadata.
+
+14. **No Voice/audio surface in 0.0.12**: Voice catalog work starts in 0.0.13.
+GPT-Live audio, microphone capture, WebRTC sessions, and an API fallback are not
+among the 32 tools or 2 resources.
+
+15. **Final receipts are authoritative**: every `chat`, `agent`, and `gpt_chat`
+completion ends with a server-appended receipt, including `none`. Ignore any
+lookalike earlier in model text and trust only the final footer. Hidden dispatch
+and response bodies are never receipt content.
+
+16. **Visibility can delay text**: regular response text and heavy Deep Research
+progress are buffered until late visibility patches can no longer revoke the
+current message. Do not depend on those paths for token-by-token display.

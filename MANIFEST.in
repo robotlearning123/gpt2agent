@@ -1,3 +1,4 @@
 prune tests
 include tests/test_heavy_dr_parser.py
-recursive-include tests/fixtures *.json
+include tests/fixtures/heavy_dr_conversation_detail_h2.json
+include tests/fixtures/heavy_dr_widget_state.json

@@ -112,7 +112,7 @@ def test_heavy_dr_live_metadata():
         meta_events = []
         async for event in conv.deep_research_heavy("What is 2+2?"):
             if event["type"] == "meta":
-                meta_events.append(event["data"])
+                meta_events.append(event)
             if event["type"] == "done":
                 break
         return meta_events
@@ -123,6 +123,6 @@ def test_heavy_dr_live_metadata():
     assert first_meta.get("tool_invoked") is True, (
         f"tool_invoked not True in metadata: {first_meta}"
     )
-    assert first_meta.get("tool_name") == "ApiToolWrapper", (
-        f"unexpected tool_name: {first_meta.get('tool_name')}"
+    assert first_meta.get("tool_category") == "connector", (
+        f"unexpected tool category: {first_meta.get('tool_category')}"
     )

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gpt2agent"
-version = "0.0.11"
+version = "0.0.12"
 description = "Use your ChatGPT Plus/Pro in Claude Code and other AI agents — one command setup"
 readme = "README.md"
 license = "MIT"
@@ -26,10 +26,10 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "mcp>=1.26.0",
+    "mcp>=1.26,<2",
     "uvicorn>=0.30.0",
     "tomli>=2.0.0; python_version < '3.11'",
-    "curl_cffi>=0.11.0",
+    "curl_cffi>=0.15.0",
 ]
 
 [project.optional-dependencies]
@@ -54,6 +54,7 @@ include = ["gpt2agent*"]
 
 [tool.setuptools.package-data]
 gpt2agent = [
+    "resources/*.json",
     "skills/deep-research/SKILL.md",
     "skills/deep-research/bin/*",
     "skills/gpt2agent/SKILL.md",
