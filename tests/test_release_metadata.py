@@ -654,7 +654,7 @@ def test_release_workflows_keep_required_source_and_artifact_gates() -> None:
     assert "PUBLIC_SURFACE" not in ci
     assert "workflow_dispatch:" not in release
     assert "  actions: read" in release
-    assert release.count("      actions: read") == 2
+    assert release.count("      actions: read") == 4
     assert "    timeout-minutes: 35" in release
     assert 'VERIFY_REF="refs/release-verification/tag"' in release
     assert 'git fetch --force --no-tags origin "$GITHUB_REF:$VERIFY_REF"' in release
@@ -1474,13 +1474,18 @@ def test_package_smoke_checks_sdist_install_outside_extracted_source() -> None:
 def test_release_artifact_uploads_are_safe_to_rerun_in_the_same_run() -> None:
     release = (PROJECT_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 
-    assert release.count("actions/upload-artifact@") == 2
-    assert release.count("          overwrite: true") == 2
-    assert release.count("          if-no-files-found: error") == 2
+    assert release.count("actions/upload-artifact@") == 3
+    assert release.count("          overwrite: true") == 3
+    assert release.count("          if-no-files-found: error") == 3
     assert "name: dist\n          path: dist/\n          overwrite: true" in release
     assert (
         "name: release-evidence\n"
         "          path: release-evidence/release-workflow-artifacts.json\n"
+        "          overwrite: true" in release
+    )
+    assert (
+        "name: release-notes-${{ github.run_id }}\n"
+        "          path: release-notes/release_notes.md\n"
         "          overwrite: true" in release
     )
 

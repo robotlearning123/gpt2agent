@@ -471,44 +471,101 @@ jobs:
                   assert payload["schema_version"] == "1"
           PY
 
+  prepare-release-notes:
+    name: Prepare exact GitHub Release notes
+    needs: [pypi-canary, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Extract the exact CHANGELOG section
+        run: |
+          set -euo pipefail
+          mkdir -p release-notes
+          python scripts/verify_release.py --print-changelog-section \
+            --tag "$GITHUB_REF_NAME" > release-notes/release_notes.md
+          test -s release-notes/release_notes.md
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-notes-${{ github.run_id }}
+          path: release-notes/release_notes.md
+          overwrite: true
+          if-no-files-found: error
+
   github-release:
     name: Create GitHub Release
-    needs: [pypi-canary, verify]
+    needs: [prepare-release-notes, verify]
     runs-on: ubuntu-latest
     permissions:
       actions: read
       contents: write
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: dist
-          path: dist/
+          path: ${{ runner.temp }}/github-release-${{ github.run_id }}-${{ github.run_attempt }}/dist/
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-evidence
-          path: release-evidence/
-
-      - name: Extract CHANGELOG section for this version
-        id: changelog
-        run: |
-          set -euo pipefail
-          python scripts/verify_release.py --print-changelog-section > release_notes.md
-          if [ ! -s release_notes.md ]; then
-            echo "::error::CHANGELOG.md has no exact release section"
-            exit 1
-          fi
-          echo "----- release notes -----"
-          cat release_notes.md
-
+          path: ${{ runner.temp }}/github-release-${{ github.run_id }}-${{ github.run_attempt }}/release-evidence/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-notes-${{ github.run_id }}
+          path: ${{ runner.temp }}/github-release-${{ github.run_id }}-${{ github.run_attempt }}/notes/
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
-          body_path: release_notes.md
+          tag_name: ${{ github.ref_name }}
+          body_path: ${{ runner.temp }}/github-release-${{ github.run_id }}-${{ github.run_attempt }}/notes/release_notes.md
           files: |
-            dist/*
-            release-evidence/release-workflow-artifacts.json
+            ${{ runner.temp }}/github-release-${{ github.run_id }}-${{ github.run_attempt }}/dist/gpt2agent-${{ needs.verify.outputs.distribution_version }}-py3-none-any.whl
+            ${{ runner.temp }}/github-release-${{ github.run_id }}-${{ github.run_attempt }}/dist/gpt2agent-${{ needs.verify.outputs.distribution_version }}.tar.gz
+            ${{ runner.temp }}/github-release-${{ github.run_id }}-${{ github.run_attempt }}/release-evidence/release-workflow-artifacts.json
+          fail_on_unmatched_files: true
           draft: false
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}
+
+  verify-github-release:
+    name: Verify public GitHub Release bytes
+    needs: [github-release, prepare-release-notes, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: ${{ runner.temp }}/github-release-verify-${{ github.run_id }}-${{ github.run_attempt }}/dist/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-evidence
+          path: ${{ runner.temp }}/github-release-verify-${{ github.run_id }}-${{ github.run_attempt }}/release-evidence/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-notes-${{ github.run_id }}
+          path: ${{ runner.temp }}/github-release-verify-${{ github.run_id }}-${{ github.run_attempt }}/notes/
+      - name: Read back exact public release body and assets
+        run: >-
+          python scripts/verify_github_release.py
+          --repository "$GITHUB_REPOSITORY"
+          --tag "$GITHUB_REF_NAME"
+          --notes "${{ runner.temp }}/github-release-verify-${{ github.run_id }}-${{ github.run_attempt }}/notes/release_notes.md"
+          --dist "${{ runner.temp }}/github-release-verify-${{ github.run_id }}-${{ github.run_attempt }}/dist"
+          --evidence "${{ runner.temp }}/github-release-verify-${{ github.run_id }}-${{ github.run_attempt }}/release-evidence/release-workflow-artifacts.json"
+          --download-root "${{ runner.temp }}/github-release-verify-${{ github.run_id }}-${{ github.run_attempt }}/public-assets"
+          --expected-prerelease "${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}"
+          --attempts 7 --delay 10
