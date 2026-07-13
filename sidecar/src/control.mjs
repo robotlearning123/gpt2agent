@@ -1,15 +1,17 @@
-// Localhost-only HTTP control plane for Mode B export.
+// Localhost-only HTTP control plane for the GPT-Live bridge layer.
 //
-// Agents (including gpt2agent MCP tools) talk text/control here.
+// Agents (including gpt2agent MCP tools) talk text/control here. Direction is
+// human → agent: this plane exposes the OBSERVED human transcript and lifecycle
+// only. There is no speak channel — GPT-Live silently drops client-injected
+// speech, so the agent reply reaches the human out-of-band (overlay), not here.
 // No raw audio or account secrets are ever returned.
 //
 // Routes:
 //   GET  /health          → { ok: true }
-//   GET  /status          → export status (redacted)
-//   GET  /transcript      → buffered text transcripts
-//   POST /send_text       → { text } queue speak-injection
-//   POST /end             → close export plane
-//   GET  /help            → how to start export + Turnstile boundary
+//   GET  /status          → bridge status (redacted)
+//   GET  /transcript      → buffered human/agent text
+//   POST /end             → close the bridge
+//   GET  /help            → how to start the bridge + Turnstile boundary
 
 import http from "node:http";
 import { ModeBExport, ExportState } from "./export.mjs";
@@ -19,37 +21,28 @@ export const DEFAULT_CONTROL_PORT = 8741;
 
 export const EXPORT_HELP = Object.freeze({
   summary:
-    "Export GPT-Live as Mode B voice I/O: browser owns audio; agent gets transcripts and send_text only.",
-  start: [
-    "1. Sign into chatgpt.com once in a dedicated Chrome profile:",
-    '   open -na "Google Chrome" --args --user-data-dir="$PWD/.chrome-gptlive"',
-    "2. Prepare a short mono WAV (fake mic) or use a real mic profile.",
-    "3. Run: node browser/sidecar.mjs --profile ./.chrome-gptlive --audio ./q.wav --control-port 8741",
-    "4. Point the agent at http://127.0.0.1:8741 (status / transcript / send_text / end).",
+    "GPT-Live → coding-agent bridge (human → agent). The browser owns audio; the agent observes the human transcript. Reply reaches the human out-of-band, not by making Live speak.",
+  reliablePath: [
+    "Reliable path = your real signed-in Chrome + the extension (sidecar/extension) + agent gateway.",
+    "1. Load sidecar/extension as an unpacked extension in your logged-in Chrome.",
+    "2. AGENT_CMD='claude -p' node sidecar/agent-gateway.mjs   (the coding agent)",
+    "3. Open chatgpt.com, start voice, talk — utterances route to the agent; reply shows as a text overlay.",
+    "Note: browser/sidecar.mjs (puppeteer + fake WAV mic) is a TEST harness only — synthetic audio is not transcribed by Live.",
   ],
   tools: {
-    status: "GET /status — connection + queue lengths (no secrets)",
-    transcript: "GET /transcript — human/agent text buffer",
-    send_text: "POST /send_text {\"text\":\"...\"} — speak agent reply via Live TTS",
-    end: "POST /end — tear down export plane",
+    status: "GET /status — bridge state + transcript count (no secrets/audio)",
+    transcript: "GET /transcript — buffered human/agent text",
+    end: "POST /end — tear down the bridge",
   },
   boundary: {
-    audio: "never crosses control/MCP boundary",
+    direction: "human → agent only",
+    speak: "agent→Live speak-injection is unsupported (server silently drops it); reply is out-of-band",
+    audio: "never crosses the control/MCP boundary",
     auth: "human-authenticated real browser session required",
     turnstile:
-      "Cloudflare Turnstile / bot-detection bypass is out of scope. Headless token-only SDP is not the export path.",
-    modeA: "GPT-Live natively calling external tools is not supported",
+      "Cloudflare Turnstile / bot-detection bypass is out of scope. Headless/fake-mic SDP is not a supported path.",
   },
 });
-
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on("data", (c) => chunks.push(c));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
-  });
-}
 
 function sendJson(res, status, body) {
   const data = JSON.stringify(body);
@@ -67,7 +60,6 @@ function sendJson(res, status, body) {
  *   host?: string,
  *   port?: number,
  *   onEnd?: () => void|Promise<void>,
- *   sendSpeak?: (wire: string) => boolean|Promise<boolean>,
  * }} [opts]
  */
 export function createControlServer(exportPlane, opts = {}) {
@@ -77,7 +69,6 @@ export function createControlServer(exportPlane, opts = {}) {
   const host = opts.host ?? DEFAULT_CONTROL_HOST;
   const port = opts.port ?? DEFAULT_CONTROL_PORT;
   const onEnd = opts.onEnd;
-  const sendSpeak = opts.sendSpeak;
 
   const server = http.createServer(async (req, res) => {
     // Bind to loopback only by listen(); still reject non-local Host abuse lightly.
@@ -100,50 +91,16 @@ export function createControlServer(exportPlane, opts = {}) {
           transcripts: exportPlane.getTranscripts({ clear }),
         });
       }
-      if (req.method === "POST" && path === "/send_text") {
-        const raw = await readBody(req);
-        let body = {};
-        try {
-          body = raw ? JSON.parse(raw) : {};
-        } catch {
-          return sendJson(res, 400, { error: "invalid JSON body" });
-        }
-        const text = body.text;
-        if (typeof text !== "string" || !text.trim()) {
-          return sendJson(res, 400, { error: "text must be a non-empty string" });
-        }
-        let wire;
-        try {
-          // Build + record only; do NOT queue yet. If sendSpeak delivers now,
-          // queuing first and then drainSpeakQueue() would drop *other* pending
-          // wires that failed an earlier send.
-          wire = exportPlane.buildSpeakWire(text);
-        } catch (err) {
-          return sendJson(res, 400, {
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-        exportPlane.record("agent", text);
-        let delivered = false;
-        if (typeof sendSpeak === "function") {
-          delivered = Boolean(await sendSpeak(wire));
-        }
-        if (!delivered) {
-          // Keep only this undelivered wire for a later drain — never wipe peers.
-          exportPlane.enqueueWire(wire);
-        }
-        return sendJson(res, 200, {
-          ok: true,
-          delivered,
-          // Return shape only — not the raw wire (may contain model instructions).
-          bytes: Buffer.byteLength(wire),
-          contract: "response.create via data_message envelope (text control only)",
-        });
-      }
       if (req.method === "POST" && path === "/end") {
         exportPlane.close();
-        if (typeof onEnd === "function") await onEnd();
-        return sendJson(res, 200, { ok: true, state: ExportState.CLOSED });
+        // Respond BEFORE running onEnd. onEnd may close THIS server (sidecar
+        // shutdown → server.close()), which waits for in-flight responses to
+        // finish — awaiting onEnd first would deadlock on our own /end response.
+        sendJson(res, 200, { ok: true, state: ExportState.CLOSED });
+        if (typeof onEnd === "function") {
+          setImmediate(() => Promise.resolve(onEnd()).catch(() => {}));
+        }
+        return;
       }
       return sendJson(res, 404, { error: "not found", help: "/help" });
     } catch (err) {

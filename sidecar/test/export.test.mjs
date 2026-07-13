@@ -1,44 +1,45 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import {
-  ModeBExport,
-  ExportState,
-  redactForAgent,
-  buildSpeakWire,
-} from "../src/export.mjs";
-import {
-  SERVER_EVENTS,
-  CLIENT_EVENTS,
-  DATA_MESSAGE,
-  wrapDataMessage,
-} from "../src/events.mjs";
+import { ModeBExport, ExportState, redactForAgent } from "../src/export.mjs";
 
-test("ModeBExport extracts human transcript and calls agent hook", async () => {
+// --- helpers: build REAL consumer-protocol messages (chat_message_delta) ---
+const env = (inner) => JSON.stringify({ type: "data_message", data: JSON.stringify(inner) });
+const cmd = (delta) => env({ type: "chat_message_delta", payload: { delta } });
+const addMsg = (id, direction) =>
+  cmd({
+    o: "add",
+    v: {
+      message: {
+        id,
+        author: { role: direction === "in" ? "user" : "assistant" },
+        content: { parts: [{ content_type: "audio_transcription", direction, text: "" }] },
+      },
+    },
+  });
+const appendText = (chunk) => cmd({ v: [{ o: "append", p: "/message/content/parts/0/text", v: chunk }] });
+const finish = () => cmd({ o: "replace", p: "/message/status", v: "finished_successfully" });
+
+async function feedUtterance(plane, id, direction, chunks) {
+  await plane.ingest(addMsg(id, direction));
+  for (const c of chunks) await plane.ingest(appendText(c));
+  return plane.ingest(finish());
+}
+
+test("ingest extracts a completed HUMAN utterance and calls the agent hook", async () => {
   const turns = [];
   const plane = new ModeBExport({
-    onAgentTurn: async (text) => {
-      turns.push(text);
-      return `echo:${text}`;
+    onAgentTurn: async (t) => {
+      turns.push(t);
+      return `echo:${t}`;
     },
   });
   plane.setState(ExportState.LIVE);
 
-  const raw = wrapDataMessage({
-    type: SERVER_EVENTS.INPUT_TRANSCRIPT_DONE,
-    transcript: "hello agent",
-  });
-  const result = await plane.handleInbound(raw);
+  const result = await feedUtterance(plane, "m1", "in", ["hello ", "agent"]);
 
   assert.equal(result.humanText, "hello agent");
   assert.equal(result.agentReply, "echo:hello agent");
-  assert.equal(result.speakWires.length, 1);
   assert.deepEqual(turns, ["hello agent"]);
-
-  const wire = JSON.parse(result.speakWires[0]);
-  assert.equal(wire.type, DATA_MESSAGE);
-  const inner = JSON.parse(wire.data);
-  assert.equal(inner.type, CLIENT_EVENTS.RESPONSE_CREATE);
-  assert.equal(inner.response.instructions, "echo:hello agent");
 
   const txs = plane.getTranscripts();
   assert.equal(txs.length, 2);
@@ -48,80 +49,104 @@ test("ModeBExport extracts human transcript and calls agent hook", async () => {
   assert.equal(txs[1].text, "echo:hello agent");
 });
 
-test("ModeBExport speak path rejects empty text and queues valid speak", () => {
-  const plane = new ModeBExport();
-  assert.throws(() => plane.buildSpeakWire(""), TypeError);
-  assert.throws(() => plane.queueSpeak("  "), TypeError);
-  const wire = plane.queueSpeak("spoken reply");
-  assert.equal(typeof wire, "string");
-  assert.equal(plane.drainSpeakQueue().length, 1);
-  assert.equal(plane.drainSpeakQueue().length, 0);
+test("model speech (direction:out) is NOT emitted as a human turn", async () => {
+  const turns = [];
+  const plane = new ModeBExport({
+    onAgentTurn: async (t) => {
+      turns.push(t);
+      return "x";
+    },
+  });
+  const result = await feedUtterance(plane, "m2", "out", ["I am the ", "assistant"]);
+  assert.equal(result.humanText, null);
+  assert.equal(turns.length, 0);
+  assert.equal(plane.getTranscripts().length, 0);
 });
 
-test("removeSpeakWire drops only the matching wire", () => {
-  const plane = new ModeBExport();
-  const a = plane.queueSpeak("keep me");
-  const b = plane.queueSpeak("remove me");
-  assert.equal(plane.removeSpeakWire(b), true);
-  const left = plane.drainSpeakQueue();
-  assert.equal(left.length, 1);
-  assert.equal(left[0], a);
-  assert.equal(plane.removeSpeakWire(b), false);
+test("filler / acks are dropped (isActionable)", async () => {
+  const turns = [];
+  const plane = new ModeBExport({
+    onAgentTurn: async (t) => {
+      turns.push(t);
+      return "r";
+    },
+  });
+  const result = await feedUtterance(plane, "m3", "in", ["ok"]);
+  assert.equal(result.humanText, null);
+  assert.equal(turns.length, 0);
 });
 
-test("status and transcripts never expose tokens or audio fields", () => {
+test("handleUtterance (extension path) shares the filter/buffer/agent pipeline", async () => {
+  const turns = [];
+  const plane = new ModeBExport({
+    onAgentTurn: async (t) => {
+      turns.push(t);
+      return `r:${t}`;
+    },
+  });
+  // Filler is dropped by the SAME isActionable used on the datachannel path.
+  const dropped = await plane.handleUtterance("ok");
+  assert.equal(dropped.humanText, null);
+  assert.equal(turns.length, 0);
+  assert.equal(plane.getTranscripts().length, 0);
+
+  // A real utterance routes to the agent and is buffered (observable via control plane).
+  const r = await plane.handleUtterance("  what files changed  ");
+  assert.equal(r.humanText, "what files changed");
+  assert.equal(r.agentReply, "r:what files changed");
+  const txs = plane.getTranscripts();
+  assert.equal(txs.length, 2);
+  assert.equal(txs[0].role, "human");
+  assert.equal(txs[1].role, "agent");
+});
+
+test("no agent→Live speak/inject API exists (write channel removed)", () => {
   const plane = new ModeBExport();
-  plane.record("human", "hi");
+  for (const m of ["buildSpeakWire", "queueSpeak", "drainSpeakQueue", "enqueueWire", "removeSpeakWire"]) {
+    assert.equal(typeof plane[m], "undefined", `${m} must not exist`);
+  }
   const st = plane.status();
-  assert.equal(st.audioCrossesBoundary ?? st.boundary.audioCrossesBoundary, false);
-  assert.equal(st.boundary.secretsCrossBoundary, false);
+  assert.equal(st.boundary.speakInjection, "unsupported (server drops it)");
+  assert.equal("speakQueueLength" in st, false);
+});
+
+test("status and redaction never expose tokens or audio", () => {
+  const plane = new ModeBExport();
+  plane.record("human", "hi there");
+  const st = plane.status();
+  assert.equal(st.boundary.audioCrossesBoundary, false);
+  assert.equal(st.boundary.direction, "human-to-agent");
   assert.equal(st.boundary.turnstileBypass, "out-of-scope");
-  assert.equal("token" in st, false);
-  assert.equal("audio" in st, false);
-  const json = JSON.stringify(st);
-  assert.equal(/Bearer |eyJ[a-zA-Z0-9]/.test(json), false);
 
   const redacted = redactForAgent({
     token: "secret-tok",
-    access_token: "abc",
-    audio_bytes: Buffer.from("pcm").toString("base64"),
-    ok: true,
+    items: [{ access_token: "abc" }, { note: "keep" }],
     nested: { authorization: "Bearer x", text: "safe" },
+    lastError: "auth failed: Bearer aaaaaaaa.bbbbbbbb.cccccccc",
   });
   assert.equal(redacted.token, "[redacted]");
-  assert.equal(redacted.access_token, "[redacted]");
-  assert.equal(redacted.audio_bytes, "[redacted]");
+  assert.equal(redacted.items[0].access_token, "[redacted]");
+  assert.equal(redacted.items[1].note, "keep");
   assert.equal(redacted.nested.authorization, "[redacted]");
   assert.equal(redacted.nested.text, "safe");
-  assert.equal(redacted.ok, true);
+  assert.match(redacted.lastError, /\[redacted\]/);
+  assert.equal(/[a-z]{8}\.[a-z]{8}\.[a-z]{8}/.test(JSON.stringify(redacted)), false);
 });
 
-test("buildSpeakWire from export module matches events contract", () => {
-  const wire = buildSpeakWire("agent says hi");
-  const outer = JSON.parse(wire);
-  assert.equal(outer.type, DATA_MESSAGE);
-  assert.equal(JSON.parse(outer.data).response.instructions, "agent says hi");
-});
-
-test("agent hook errors are captured without throwing out of handleInbound", async () => {
+test("agent hook errors are captured, not thrown out of ingest", async () => {
   const plane = new ModeBExport({
     onAgentTurn: async () => {
       throw new Error("agent down");
     },
   });
-  const result = await plane.handleInbound({
-    type: SERVER_EVENTS.INPUT_TRANSCRIPT_DONE,
-    transcript: "ping",
-  });
-  assert.equal(result.humanText, "ping");
+  const result = await feedUtterance(plane, "m4", "in", ["please ", "help me"]);
+  assert.equal(result.humanText, "please help me");
   assert.equal(result.agentReply, null);
   assert.equal(plane.status().lastError, "agent down");
 });
 
-test("close moves to CLOSED and clears speak queue", () => {
+test("close moves to CLOSED", () => {
   const plane = new ModeBExport();
-  plane.queueSpeak("bye");
   plane.close();
   assert.equal(plane.state, ExportState.CLOSED);
-  assert.equal(plane.drainSpeakQueue().length, 0);
 });

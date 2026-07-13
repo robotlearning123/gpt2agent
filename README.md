@@ -19,8 +19,8 @@ Zed, and any MCP client.
 
 ## What it does
 
-gpt2agent exposes **31 MCP tools** that forward requests to ChatGPT's backend API
-(plus an optional GPT-Live Mode B export control plane — text only).
+gpt2agent exposes **30 MCP tools** that forward requests to ChatGPT's backend API
+(plus an optional GPT-Live → coding-agent voice bridge — observe-only, text).
 No proxy process. No separate account. No platform API key. Your `codex login`,
 your token, your quota.
 
@@ -127,7 +127,7 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 
 ---
 
-## Tools (31)
+## Tools (30)
 
 ### Chat & reasoning
 
@@ -185,19 +185,21 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 | `list_codex_tasks` | Recent Codex tasks + status |
 | `codex_task_create` | Kick off a new Codex task (resolves env from `repo_label`) |
 
-### GPT-Live export (Mode B, experimental, control only)
+### GPT-Live → coding-agent bridge (experimental, observe-only)
 
-Requires the headed browser sidecar (`sidecar/browser/sidecar.mjs`) with a
-human-authenticated ChatGPT Chrome profile. **No audio or secrets on MCP.**
-Cloudflare Turnstile bypass is out of scope.
+Direction is **human → agent**: a human talks to ChatGPT voice, the observed
+human transcript routes to a coding agent, and the reply reaches the human
+out-of-band (a text overlay). GPT-Live silently drops client-injected speech, so
+there is **no "make Live speak" tool**. Reliable path = your real signed-in Chrome
++ [`sidecar/extension`](./sidecar/) + `sidecar/agent-gateway.mjs`. **No audio or
+secrets on MCP.** Cloudflare Turnstile bypass is out of scope.
 
 | Tool | What it does |
 |---|---|
-| `voice_live_export_help` | How to start export + Turnstile boundary |
-| `voice_live_status` | Sidecar control-plane status (text only) |
-| `voice_live_get_transcript` | Buffered human/agent transcript text |
-| `voice_live_send_text` | Speak agent reply text via Live TTS |
-| `voice_live_end` | End the export session |
+| `voice_live_export_help` | How the bridge works + the Turnstile boundary |
+| `voice_live_status` | Bridge control-plane status (text only) |
+| `voice_live_get_transcript` | Observed human/agent transcript text |
+| `voice_live_end` | End the bridge session |
 
 See [sidecar/README.md](./sidecar/README.md).
 
@@ -221,10 +223,10 @@ $CODEX_HOME/auth.json (default ~/.codex/auth.json) ← auto-refreshed by Codex
                                           models, memories, settings/voices,
                                           codex, gizmos, ...}
         |
-   31 MCP tools  (chat, agent, DR ×2, GPT chat, image gen,
+   30 MCP tools  (chat, agent, DR ×2, GPT chat, image gen,
                   code interpreter, canvas, memory r/w,
                   instructions r/w, codex r/w, Voice catalog,
-                  account introspect, GPT-Live Mode B control)
+                  account introspect, GPT-Live bridge control)
 ```
 
 ---

@@ -2,8 +2,8 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "gpt2agent",
   "displayName": "gpt2agent",
-  "version": "0.0.13",
-  "description": "Your ChatGPT Plus/Pro account (chat, deep research, image gen, code, agent mode, Voice catalog) as 26 MCP tools — reuses your codex login. Requires the gpt2agent CLI on PATH (pipx install gpt2agent).",
+  "version": "0.0.14",
+  "description": "Your ChatGPT Plus/Pro account (chat, deep research, image gen, code, agent mode, Voice catalog) as 30 MCP tools — reuses your codex login. Requires the gpt2agent CLI on PATH (pipx install gpt2agent).",
   "author": {
     "name": "robotlearning123",
     "url": "https://github.com/robotlearning123"

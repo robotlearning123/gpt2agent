@@ -1,6 +1,6 @@
 # gpt2agent MCP Tools Reference
 
-Complete parameter reference for all 31 MCP tools exposed by the gpt2agent server.
+Complete parameter reference for all 30 MCP tools exposed by the gpt2agent server.
 Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 
 ---
@@ -13,7 +13,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - [Account Introspection (8)](#account-introspection)
 - [Memory & Instructions (5)](#memory--instructions)
 - [Codex (3)](#codex)
-- [GPT-Live Mode B export (5)](#gpt-live-mode-b-export)
+- [GPT-Live bridge (4)](#gpt-live-bridge)
 
 ---
 
@@ -647,47 +647,46 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 
 ---
 
-## GPT-Live Mode B export
+## GPT-Live bridge
 
-Experimental, optional. Audio stays in a headed browser sidecar; MCP is
-text/control only. Cloudflare Turnstile bypass is **out of scope**. Start with:
+Human → agent, observe-only.
 
-```bash
-cd sidecar && node browser/sidecar.mjs --profile ./.chrome-gptlive --audio q.wav
-```
+Experimental, optional. Direction is **human → agent**: a human talks to GPT-Live,
+the observed human transcript routes to a coding agent, and the reply reaches the
+human out-of-band (a text overlay). There is **no "make Live speak" tool** — the
+consumer datachannel silently drops client-injected speech. Audio stays in a headed
+browser; MCP is text/control only. Cloudflare Turnstile bypass is **out of scope**.
+
+Reliable path = your real signed-in Chrome + `sidecar/extension` + `sidecar/agent-gateway.mjs`.
+(`browser/sidecar.mjs` with a fake WAV mic is a **test harness** — Live does not
+transcribe synthetic audio.) The Node sidecar/extension ship with the **source repo**,
+**not the PyPI wheel** — clone <https://github.com/robotlearning123/gpt2agent> to run them.
 
 Control base: `http://127.0.0.1:8741` (override with `GPT2AGENT_LIVE_CONTROL`).
 
 ### voice_live_export_help
 
-- **Purpose**: Document how to export GPT-Live to an agent (Mode B) and the Turnstile boundary.
+- **Purpose**: Document the human → agent bridge, the reliable path, and the Turnstile boundary.
 - **Parameters**: none.
 - **Returns**: `str` — start steps, tool list, boundary notes.
 - **When to use**: First call before using the other `voice_live_*` tools.
 
 ### voice_live_status
 
-- **Purpose**: Status of the local export control plane (no audio/secrets).
+- **Purpose**: Status of the local bridge control plane (no audio/secrets).
 - **Parameters**: none.
-- **Returns**: `dict` — state, transcript counts, boundary flags (redacted).
+- **Returns**: `dict` — state, transcript count, boundary flags (redacted).
 
 ### voice_live_get_transcript
 
-- **Purpose**: Drain buffered human/agent transcript text from the export plane.
+- **Purpose**: Drain the observed human/agent transcript text from the bridge.
 - **Parameters**:
   - `clear` (bool, default: `False`) — when `True`, clears the buffer after read.
 - **Returns**: `dict` with `transcripts: [{role, text, at}, ...]`.
 
-### voice_live_send_text
-
-- **Purpose**: Make GPT-Live speak agent reply text (TTS via browser; no audio on MCP).
-- **Parameters**:
-  - `text` (str, required) — non-empty reply text (bounded length).
-- **Returns**: `dict` — `{ok, delivered, ...}` without raw wire/audio payloads.
-
 ### voice_live_end
 
-- **Purpose**: End the GPT-Live export session via the local control plane.
+- **Purpose**: End the GPT-Live bridge session via the local control plane.
 - **Parameters**: none.
 - **Returns**: `dict` — `{ok, state}` or an unreachable-control error with a start hint.
 

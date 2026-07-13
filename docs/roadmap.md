@@ -43,13 +43,15 @@ The current official Voice documentation also excludes connected apps/plugins,
 Work, Codex, custom GPTs, temporary chats, and desktop from initial Live
 support — which constrains any "let Live call out to an external agent" design.
 
-**0.0.14 export (Mode B).** Experimental, optional, not a stable PyPI “Live audio”
-product: a headed, human-authenticated browser sidecar owns WebRTC + media; the
-Python MCP surface is control-only (`voice_live_export_help`,
-`voice_live_status`, `voice_live_get_transcript`, `voice_live_send_text`,
-`voice_live_end`) against a localhost control plane. Audio and account secrets
-never transit MCP. **Cloudflare Turnstile bypass is out of scope** — token-only
-or headless SDP is not the supported export path. See `sidecar/README.md`.
+**0.0.14 bridge (human → agent).** Experimental, optional, not a stable PyPI "Live
+audio" product: the human talks to ChatGPT voice in a real signed-in browser; a
+small extension taps the human transcript and routes it to a coding agent, whose
+reply is shown to the human out-of-band (text overlay). GPT-Live silently drops
+client-injected speech, so there is **no agent→Live "speak" path**. The Python MCP
+surface is observe + lifecycle only (`voice_live_export_help`, `voice_live_status`,
+`voice_live_get_transcript`, `voice_live_end`) against a localhost control plane.
+Audio and account secrets never transit MCP. **Cloudflare Turnstile bypass is out of
+scope.** See `sidecar/README.md`.
 
 ## Language policy
 

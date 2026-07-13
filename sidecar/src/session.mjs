@@ -1,21 +1,17 @@
-// GPT-Live voice session orchestration.
+// GPT-Live voice session orchestration (EXPERIMENTAL werift path).
 //
-// Wires the tested primitives (reconnect, liveness, events, export) to a
-// WebRTC peer and the consumer adapter into the Mode B loop:
+// Wires the tested primitives (reconnect, liveness, export) to a WebRTC peer and
+// the consumer adapter into the human → agent loop:
 //
-//   mic --(WebRTC)--> Live --(datachannel)--> input transcript
+//   mic --(WebRTC)--> Live --(datachannel)--> human transcript (chat_message_delta)
 //        --> onUserSaid(text)  [the agent, e.g. Claude/gpt2agent, reasons]
-//        --> speak(replyText)  --> Live voices it back
+//        --> reply text is returned OUT-OF-BAND (Live won't speak injected text)
 //
 // Audio never leaves the media peer; only text crosses to the agent hook.
+// NOTE: agent→Live speak-injection is unsupported — the server silently drops it.
 
 import { ReconnectPolicy } from "./reconnect.mjs";
 import { LivenessMonitor } from "./liveness.mjs";
-import {
-  buildSpeakWire,
-  buildSessionUpdate,
-  wrapDataMessage,
-} from "./events.mjs";
 import { ModeBExport, ExportState } from "./export.mjs";
 import * as adapter from "./adapter.mjs";
 
@@ -56,14 +52,13 @@ export class VoiceSession {
           return typeof r === "string" ? r : null;
         },
       });
-    this.router = this.exportPlane.router;
     this.liveness = new LivenessMonitor({ timeoutMs: opts.livenessTimeoutMs ?? 15_000 });
     this.reconnect = new ReconnectPolicy(opts.reconnect ?? { maxAttempts: 8 });
     this._pc = null;
     this._dc = null;
 
-    // Keep liveness fresh on every transcript the export plane sees.
-    this.router.onInputTranscript(() => {
+    // Keep liveness fresh on every human utterance the bridge layer sees.
+    this.exportPlane.onHumanUtterance(() => {
       this.liveness.seen(Date.now());
     });
   }
@@ -74,17 +69,6 @@ export class VoiceSession {
     if (s === State.CLOSED) this.exportPlane.setState(ExportState.CLOSED);
     if (s === State.IDLE) this.exportPlane.setState(ExportState.IDLE);
     this.opts.onStateChange?.(s);
-  }
-
-  /** Speak the agent's reply through GPT-Live (Mode B output). */
-  speak(text) {
-    if (!this._dc || this.state !== State.LIVE) {
-      throw new Error(`cannot speak while ${this.state}`);
-    }
-    const wire = buildSpeakWire(text);
-    this._dc.send(wire);
-    this.exportPlane.record("agent", text);
-    return wire;
   }
 
   /**
@@ -100,12 +84,9 @@ export class VoiceSession {
     this._dc = pc.createDataChannel("", { negotiated: true, id: adapter.DATACHANNEL_ID });
     this._dc.addEventListener("message", (m) => {
       this.liveness.seen(Date.now());
-      // Fire-and-forget async agent turn; speak replies when hook returns text.
-      void this.exportPlane.handleInbound(m.data).then((result) => {
-        for (const wire of result.speakWires) {
-          if (this._dc && this.state === State.LIVE) this._dc.send(wire);
-        }
-      });
+      // Fire-and-forget async agent turn. The reply is buffered as text for
+      // out-of-band egress; it is NOT sent back to Live (injection is dropped).
+      void this.exportPlane.ingest(m.data);
     });
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -119,14 +100,7 @@ export class VoiceSession {
       offerSdp: offer.sdp,
     });
     await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
-    this._dc.send(
-      wrapDataMessage(
-        buildSessionUpdate({
-          voice: this.opts.voice,
-          instructions: this.opts.instructions,
-        }),
-      ),
-    );
+    // No client-side session.update: the consumer channel silently drops it.
     this._pc = pc;
     this.reconnect.reset();
     this._setState(State.LIVE);

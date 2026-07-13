@@ -2,8 +2,8 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.robotlearning123/gpt2agent",
   "title": "gpt2agent",
-  "description": "ChatGPT Plus/Pro account (chat, deep research, image gen, code, agent, Voice catalog) as 26 MCP tools.",
-  "version": "0.0.13",
+  "description": "ChatGPT Plus/Pro account (chat, deep research, image gen, code, agent, Voice catalog) as 30 MCP tools.",
+  "version": "0.0.14",
   "repository": {
     "url": "https://github.com/robotlearning123/gpt2agent",
     "source": "github"
@@ -13,7 +13,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "gpt2agent",
-      "version": "0.0.13",
+      "version": "0.0.14",
       "transport": { "type": "stdio" },
       "packageArguments": [
         { "type": "positional", "value": "run" },

@@ -704,7 +704,7 @@ def _build_with_conv(monkeypatch, conv):
     return mcp._tool_manager._tools
 
 
-def test_server_registers_exact_31_tool_surface_and_voice_once(monkeypatch) -> None:
+def test_server_registers_exact_30_tool_surface_and_voice_once(monkeypatch) -> None:
     calls = 0
     original_register = voice.register
 
@@ -743,14 +743,13 @@ def test_server_registers_exact_31_tool_surface_and_voice_once(monkeypatch) -> N
         "memory_create_via_chat",
         "memory_list",
         "memory_search",
-        # Mode B GPT-Live export control plane (text only; no audio on MCP):
+        # GPT-Live → coding-agent bridge, observe-only (human → agent; no audio on MCP):
         "voice_live_end",
         "voice_live_export_help",
         "voice_live_get_transcript",
-        "voice_live_send_text",
         "voice_live_status",
     }
-    assert len(tools) == 31
+    assert len(tools) == 30
     assert calls == 1
 
     annotations = tools["list_voices"].annotations

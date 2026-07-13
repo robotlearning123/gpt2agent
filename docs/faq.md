@@ -54,4 +54,4 @@ does expose the account's current Voice catalog, but that is not a Voice
 session: GPT-Live realtime audio, microphone/playback transport, speech
 synthesis, and guaranteed transcript extraction remain unsupported. The
 catalog route is a private website contract and may change. The server exposes
-31 MCP tools in total (including optional GPT-Live Mode B control tools).
+30 MCP tools in total (including optional GPT-Live bridge control tools).

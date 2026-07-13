@@ -16,7 +16,7 @@ User-facing documentation. (Project/contributor internals live in
   and release gates.
 
 For the full per-tool reference (every argument, return shape, and gotcha for all
-26 tools), see [`gpt2agent/skills/gpt2agent/tools-reference.md`](../gpt2agent/skills/gpt2agent/tools-reference.md).
+30 tools), see [`gpt2agent/skills/gpt2agent/tools-reference.md`](../gpt2agent/skills/gpt2agent/tools-reference.md).
 
 Security model and ToS/account-ban risk are covered in the main
 [README](../README.md#security--risk--read-before-you-run-this).

@@ -1,61 +1,128 @@
-// Local agent gateway. The Chrome extension POSTs each human utterance here;
-// we invoke the coding agent (default `claude -p`: stdin = utterance, stdout =
-// reply) and return the reply text. No browser, no audio — text control only.
+// agent-gateway.mjs — the bridge layer's AGENT ADAPTER + control plane (③ + ② in
+// docs/superpowers/plans/2026-07-11-gpt-live-bridge-layer-spec.md).
+//
+// The Chrome extension POSTs each completed human utterance to POST /agent. We run
+// it through the SAME ModeBExport bridge the harness uses — so isActionable
+// filtering, the capped transcript buffer, hooks, and error handling all apply on
+// this (the reliable) path — then invoke the coding agent (default `claude -p`) and
+// return the reply. We also serve the localhost control plane (status/transcript/
+// end) so the gpt2agent `voice_live_*` MCP tools observe THIS path.
+//
+// Hardening: loopback-only; NO wildcard CORS; bounded request body; per-call agent
+// timeout that kills the whole process group and returns immediately; optional
+// GPTLIVE_TOKEN gate on /agent (note: the bundled extension does NOT send a token,
+// so leave it unset if you rely on the extension — see sidecar/README.md).
 //
 //   AGENT_CMD='claude -p' node sidecar/agent-gateway.mjs
 //   AGENT_CMD='codex exec --skip-git-repo-check' node sidecar/agent-gateway.mjs
 import http from "node:http";
-import { spawn } from "node:child_process";
+import { ModeBExport, ExportState } from "./src/export.mjs";
+import { createControlServer, DEFAULT_CONTROL_PORT } from "./src/control.mjs";
+import { runAgent } from "./src/agent-runner.mjs";
 
 const PORT = Number(process.env.PORT || 8742);
+const CONTROL_PORT = Number(process.env.GPTLIVE_CONTROL_PORT || DEFAULT_CONTROL_PORT);
 const AGENT_CMD = process.env.AGENT_CMD || "claude -p";
+const TOKEN = process.env.GPTLIVE_TOKEN || ""; // optional; extension does NOT send it
+const MAX_BODY = 64 * 1024; // 64 KB request cap
+const MAX_OUT = 1024 * 1024; // 1 MB reply cap
+const AGENT_TIMEOUT_MS = Number(process.env.AGENT_TIMEOUT_MS || 120_000);
 
-function runAgent(text) {
-  return new Promise((resolve) => {
-    const t0 = Date.now();
-    const c = spawn(AGENT_CMD, { shell: true, stdio: ["pipe", "pipe", "pipe"] });
-    let out = "";
-    c.stdout.on("data", (d) => (out += d.toString("utf8")));
-    c.stderr.on("data", () => {});
-    c.on("error", () => resolve({ reply: "[agent spawn error]", ms: Date.now() - t0 }));
-    c.on("close", () => resolve({ reply: out.trim(), ms: Date.now() - t0 }));
-    c.stdin.write(text);
-    c.stdin.end();
+// One shared bridge: filtering + transcript buffer + agent hook, observed by the
+// control plane below. The agent runner enforces a hard, group-killing timeout.
+const bridge = new ModeBExport({
+  onAgentTurn: (text) => runAgent(AGENT_CMD, text, { timeoutMs: AGENT_TIMEOUT_MS, maxOut: MAX_OUT }),
+});
+bridge.setState(ExportState.LIVE);
+
+function readBodyLimited(req) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    let over = false;
+    req.on("data", (chunk) => {
+      if (over) return;
+      body += chunk;
+      if (body.length > MAX_BODY) {
+        over = true;
+        req.destroy();
+        reject(new Error("body too large"));
+      }
+    });
+    req.on("end", () => {
+      if (!over) resolve(body);
+    });
+    req.on("error", reject);
   });
 }
 
 const srv = http.createServer(async (req, res) => {
-  // CORS preflight (in case a page-context fetch is ever used).
-  if (req.method === "OPTIONS") {
-    res.writeHead(204, {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Headers": "Content-Type",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-    });
-    return res.end();
-  }
+  const send = (status, obj) => {
+    res.writeHead(status, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(obj));
+  };
+  // Diagnostics (no token; harmless): POST /hooked, GET /ping.
   if (req.method !== "POST" || req.url !== "/agent") {
-    // diagnostics: GET /ping (liveness), POST /hooked (extension hook installed)
-    if (req.url === "/ping") { res.writeHead(200, { "Access-Control-Allow-Origin": "*" }); return res.end('{"ok":true}'); }
-    if (req.url === "/hooked") { console.log("[event] GPT-Live hook installed on chatgpt.com"); res.writeHead(200, { "Access-Control-Allow-Origin": "*" }); return res.end('{"ok":true}'); }
-    res.writeHead(404, { "Access-Control-Allow-Origin": "*" });
-    return res.end('{"error":"not found"}');
+    if (req.url === "/ping") return send(200, { ok: true });
+    if (req.url === "/hooked") {
+      console.log("[event] GPT-Live hook installed on chatgpt.com");
+      return send(200, { ok: true });
+    }
+    return send(404, { error: "not found" });
   }
-  let body = "";
-  for await (const chunk of req) body += chunk;
+  if (TOKEN && req.headers["x-gptlive-token"] !== TOKEN) {
+    return send(401, { error: "missing or invalid token" });
+  }
+  let raw;
+  try {
+    raw = await readBodyLimited(req);
+  } catch {
+    return send(413, { error: "body too large" });
+  }
   let text = "";
-  try { text = (JSON.parse(body || "{}").text || "").trim(); } catch {}
-  if (!text) {
-    res.writeHead(400, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
-    return res.end('{"error":"empty text"}');
-  }
-  console.log(`\n[human] ${text}`);
-  const r = await runAgent(text);
-  console.log(`[agent ${r.ms}ms] ${(r.reply || "").slice(0, 300)}`);
-  res.writeHead(200, { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" });
-  res.end(JSON.stringify({ reply: r.reply || "[no reply]" }));
+  try {
+    text = (JSON.parse(raw || "{}").text || "").trim();
+  } catch {}
+  if (!text) return send(400, { error: "empty text" });
+  // Route through the bridge: isActionable filtering + transcript buffering + agent.
+  const { humanText, agentReply } = await bridge.handleUtterance(text);
+  if (!humanText) return send(200, { reply: "", filtered: true }); // dropped as filler
+  console.log(`\n[human] ${humanText}`);
+  console.log(`[agent] ${(agentReply || "").slice(0, 300)}`);
+  send(200, { reply: agentReply || "[no reply]" });
 });
 
-srv.listen(PORT, "127.0.0.1", () => {
-  console.log(`agent gateway on http://127.0.0.1:${PORT}/agent  (AGENT_CMD=${AGENT_CMD})`);
+let control = null;
+
+async function shutdown() {
+  bridge.close();
+  try {
+    if (control?.server) {
+      await Promise.race([
+        new Promise((r) => control.server.close(r)),
+        new Promise((r) => setTimeout(r, 1500)),
+      ]);
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    await new Promise((r) => srv.close(r));
+  } catch {
+    /* ignore */
+  }
+}
+
+srv.listen(PORT, "127.0.0.1", async () => {
+  control = await createControlServer(bridge, {
+    port: CONTROL_PORT,
+    onEnd: async () => {
+      console.log("[gateway] control /end — shutting down");
+      await shutdown();
+      process.exit(0);
+    },
+  });
+  console.log(
+    `agent gateway on http://127.0.0.1:${PORT}/agent  (AGENT_CMD=${AGENT_CMD}${TOKEN ? ", token required" : ""})`,
+  );
+  console.log(`control plane (voice_live_* MCP tools) on ${control.url}  (GET /help)`);
 });

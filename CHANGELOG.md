@@ -8,18 +8,26 @@ versioning: [SemVer](https://semver.org/).
 
 ## [0.0.14] - 2026-07-11
 
-### Added — GPT-Live voice → coding agent (lane: `sidecar/`)
+### Added — GPT-Live → coding-agent bridge, human → agent (lane: `sidecar/`)
 
 - **Full GPT-Live reverse-engineering** (live capture + the 4.5 MB shipped voice
   client bundle, all cited): the authoritative protocol spec at
-  `docs/superpowers/plans/2026-07-11-gpt-live-protocol-spec.md`. Resolves every gap
-  the earlier investigation left open — handshake, WebRTC, the real datachannel
-  event vocabulary, the turn lifecycle, capabilities, and the anti-bot boundary.
-- **Voice → coding-agent bridge**: taps the real consumer GPT-Live datachannel,
-  reconstructs each human utterance from the real `chat_message_delta`
-  (`direction:"in"`) protocol, and routes it to a pluggable coding agent
-  (`--agent-cmd`, default `claude -p`). Audio stays in the browser; only the
-  transcript crosses to the agent.
+  `docs/superpowers/plans/2026-07-11-gpt-live-protocol-spec.md`, plus the bridge
+  design at `docs/superpowers/plans/2026-07-11-gpt-live-bridge-layer-spec.md`.
+- **Human → agent voice bridge (observe-only)**: taps the real consumer GPT-Live
+  datachannel, reconstructs each human utterance from the real `chat_message_delta`
+  (`direction:"in"`) protocol, and routes it to a pluggable coding agent. The
+  agent's reply reaches the human **out-of-band** (a text overlay) — GPT-Live
+  silently drops client-injected speech, so there is no agent→Live "speak" path.
+  - Reliable path = real signed-in Chrome + `sidecar/extension` (TAP) +
+    `sidecar/agent-gateway.mjs` (runs `AGENT_CMD`, e.g. `claude -p`/`codex exec`).
+  - `sidecar/browser/sidecar.mjs` (puppeteer + fake WAV mic) is a **test harness**
+    only — synthetic audio is not transcribed by Live.
+  - Audio stays in the browser; only transcript text crosses to the agent.
+- **MCP surface** (`voice_live_status` / `voice_live_get_transcript` /
+  `voice_live_end` / `voice_live_export_help`) is observe + lifecycle only. The
+  `voice_live_send_text` "speak" tool was **removed** — it reported false delivery
+  for a server-dropped operation.
 - **`VoiceProvider` abstraction** (`sidecar/src/voice-provider.mjs`):
   `ConsumerGptLiveVoiceProvider` (production: real mic, the irreplaceable GPT-Live
   voice) and `RealtimeVoiceProvider` (test double: OpenAI Realtime API). The
@@ -35,12 +43,23 @@ versioning: [SemVer](https://semver.org/).
 
 ### Changed
 
-- `sidecar/src/events.mjs` corrected to the REAL consumer protocol
-  (`CONSUMER_EVENTS` + `TranscriptAssembler`). The previous Realtime-API event
-  names and the `buildSpeakWire`/`response.create` speak-injection are now
-  `@deprecated`: verified 2026-07-11, the consumer channel silently drops
-  `response.create` / `conversation.item.create` / `session.update` (5 candidates,
-  all `dc.send→true`, 0 replies). Behavior is retained for source/test compat.
+- **Bridge layer rewritten to the real protocol + honest direction.**
+  `sidecar/src/export.mjs` now ingests via `TranscriptAssembler` (the real
+  `chat_message_delta` parser) instead of the deprecated Realtime-API extractor,
+  filters filler (`isActionable`), and buffers the agent reply as text — the
+  speak-queue is gone. The agent→Live write channel (`/send_text` route,
+  `buildSpeakWire`/`response.create` injection, `session.mjs.speak`) is removed:
+  verified 2026-07-11, the consumer channel silently drops `response.create` /
+  `conversation.item.create` / `session.update` (5 candidates, all `dc.send→true`,
+  0 replies).
+- **Reliability & correctness fixes:** control-plane `/end` no longer deadlocks
+  (respond before teardown); `agent-gateway.mjs` drops wildcard CORS and adds a
+  bounded body, per-call timeout, and an optional `GPTLIVE_TOKEN` gate; secret
+  redaction (Python + JS) now recurses arrays/strings and strips embedded
+  Bearer/JWT.
+- **Release metadata aligned to `0.0.14`** across `pyproject.toml`,
+  `gpt2agent/__init__.py`, `server.json`, and `.claude-plugin/plugin.json`
+  (tool count 31 → 30 after removing `voice_live_send_text`).
 - `sidecar` test scope narrowed to `test/*.test.mjs` so one-off experiment scripts
   (`experiments/`) are no longer picked up by `npm test`.
 

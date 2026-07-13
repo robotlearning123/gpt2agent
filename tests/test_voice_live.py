@@ -37,11 +37,25 @@ def _register() -> dict[str, Any]:
 async def test_voice_live_export_help_documents_boundary():
     tools = _register()
     text = await tools["voice_live_export_help"]()
-    assert "Mode B" in text
+    assert "human" in text.lower() and "agent" in text.lower()
     assert "Turnstile" in text
     assert "OUT OF SCOPE" in text or "out of scope" in text.lower()
-    assert "voice_live_send_text" in text
+    # Direction is human -> agent; there is no "make Live speak" tool.
+    assert "send_text" not in text.lower()
+    assert "unsupported" in text.lower()
     assert "audio" in text.lower()
+
+
+def test_voice_live_has_no_speak_tool():
+    # The agent -> Live write channel is removed: only observe + lifecycle tools.
+    tools = _register()
+    assert "voice_live_send_text" not in tools
+    assert set(tools) == {
+        "voice_live_export_help",
+        "voice_live_status",
+        "voice_live_get_transcript",
+        "voice_live_end",
+    }
 
 
 @pytest.mark.asyncio
@@ -50,6 +64,8 @@ async def test_voice_live_status_uses_control_plane_and_strips_secrets():
     payload = {
         "state": "live",
         "token": "should-not-leak",
+        "items": [{"access_token": "leak"}, {"note": "keep"}],
+        "lastError": "auth failed: Bearer aaaaaaaa.bbbbbbbb.cccccccc",
         "boundary": {"audioCrossesBoundary": False},
     }
 
@@ -58,25 +74,11 @@ async def test_voice_live_status_uses_control_plane_and_strips_secrets():
         req.assert_called_once()
         assert out["state"] == "live"
         assert out["token"] == "[redacted]"
+        # Redaction recurses into arrays and strings.
+        assert out["items"][0]["access_token"] == "[redacted]"
+        assert out["items"][1]["note"] == "keep"
+        assert "[redacted]" in out["lastError"]
         assert out["boundary"]["audioCrossesBoundary"] is False
-
-
-@pytest.mark.asyncio
-async def test_voice_live_send_text_validates_and_posts():
-    tools = _register()
-
-    empty = await tools["voice_live_send_text"](text="  ")
-    assert empty["ok"] is False
-
-    with patch.object(
-        voice_live, "_request", return_value={"ok": True, "delivered": True, "wire": "nope"}
-    ) as req:
-        out = await tools["voice_live_send_text"](text="agent reply")
-        assert out["ok"] is True
-        assert out["wire"] == "[redacted]"
-        assert req.call_args[0][0] == "POST"
-        assert req.call_args[0][1] == "/send_text"
-        assert req.call_args[0][2] == {"text": "agent reply"}
 
 
 @pytest.mark.asyncio

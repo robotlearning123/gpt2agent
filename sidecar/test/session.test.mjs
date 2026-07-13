@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { VoiceSession, State } from "../src/session.mjs";
-import { CLIENT_EVENTS, DATA_MESSAGE } from "../src/events.mjs";
 
 function mockPeer() {
   const sends = [];
@@ -29,7 +28,16 @@ function mockPeer() {
   };
 }
 
-test("speak requires LIVE state and sends envelope-wrapped response.create", () => {
+// Real consumer-protocol human utterance (chat_message_delta, direction:"in").
+const env = (inner) => JSON.stringify({ type: "data_message", data: JSON.stringify(inner) });
+const cmd = (delta) => env({ type: "chat_message_delta", payload: { delta } });
+const humanUtterance = (id, text) => [
+  cmd({ o: "add", v: { message: { id, content: { parts: [{ direction: "in", text: "" }] } } } }),
+  cmd({ v: [{ o: "append", p: "/message/content/parts/0/text", v: text }] }),
+  cmd({ o: "replace", p: "/message/status", v: "finished_successfully" }),
+];
+
+test("no agent→Live speak method exists (injection is unsupported)", () => {
   const peer = mockPeer();
   const session = new VoiceSession({
     auth: { token: "t" },
@@ -37,21 +45,7 @@ test("speak requires LIVE state and sends envelope-wrapped response.create", () 
     getMicTrack: async () => ({}),
     onUserSaid: () => {},
   });
-  assert.throws(() => session.speak("hi"), /cannot speak while idle/);
-
-  // Force live + attach dc as connect() would.
-  session._dc = peer.dc;
-  session.state = State.LIVE;
-  const wire = session.speak("agent reply");
-  assert.equal(peer.sends.length, 1);
-  const outer = JSON.parse(peer.sends[0]);
-  assert.equal(outer.type, DATA_MESSAGE);
-  const inner = JSON.parse(outer.data);
-  assert.equal(inner.type, CLIENT_EVENTS.RESPONSE_CREATE);
-  assert.equal(inner.response.instructions, "agent reply");
-  assert.equal(typeof wire, "string");
-  const txs = session.getTranscripts();
-  assert.equal(txs.some((t) => t.role === "agent" && t.text === "agent reply"), true);
+  assert.equal(typeof session.speak, "undefined");
 });
 
 test("status is agent-safe (no auth token fields)", () => {
@@ -69,7 +63,7 @@ test("status is agent-safe (no auth token fields)", () => {
   assert.equal(st.boundary.audioCrossesBoundary, false);
 });
 
-test("inbound transcript routes to onUserSaid and can speak reply", async () => {
+test("inbound human transcript routes to onUserSaid; reply buffered out-of-band, not sent to Live", async () => {
   const peer = mockPeer();
   const heard = [];
   const session = new VoiceSession({
@@ -85,16 +79,14 @@ test("inbound transcript routes to onUserSaid and can speak reply", async () => 
   session.state = State.LIVE;
   session.exportPlane.setState("live");
 
-  const msg = {
-    type: "conversation.item.input_audio_transcription.completed",
-    transcript: "turn one",
-  };
-  const result = await session.exportPlane.handleInbound(msg);
-  assert.deepEqual(heard, ["turn one"]);
-  assert.equal(result.agentReply, "got:turn one");
-  // Deliver speak wires as the session message handler would.
-  for (const w of result.speakWires) peer.dc.send(w);
-  assert.equal(peer.sends.length, 1);
+  for (const m of humanUtterance("s1", "what is the plan")) {
+    await session.exportPlane.ingest(m);
+  }
+  assert.deepEqual(heard, ["what is the plan"]);
+  const txs = session.getTranscripts();
+  assert.equal(txs.some((t) => t.role === "agent" && t.text === "got:what is the plan"), true);
+  // The reply is NOT pushed back to the Live datachannel (injection is dropped).
+  assert.equal(peer.sends.length, 0);
 });
 
 test("close transitions to CLOSED", () => {

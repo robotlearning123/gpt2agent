@@ -1,10 +1,10 @@
 ---
 name: gpt2agent
 description: |
-  Full ChatGPT Plus/Pro account access via MCP. 31 tools covering chat,
+  Full ChatGPT Plus/Pro account access via MCP. 30 tools covering chat,
   agent mode, deep research, image generation, code execution, canvas,
   memory, custom instructions, conversations, Custom GPTs, Voice catalog,
-  optional GPT-Live Mode B export control, and Codex.
+  optional GPT-Live → coding-agent bridge (observe-only), and Codex.
   Reuses $CODEX_HOME/auth.json (or ~/.codex/auth.json) or the manual
   ~/.gpt2agent/token.json fallback.
   Use when you need ChatGPT models, web research with citations, DALL-E
@@ -42,7 +42,6 @@ allowed-tools:
   - mcp__gpt2agent__voice_live_export_help
   - mcp__gpt2agent__voice_live_status
   - mcp__gpt2agent__voice_live_get_transcript
-  - mcp__gpt2agent__voice_live_send_text
   - mcp__gpt2agent__voice_live_end
 ---
 
@@ -78,7 +77,7 @@ If any precondition fails, stop and tell the user the exact fix command.
 | Code execution | `code_interpreter`, `canvas_execute` |
 | Account & models | `account_status`, `list_models`, `list_apps` |
 | Voice catalog | `list_voices` |
-| GPT-Live export (Mode B) | `voice_live_export_help`, `voice_live_status`, `voice_live_get_transcript`, `voice_live_send_text`, `voice_live_end` |
+| GPT-Live bridge (human→agent, observe-only) | `voice_live_export_help`, `voice_live_status`, `voice_live_get_transcript`, `voice_live_end` |
 | Conversations | `list_conversations`, `get_conversation`, `list_tasks` |
 | Custom GPTs | `list_custom_gpts`, `gpt_chat` |
 | Memory | `memory_list`, `memory_search`, `memory_create_via_chat` |
@@ -99,7 +98,7 @@ If any precondition fails, stop and tell the user the exact fix command.
 | Live document editing | `canvas_execute` | Requires temporary=False |
 | Use a Custom GPT | `gpt_chat(gizmo_id, prompt)` | List IDs with `list_custom_gpts` |
 | Discover available Voice choices | `list_voices` | Catalog only; does not start or stream a Voice session |
-| Export GPT-Live to this agent (Mode B) | `voice_live_*` | Needs headed browser sidecar; text only; Turnstile bypass out of scope |
+| Bridge GPT-Live voice to this agent (human→agent) | `voice_live_*` | Needs signed-in Chrome + extension + gateway; observe-only, text; no agent→Live speak; Turnstile bypass out of scope |
 | Save something to ChatGPT memory | `memory_create_via_chat` | Model-initiated write (REST 405 workaround) |
 | Create a Codex coding task | `codex_task_create` | Auto-resolves environment_id from repo_label |
 

@@ -1,20 +1,18 @@
-// Mode B export plane: GPT-Live voice I/O ↔ agent text.
+// The bridge layer (② in docs/superpowers/plans/2026-07-11-gpt-live-bridge-layer-spec.md).
 //
-// This is the product boundary for "export GPT-Live to an agent":
-//   - inbound: datachannel events → human transcript text → pluggable agent hook
-//   - outbound: agent reply text → speak-injection wire message (no audio bytes)
+// Direction is human → agent ONLY. This layer:
+//   - ingests the real consumer GPT-Live datachannel (chat_message_delta) via
+//     TranscriptAssembler → completed HUMAN utterances (direction:"in"),
+//   - filters filler/acks (isActionable),
+//   - routes each real utterance to a pluggable coding-agent hook (onAgentTurn),
+//   - records the agent's reply as text for OUT-OF-BAND egress to the human
+//     (overlay / side-UI) — never injected back into GPT-Live.
 //
-// NEVER stores raw audio, bearer tokens, cookies, or account secrets.
-// Audio stays in the browser / WebRTC peer that owns the media session.
+// There is NO agent→Live speak channel: the consumer datachannel silently drops
+// client-injected speak/response events (verified). Audio, bearer tokens, cookies,
+// and SDP never cross this layer.
 
-import {
-  EventRouter,
-  buildSpeakWire,
-  buildSpeakText,
-  extractInputTranscript,
-  unwrapDataMessage,
-  wrapDataMessage,
-} from "./events.mjs";
+import { TranscriptAssembler, isActionable } from "./transcript.mjs";
 
 export const ExportState = Object.freeze({
   IDLE: "idle",
@@ -24,17 +22,19 @@ export const ExportState = Object.freeze({
 
 /**
  * Sanitize a value so it can never leak secrets/audio into agent-facing status.
- * Blocks known credential/media *field names* only — not keys that merely
- * mention "audio" in a boolean flag (e.g. audioCrossesBoundary).
+ * Blocks known credential/media field names; recurses dicts, arrays, and strings
+ * (redacting an embedded Bearer/JWT). Does not redact boolean flags that merely
+ * mention "audio" (e.g. audioCrossesBoundary).
  */
 export function redactForAgent(value, depth = 0) {
   if (depth > 6) return "[truncated]";
   if (value == null) return value;
   if (typeof value === "string") {
-    // Never return JWT-shaped or long opaque blobs via status APIs.
-    if (/^Bearer\s+/i.test(value)) return "[redacted]";
-    if (/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value)) return "[redacted]";
-    return value;
+    // Redact a Bearer token or JWT appearing ANYWHERE in the string (e.g. embedded
+    // in a lastError message), not only when the whole string is one token.
+    return value
+      .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "[redacted]")
+      .replace(/[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, "[redacted]");
   }
   if (typeof value !== "object") return value;
   if (Array.isArray(value)) return value.map((v) => redactForAgent(v, depth + 1));
@@ -51,7 +51,7 @@ export function redactForAgent(value, depth = 0) {
     "client_secret",
     "audio",
     "audio_bytes",
-    "audioBytes",
+    "audiobytes",
     "pcm",
     "sdp",
     "offersdp",
@@ -59,12 +59,10 @@ export function redactForAgent(value, depth = 0) {
     "proof_token",
     "prooftoken",
     "sentinel",
-    "wire",
   ]);
   const out = {};
   for (const [k, v] of Object.entries(value)) {
     const lk = k.toLowerCase();
-    // Exact blocked names, or explicit secret/credential suffixes — not "audio*" flags.
     const isBlocked =
       blocked.has(lk) ||
       lk.endsWith("_token") ||
@@ -75,17 +73,13 @@ export function redactForAgent(value, depth = 0) {
       lk === "cookies" ||
       lk.endsWith("_sdp") ||
       lk.endsWith("sdp");
-    if (isBlocked) {
-      out[k] = "[redacted]";
-    } else {
-      out[k] = redactForAgent(v, depth + 1);
-    }
+    out[k] = isBlocked ? "[redacted]" : redactForAgent(v, depth + 1);
   }
   return out;
 }
 
 /**
- * Mode B export controller.
+ * Bridge layer controller (kept exported as `ModeBExport` for import stability).
  *
  * @param {{
  *   onAgentTurn?: (humanText: string) => (string|null|Promise<string|null>),
@@ -96,27 +90,28 @@ export class ModeBExport {
   constructor(opts = {}) {
     this._onAgentTurn = typeof opts.onAgentTurn === "function" ? opts.onAgentTurn : null;
     this._maxTranscripts = opts.maxTranscripts ?? 200;
-    /** @type {Array<{role:"human"|"agent"|"assistant", text:string, at:number}>} */
+    /** @type {Array<{role:"human"|"agent", text:string, at:number}>} */
     this._transcripts = [];
-    /** @type {string[]} wire-ready speak messages waiting to be sent on the dc */
-    this._speakQueue = [];
     this.state = ExportState.IDLE;
-    this.router = new EventRouter();
     this._turns = 0;
     this._lastError = null;
-
-    this.router.onInputTranscript((text) => {
-      // Sync path only records; async agent turn is driven from handleInbound.
-      this._push("human", text);
-    });
+    this._assembler = new TranscriptAssembler();
+    /** @type {Set<(text:string)=>void>} fired on each completed human utterance */
+    this._humanHooks = new Set();
   }
 
-  /** Pluggable agent brain: human utterance → optional reply text for Live TTS. */
+  /** Pluggable agent brain: human utterance → optional reply text (out-of-band). */
   setAgentTurn(fn) {
     if (fn != null && typeof fn !== "function") {
       throw new TypeError("onAgentTurn must be a function");
     }
     this._onAgentTurn = fn;
+  }
+
+  /** Subscribe to completed human utterances (e.g. liveness). Returns an unsubscribe. */
+  onHumanUtterance(fn) {
+    this._humanHooks.add(fn);
+    return () => this._humanHooks.delete(fn);
   }
 
   setState(state) {
@@ -136,102 +131,69 @@ export class ModeBExport {
 
   /** Record a text-only transcript line (human or agent). No audio. */
   record(role, text) {
-    if (role !== "human" && role !== "agent" && role !== "assistant") {
-      throw new TypeError("role must be human|agent|assistant");
+    if (role !== "human" && role !== "agent") {
+      throw new TypeError("role must be human|agent");
     }
     this._push(role, text);
   }
 
   /**
-   * Build the speak-injection wire message for an agent reply.
-   * Throws on empty text (contract).
-   * @returns {string} JSON string for datachannel.send — never audio bytes
-   */
-  buildSpeakWire(text) {
-    return buildSpeakWire(text);
-  }
-
-  /**
-   * Queue agent reply text to be spoken by Live. Returns the wire payload.
-   * @returns {string}
-   */
-  queueSpeak(text) {
-    const wire = this.buildSpeakWire(text);
-    this._speakQueue.push(wire);
-    this._push("agent", text);
-    return wire;
-  }
-
-  /**
-   * Enqueue an already-built speak wire (e.g. undelivered control /send_text).
-   * Does not re-record transcript text.
-   * @param {string} wire
-   */
-  enqueueWire(wire) {
-    if (typeof wire !== "string" || !wire) {
-      throw new TypeError("enqueueWire requires a non-empty wire string");
-    }
-    this._speakQueue.push(wire);
-  }
-
-  /**
-   * Remove one matching speak wire from the queue (first match). Used when
-   * that specific wire was already delivered out-of-band — must not drain
-   * unrelated pending speaks.
-   * @returns {boolean} true if a matching wire was removed
-   */
-  removeSpeakWire(wire) {
-    const i = this._speakQueue.indexOf(wire);
-    if (i < 0) return false;
-    this._speakQueue.splice(i, 1);
-    return true;
-  }
-
-  /** Drain queued speak wires (caller sends them on the live datachannel). */
-  drainSpeakQueue() {
-    const q = this._speakQueue;
-    this._speakQueue = [];
-    return q;
-  }
-
-  /**
-   * Handle one inbound datachannel message (string or object).
-   * If a human transcript is extracted and an agent hook is set, awaits the
-   * hook and queues a speak wire for any non-empty reply.
+   * Ingest one inbound datachannel message (string or object) through the real
+   * consumer-protocol parser. For each completed, actionable HUMAN utterance,
+   * records it, fires hooks, and (if an agent hook is set) awaits a reply and
+   * records it as text for out-of-band egress. Never returns audio or wires.
    *
-   * @returns {Promise<{
-   *   type: string|null,
-   *   humanText: string|null,
-   *   agentReply: string|null,
-   *   speakWires: string[],
-   * }>}
+   * @returns {Promise<{ humanText: string|null, agentReply: string|null }>}
    */
-  async handleInbound(raw) {
-    const evt = unwrapDataMessage(raw);
-    const type = this.router.handle(raw);
-    let humanText = extractInputTranscript(evt);
+  async ingest(raw) {
+    const utterances = this._assembler.feed(raw); // completed human strings (direction:"in")
+    let humanText = null;
     let agentReply = null;
-    const speakWires = [];
+    for (const u of utterances) {
+      const r = await this.handleUtterance(u);
+      if (r.humanText) {
+        humanText = r.humanText;
+        agentReply = r.agentReply;
+      }
+    }
+    return { humanText, agentReply };
+  }
 
-    if (humanText && this._onAgentTurn) {
+  /**
+   * Handle one ALREADY-EXTRACTED human utterance (e.g. from the extension, which
+   * parses the datachannel in-page). Applies the same filter → record → agent →
+   * record-reply pipeline as ingest, so every entry path shares isActionable, the
+   * capped transcript buffer, hooks, and error handling.
+   *
+   * @returns {Promise<{ humanText: string|null, agentReply: string|null }>}
+   */
+  async handleUtterance(text) {
+    if (typeof text !== "string" || !isActionable(text)) {
+      return { humanText: null, agentReply: null };
+    }
+    const humanText = text.trim();
+    this._push("human", humanText);
+    for (const fn of this._humanHooks) {
+      try {
+        fn(humanText);
+      } catch {
+        /* hook errors never break the pipeline */
+      }
+    }
+    let agentReply = null;
+    if (this._onAgentTurn) {
       this._turns += 1;
       try {
         const reply = await this._onAgentTurn(humanText);
         if (typeof reply === "string" && reply.trim()) {
           agentReply = reply.trim();
-          speakWires.push(this.queueSpeak(agentReply));
+          this._push("agent", agentReply);
         }
       } catch (err) {
         this._lastError = err instanceof Error ? err.message : String(err);
       }
     }
-
-    // Also drain any speak wires queued outside this turn.
-    for (const w of this.drainSpeakQueue()) {
-      if (!speakWires.includes(w)) speakWires.push(w);
-    }
-
-    return { type, humanText, agentReply, speakWires };
+    return { humanText, agentReply };
   }
 
   /** Buffered transcript entries (text only). */
@@ -242,7 +204,7 @@ export class ModeBExport {
   }
 
   /**
-   * Agent-safe status snapshot — no tokens, no audio, no SDP.
+   * Agent-safe status snapshot — no tokens, no audio, no SDP, no speak channel.
    * @returns {object}
    */
   status() {
@@ -250,12 +212,13 @@ export class ModeBExport {
       state: this.state,
       turns: this._turns,
       transcriptCount: this._transcripts.length,
-      speakQueueLength: this._speakQueue.length,
       hasAgentHook: Boolean(this._onAgentTurn),
       lastError: this._lastError,
       boundary: {
+        direction: "human-to-agent",
         audioCrossesBoundary: false,
         secretsCrossBoundary: false,
+        speakInjection: "unsupported (server drops it)",
         mediaOwner: "browser-or-webrtc-peer",
         agentSurface: "text-and-control-only",
         turnstileBypass: "out-of-scope",
@@ -264,16 +227,6 @@ export class ModeBExport {
   }
 
   close() {
-    this._speakQueue = [];
     this.setState(ExportState.CLOSED);
   }
 }
-
-// Re-export speak builders so agents import one module for the contract.
-export {
-  buildSpeakText,
-  buildSpeakWire,
-  extractInputTranscript,
-  wrapDataMessage,
-  unwrapDataMessage,
-};

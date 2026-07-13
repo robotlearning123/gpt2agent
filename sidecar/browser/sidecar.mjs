@@ -1,26 +1,28 @@
-// GPT-Live browser sidecar — runnable Mode B export path.
+// GPT-Live browser sidecar — DIAGNOSTIC / TEST HARNESS (not the reliable path).
 //
-// Human-authenticated real Chrome owns WebRTC + media (Turnstile-cleared).
-// This process:
-//   1. Hooks the datachannel for input transcripts
-//   2. Forwards human text to a pluggable agent hook
-//   3. Injects speak-wire messages so Live voices the agent reply
-//   4. Exposes a localhost control plane for agents (status/transcript/send_text/end)
+// It launches puppeteer Chrome with a fake WAV microphone to exercise the bridge
+// layer end-to-end WITHOUT a human. Two important limits, both by design:
+//   - Synthetic audio (fake WAV mic) is NOT transcribed by GPT-Live — only a real
+//     mic is. So this harness proves wiring, not live transcription.
+//   - Puppeteer automation may be flagged by the session's anti-bot check.
+// The RELIABLE human path is the real signed-in Chrome + sidecar/extension +
+// agent-gateway.mjs (see sidecar/README.md). Turnstile bypass is out of scope.
+//
+// What it does:
+//   1. Hooks the datachannel and ingests human transcripts (real chat_message_delta)
+//   2. Routes each human utterance to a pluggable coding-agent hook
+//   3. Shows the agent reply as a TEXT OVERLAY (out-of-band — Live won't speak it)
+//   4. Exposes the localhost control plane (status/transcript/end)
 //
 // Audio never leaves the browser. Tokens/cookies stay in the Chrome profile.
-// Headless Turnstile bypass is out of scope.
 //
-// Setup:
+// Run:
 //   cd sidecar && npm install
-//   open -na "Google Chrome" --args --user-data-dir="$PWD/.chrome-gptlive"
-//   # sign into chatgpt.com, quit Chrome
-//   echo "What is two plus two?" | mb voice -o q.mp3
-//   ffmpeg -y -i q.mp3 -ar 24000 -ac 1 q.wav
 //   node browser/sidecar.mjs --profile "$PWD/.chrome-gptlive" --audio q.wav
 //
 // Optional:
 //   --control-port 8741   localhost control HTTP for agents
-//   --reply "..."         fixed agent reply (demo Mode B speak path)
+//   --reply "..."         fixed agent reply for every human turn (wiring demo)
 //   --agent-cmd '...'     shell command; stdin=human text, stdout=reply
 
 import puppeteer from "puppeteer-core";
@@ -53,28 +55,32 @@ const NO_CONTROL = hasFlag("no-control");
 const HELP = hasFlag("help") || hasFlag("h");
 
 if (HELP) {
-  console.log(`gpt2agent GPT-Live Mode B export sidecar
+  console.log(`gpt2agent GPT-Live bridge — DIAGNOSTIC / TEST HARNESS
+
+Fake-mic + puppeteer, for wiring tests only. Synthetic audio is NOT transcribed
+by GPT-Live and puppeteer may trip anti-bot; the reliable human path is the real
+signed-in Chrome + sidecar/extension + agent-gateway.mjs (see sidecar/README.md).
 
 Usage:
   node browser/sidecar.mjs --profile DIR --audio FILE.wav [options]
 
 Options:
   --profile DIR         Chrome user-data-dir already signed into ChatGPT
-  --audio FILE          WAV fed as fake microphone
+  --audio FILE          WAV fed as fake microphone (test only)
   --chrome PATH         Chrome binary
   --ms N                listen duration (default 25000)
   --control-port N      localhost control HTTP (default ${DEFAULT_CONTROL_PORT})
   --no-control          disable control HTTP
-  --reply TEXT          fixed agent reply for every human turn (demo)
+  --reply TEXT          fixed agent reply for every human turn (wiring demo)
   --agent-cmd CMD       shell: stdin human text → stdout agent reply
   --help                this help
 
-Control plane (agent surface, text only):
+Control plane (agent surface, text only, human → agent):
   GET  /help /status /transcript /health
-  POST /send_text  {"text":"..."}
   POST /end
 
-Boundary: no audio/secrets on the control plane. Turnstile bypass is out of scope.
+Boundary: no audio/secrets on the control plane; agent→Live speak is unsupported;
+Turnstile bypass is out of scope.
 `);
   console.log(JSON.stringify(EXPORT_HELP, null, 2));
   process.exit(0);
@@ -110,22 +116,23 @@ async function runAgentCmd(humanText) {
   });
 }
 
-/** @type {(wire: string) => Promise<boolean>} */
-let injectSpeak = async () => false;
+/** @type {(text: string) => Promise<boolean>} */
+let showReply = async () => false;
 
 const exportPlane = new ModeBExport({
   onAgentTurn: async (humanText) => {
     console.log(`\n[human->agent] "${humanText}"`);
     if (FIXED_REPLY) {
-      console.log(`[agent->speak] fixed reply`);
+      console.log(`[agent->reply] fixed reply`);
       return FIXED_REPLY;
     }
     if (AGENT_CMD) {
       const reply = await runAgentCmd(humanText);
-      if (reply) console.log(`[agent->speak] from --agent-cmd`);
+      if (reply) console.log(`[agent->reply] from --agent-cmd`);
       return reply;
     }
-    // Default: surface to control plane; agent may POST /send_text.
+    // Default: no local agent; the human transcript is still buffered for the
+    // control plane (GET /transcript). No reply is shown.
     return null;
   },
 });
@@ -184,17 +191,23 @@ function pageHook() {
   }
   W.__hooked = true;
   window.RTCPeerConnection = W;
-  // Speak injection used by the Node export plane / control server.
-  window.__gptliveSend = (wire) => {
+  // Out-of-band egress: show the coding agent's reply as a text overlay. GPT-Live
+  // will NOT speak injected text, so the human reads it here instead.
+  window.__gptliveShowReply = (text) => {
     try {
-      if (cap.dc && cap.dc.readyState === "open") {
-        cap.dc.send(wire);
-        return true;
+      let el = document.getElementById("__gptlive_overlay");
+      if (!el) {
+        el = document.createElement("div");
+        el.id = "__gptlive_overlay";
+        el.style.cssText =
+          "position:fixed;right:14px;bottom:14px;max-width:440px;max-height:45vh;overflow:auto;z-index:2147483647;background:#111827;color:#e5e7eb;border:1px solid #374151;border-radius:10px;padding:12px 14px;font:13px/1.45 ui-monospace,SFMono-Regular,monospace;white-space:pre-wrap;box-shadow:0 8px 30px rgba(0,0,0,.4)";
+        document.documentElement.appendChild(el);
       }
+      el.textContent = "🤖 coding agent:\n\n" + String(text);
+      return true;
     } catch {
-      /* ignore */
+      return false;
     }
-    return false;
   };
 }
 
@@ -204,7 +217,14 @@ let browser = null;
 async function shutdown() {
   exportPlane.close();
   try {
-    if (control?.server) await new Promise((r) => control.server.close(r));
+    // Race server.close() with a timeout: a lingering keep-alive socket must not
+    // block teardown forever (see control.mjs /end deferral).
+    if (control?.server) {
+      await Promise.race([
+        new Promise((r) => control.server.close(r)),
+        new Promise((r) => setTimeout(r, 1500)),
+      ]);
+    }
   } catch {
     /* ignore */
   }
@@ -230,9 +250,9 @@ try {
   const page = (await browser.pages())[0] || (await browser.newPage());
   await page.evaluateOnNewDocument(pageHook);
 
-  injectSpeak = async (wire) => {
+  showReply = async (text) => {
     try {
-      return Boolean(await page.evaluate((w) => window.__gptliveSend?.(w) === true, wire));
+      return Boolean(await page.evaluate((t) => window.__gptliveShowReply?.(t) === true, text));
     } catch {
       return false;
     }
@@ -241,7 +261,6 @@ try {
   if (!NO_CONTROL) {
     control = await createControlServer(exportPlane, {
       port: CONTROL_PORT,
-      sendSpeak: injectSpeak,
       onEnd: async () => {
         console.log("[sidecar] control /end — shutting down");
         await shutdown();
@@ -253,13 +272,13 @@ try {
 
   await page.exposeFunction("__onGptLive", async (detail) => {
     const raw = detail.wire || detail.raw;
-    const result = await exportPlane.handleInbound(raw);
+    const result = await exportPlane.ingest(raw);
     if (result.humanText) {
-      console.log(`[export] human: "${result.humanText}"`);
+      console.log(`[bridge] human: "${result.humanText}"`);
     }
-    for (const wire of result.speakWires) {
-      const ok = await injectSpeak(wire);
-      console.log(`[export] speak inject ${ok ? "ok" : "pending"} (${wire.length}B)`);
+    if (result.agentReply) {
+      const ok = await showReply(result.agentReply);
+      console.log(`[bridge] agent reply ${ok ? "shown (overlay)" : "display failed"} (${result.agentReply.length} chars)`);
     }
   });
 
