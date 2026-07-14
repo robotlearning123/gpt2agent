@@ -57,6 +57,15 @@ def test_grok_routes_remove_identity_and_credential_segments(
     assert planted not in normalized
 
 
+def test_unknown_grok_route_fails_closed_without_opaque_identifier() -> None:
+    planted = "account-private-8"
+
+    normalized = normalize_grok_route(f"/rest/sessions/{planted}")
+
+    assert normalized == "<route>"
+    assert planted not in normalized
+
+
 def test_grok_error_is_typed_bounded_and_secret_free() -> None:
     error = GrokError(
         "GROK_WEB_AUTH_EXPIRED",

@@ -27,28 +27,40 @@ GROK_ERROR_CODES = frozenset(
 )
 
 _MAX_METHOD_LENGTH = 16
-_MAX_ROUTE_LENGTH = 160
+_MAX_INPUT_ROUTE_LENGTH = 2_048
 _METHOD_RE = re.compile(r"[A-Z]+")
-_UUID_RE = re.compile(
-    r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
-    r"[0-9a-f]{4}-[0-9a-f]{12}\b"
-)
-_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
-_XAI_TOKEN_RE = re.compile(r"\bxai-[A-Za-z0-9._~+/\-]{12,}=*", re.IGNORECASE)
-_GROK_ID_RE = re.compile(
-    r"\b(?:conv|resp|attach)(?:[-_][A-Za-z0-9]+)+\b", re.IGNORECASE
-)
-_ID_COLLECTIONS = frozenset(
+_STATIC_ROUTE_TEMPLATES = frozenset(
     {
-        "accounts",
-        "attachments",
-        "identities",
-        "organizations",
-        "profiles",
-        "responses",
-        "users",
-        "workspaces",
+        "/rest/app-chat/conversations/new",
+        "/rest/models",
+        "/rest/modes",
     }
+)
+_DYNAMIC_ROUTE_TEMPLATES = (
+    (
+        re.compile(
+            r"/rest/app-chat/conversations/reconnect-response-v2/[^/\s]+"
+        ),
+        "/rest/app-chat/conversations/reconnect-response-v2/{id}",
+    ),
+    (
+        re.compile(
+            r"/rest/app-chat/conversations/(?!new\Z|reconnect-response-v2\Z)[^/\s]+"
+        ),
+        "/rest/app-chat/conversations/{id}",
+    ),
+    (
+        re.compile(r"/rest/app-chat/attachments/[^/\s]+"),
+        "/rest/app-chat/attachments/{id}",
+    ),
+    (
+        re.compile(r"/rest/app-chat/responses/[^/\s]+"),
+        "/rest/app-chat/responses/{id}",
+    ),
+    (
+        re.compile(r"/rest/app-chat/events/[^/\s]+"),
+        "/rest/app-chat/events/{id}",
+    ),
 )
 
 
@@ -63,39 +75,19 @@ def normalize_grok_route(route: str | None) -> str | None:
     except ValueError:
         return "<route>"
     if (
-        not path.startswith("/")
+        len(path) > _MAX_INPUT_ROUTE_LENGTH
+        or not path.startswith("/")
         or not path.isascii()
         or not path.isprintable()
         or "%" in path
     ):
         return "<route>"
-
-    segments = path.split("/")
-    for index, segment in enumerate(segments):
-        previous = segments[index - 1] if index else ""
-        if previous in _ID_COLLECTIONS:
-            segments[index] = "{id}"
-        elif previous == "conversations" and segment not in {
-            "new",
-            "reconnect-response-v2",
-        }:
-            segments[index] = "{id}"
-        elif (
-            index >= 2
-            and segments[index - 2] == "conversations"
-            and previous == "reconnect-response-v2"
-        ):
-            segments[index] = "{id}"
-        else:
-            segment = _UUID_RE.sub("{id}", segment)
-            segment = _EMAIL_RE.sub("{id}", segment)
-            segment = _XAI_TOKEN_RE.sub("{id}", segment)
-            segments[index] = _GROK_ID_RE.sub("{id}", segment)
-
-    normalized = "/".join(segments)
-    if len(normalized) > _MAX_ROUTE_LENGTH:
-        return "<route>"
-    return normalized
+    if path in _STATIC_ROUTE_TEMPLATES:
+        return path
+    for pattern, normalized in _DYNAMIC_ROUTE_TEMPLATES:
+        if pattern.fullmatch(path) is not None:
+            return normalized
+    return "<route>"
 
 
 class GrokError(RuntimeError):

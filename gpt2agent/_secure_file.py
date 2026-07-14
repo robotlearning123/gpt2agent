@@ -184,13 +184,24 @@ def read_private_json(
                 raise _private_json_failure(path, "changed while being read")
         except OSError:
             raise _private_json_failure(path, "could not be read as private JSON") from None
-    finally:
-        os.close(fd)
-
-    try:
-        return json.loads(b"".join(chunks).decode("utf-8"))
-    except (UnicodeError, ValueError, RecursionError):
-        raise _private_json_failure(path, "must contain valid UTF-8 JSON") from None
+        try:
+            decoded = json.loads(b"".join(chunks).decode("utf-8"))
+        except (UnicodeError, ValueError, RecursionError):
+            raise _private_json_failure(path, "must contain valid UTF-8 JSON") from None
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+    else:
+        try:
+            os.close(fd)
+        except OSError:
+            raise _private_json_failure(
+                path, "could not be closed after reading private JSON"
+            ) from None
+    return decoded
 
 
 def _validate_owner(path: Path, owner: int, expected: int | None) -> None:

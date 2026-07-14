@@ -133,6 +133,65 @@ def test_read_private_json_hides_low_level_read_errors(
     assert "planted-read-secret" not in str(caught.value)
 
 
+def test_read_private_json_hides_close_errors_after_closing_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gpt2agent import _secure_file
+
+    path = tmp_path / "private.json"
+    _write_private_fixture(path, b"{}")
+    original_close = _secure_file.os.close
+    descriptor_closed = False
+
+    def close_then_fail(fd: int) -> None:
+        nonlocal descriptor_closed
+        original_close(fd)
+        descriptor_closed = True
+        raise OSError("planted-close-secret")
+
+    monkeypatch.setattr(_secure_file.os, "close", close_then_fail)
+
+    with pytest.raises(RuntimeError, match="could not be closed") as caught:
+        _secure_file.read_private_json(path)
+
+    assert descriptor_closed is True
+    assert str(path) in str(caught.value)
+    assert "planted-close-secret" not in str(caught.value)
+
+
+def test_read_private_json_preserves_primary_error_when_close_also_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gpt2agent import _secure_file
+
+    path = tmp_path / "private.json"
+    _write_private_fixture(path, b"{}")
+    original_close = _secure_file.os.close
+    descriptor_closed = False
+
+    def fail_read(fd: int, maximum: int) -> bytes:
+        raise OSError("planted-read-secret")
+
+    def close_then_fail(fd: int) -> None:
+        nonlocal descriptor_closed
+        original_close(fd)
+        descriptor_closed = True
+        raise OSError("planted-close-secret")
+
+    monkeypatch.setattr(_secure_file.os, "read", fail_read)
+    monkeypatch.setattr(_secure_file.os, "close", close_then_fail)
+
+    with pytest.raises(RuntimeError, match="could not be read as private JSON") as caught:
+        _secure_file.read_private_json(path)
+
+    assert descriptor_closed is True
+    assert str(path) in str(caught.value)
+    assert "planted-read-secret" not in str(caught.value)
+    assert "planted-close-secret" not in str(caught.value)
+
+
 def test_read_private_json_hides_decoder_value_errors(tmp_path: Path) -> None:
     from gpt2agent._secure_file import read_private_json
 
