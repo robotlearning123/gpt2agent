@@ -365,11 +365,15 @@ class GrokBuildClient:
 
     @staticmethod
     def _validated_executable(value: str) -> str:
+        failure: GrokError | None = None
+        path: Path | None = None
         try:
             path = Path(value).expanduser().resolve(strict=True)
         except (OSError, RuntimeError, ValueError):
-            raise _grok_error("GROK_BUILD_CLI_NOT_FOUND") from None
-        if not path.is_file() or not os.access(path, os.X_OK):
+            failure = _grok_error("GROK_BUILD_CLI_NOT_FOUND")
+        if failure is not None:
+            raise failure
+        if path is None or not path.is_file() or not os.access(path, os.X_OK):
             raise _grok_error("GROK_BUILD_CLI_NOT_FOUND")
         return str(path)
 
@@ -383,13 +387,13 @@ class GrokBuildClient:
             env["GROK_AUTH_PATH"] = str(self.config.auth_path)
         return env
 
-    async def _run(
-        self, args: Sequence[str], *, cwd: Path | None = None
-    ) -> ProcessResult:
-        process_cwd = Path.cwd().resolve() if cwd is None else cwd
+    async def _run(self, args: Sequence[str], *, cwd: Path) -> ProcessResult:
+        process_cwd = self._cwd_policy.directory(cwd)
         argv = [self._resolved_command(), "--no-auto-update", *args]
+        failure: GrokError | InputValidationError | None = None
+        result: ProcessResult | None = None
         try:
-            return await self._runner(
+            result = await self._runner(
                 argv,
                 cwd=process_cwd,
                 env=self._environment(),
@@ -398,38 +402,66 @@ class GrokBuildClient:
             )
         except BoundedProcessError as exc:
             if exc.code == "timeout":
-                raise _grok_error("GROK_BUILD_TIMEOUT") from exc
-            raise _grok_error("GROK_BUILD_OUTPUT_TOO_LARGE") from exc
-        except FileNotFoundError as exc:
+                failure = _grok_error("GROK_BUILD_TIMEOUT")
+            else:
+                failure = _grok_error("GROK_BUILD_OUTPUT_TOO_LARGE")
+        except FileNotFoundError:
             if not process_cwd.is_dir():
-                raise InputValidationError(_CWD_INVARIANT) from exc
-            raise _grok_error("GROK_BUILD_CLI_NOT_FOUND") from exc
+                failure = InputValidationError(_CWD_INVARIANT)
+            else:
+                failure = _grok_error("GROK_BUILD_CLI_NOT_FOUND")
+        if failure is not None:
+            raise failure
+        if result is None:  # pragma: no cover - runner contract guard
+            raise _grok_error("GROK_BUILD_FAILED")
+        return result
 
     @staticmethod
     def _decode(result: ProcessResult) -> tuple[str, str]:
+        failure: GrokError | None = None
+        stdout = ""
+        stderr = ""
         try:
             stdout = result.stdout.decode("utf-8")
             stderr = result.stderr.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise _grok_error("GROK_BUILD_FAILED") from exc
+        except UnicodeDecodeError:
+            failure = _grok_error("GROK_BUILD_FAILED")
+        if failure is not None:
+            raise failure
         if result.returncode != 0:
             raise _classified_error(f"{stderr}\n{stdout}")
         return stdout, stderr
 
-    async def _model_catalog(self) -> GrokBuildModelCatalog:
-        stdout, _ = self._decode(await self._run(["models"]))
+    async def _model_catalog(self, cwd: Path) -> GrokBuildModelCatalog:
+        stdout, _ = self._decode(await self._run(["models"], cwd=cwd))
         return _parse_models(stdout)
 
     async def models(self) -> dict[str, Any]:
         """Return authenticated/default_model/models/count from ``grok models``."""
-        return (await self._model_catalog()).as_dict()
+        cwd = self._cwd_policy.directory(None)
+        return (await self._model_catalog(cwd)).as_dict()
 
     async def status(self) -> dict[str, Any]:
         """Return installed/version/authenticated/catalog counts without identity."""
         try:
-            version_stdout, _ = self._decode(await self._run(["--version"]))
+            self._resolved_command()
+        except GrokError as exc:
+            if exc.code != "GROK_BUILD_CLI_NOT_FOUND":
+                raise
+            return {
+                "installed": False,
+                "version": None,
+                "authenticated": False,
+                "default_model": None,
+                "models_count": 0,
+            }
+        cwd = self._cwd_policy.directory(None)
+        try:
+            version_stdout, _ = self._decode(
+                await self._run(["--version"], cwd=cwd)
+            )
             version = _parse_version(version_stdout)
-            catalog = await self._model_catalog()
+            catalog = await self._model_catalog(cwd)
         except GrokError as exc:
             if exc.code != "GROK_BUILD_CLI_NOT_FOUND":
                 raise
@@ -469,7 +501,7 @@ class GrokBuildClient:
             raise _invalid("grok_build.subagents must be boolean")
         validated_cwd = self._cwd_policy.directory(cwd)
 
-        catalog = await self._model_catalog()
+        catalog = await self._model_catalog(validated_cwd)
         if not catalog.authenticated:
             raise _grok_error("GROK_BUILD_AUTH_MISSING")
         selected_model = (
@@ -509,10 +541,14 @@ class GrokBuildClient:
             args.append("--no-subagents")
         args.extend(("--model", selected_model))
         stdout, stderr = self._decode(await self._run(args, cwd=validated_cwd))
+        parse_failure: GrokError | None = None
+        payload: Any = None
         try:
             payload = json.loads(stdout)
-        except json.JSONDecodeError as exc:
-            raise _classified_error(f"{stderr}\n{stdout}") from exc
+        except (ValueError, RecursionError):
+            parse_failure = _classified_error(f"{stderr}\n{stdout}")
+        if parse_failure is not None:
+            raise parse_failure
         if not isinstance(payload, dict):
             raise _grok_error("GROK_BUILD_FAILED")
         if payload.get("type") == "error":
