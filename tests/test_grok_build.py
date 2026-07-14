@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -92,7 +93,7 @@ def _client(
     return GrokBuildClient(
         _config(root, command=command, **config_overrides),
         runner=runner,
-        resolver=resolver or (lambda _: command),
+        resolver=resolver or (lambda _: sys.executable),
     )
 
 
@@ -112,6 +113,15 @@ def _assert_detached_closed_error(error: GrokError, code: str) -> None:
     assert error.code == code
     assert error.__cause__ is None
     assert error.__context__ is None
+
+
+def _assert_detached_input_error(
+    error: InputValidationError, invariant: str, planted: str
+) -> None:
+    assert error.invariant == invariant
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert planted not in str(error)
 
 
 def test_build_config_defaults_and_resolves_paths(tmp_path: Path) -> None:
@@ -178,6 +188,35 @@ def test_build_config_rejects_invalid_values(
     assert caught.value.invariant == invariant
 
 
+@pytest.mark.parametrize(
+    ("key", "planted", "invariant"),
+    [
+        (
+            "timeout_seconds",
+            "xai-planted-float-secret",
+            "grok_build.timeout_seconds must be 1..600",
+        ),
+        (
+            "max_output_bytes",
+            "xai-planted-output-secret",
+            "grok_build.max_output_bytes is out of range",
+        ),
+        (
+            "default_max_turns",
+            "xai-planted-turns-secret",
+            "grok_build.default_max_turns must be 1..100",
+        ),
+    ],
+)
+def test_build_config_conversion_errors_have_no_raw_exception_chain(
+    key: str, planted: str, invariant: str
+) -> None:
+    with pytest.raises(InputValidationError) as caught:
+        GrokBuildConfig.from_mapping({key: planted})
+
+    _assert_detached_input_error(caught.value, invariant, planted)
+
+
 @pytest.mark.asyncio
 async def test_models_resolves_path_command_and_returns_current_catalog(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -233,6 +272,23 @@ async def test_build_probes_reject_disabled_roots_without_subprocess_launch(
         ]
     )
     client = _client(None, runner)
+
+    with pytest.raises(InputValidationError) as caught:
+        await getattr(client, operation)()
+
+    assert caught.value.invariant == (
+        "grok_build.cwd must be an existing directory under a configured root"
+    )
+    assert runner.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["models", "status"])
+async def test_build_probes_validate_roots_before_missing_binary_soft_failure(
+    operation: str,
+) -> None:
+    runner = RecordingRunner([])
+    client = _client(None, runner, resolver=lambda _: None)
 
     with pytest.raises(InputValidationError) as caught:
         await getattr(client, operation)()
@@ -316,6 +372,100 @@ async def test_models_accepts_explicit_executable_without_path_resolver(
 
     assert result["models"] == ["grok-4.5"]
     assert runner.calls[0]["argv"][0] == str(executable)
+
+
+@pytest.mark.asyncio
+async def test_bare_resolver_result_is_pinned_before_repository_cwd_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    discovery_cwd = tmp_path / "discovery"
+    root = tmp_path / "root"
+    repository = root / "repo"
+    discovery_cwd.mkdir()
+    repository.mkdir(parents=True)
+    trusted = _make_executable(discovery_cwd / "grok")
+    substituted = _make_executable(repository / "grok")
+    runner = RecordingRunner([_result(_models_output("grok-4.5"))])
+    resolver_calls: list[str] = []
+
+    def resolver(command: str) -> str:
+        resolver_calls.append(command)
+        return "grok"
+
+    monkeypatch.chdir(discovery_cwd)
+    client = _client(root, runner, resolver=resolver)
+    monkeypatch.chdir(repository)
+
+    result = await client.models()
+
+    assert result["models"] == ["grok-4.5"]
+    assert resolver_calls == ["grok"]
+    assert runner.calls[0]["argv"][0] == str(trusted)
+    assert runner.calls[0]["argv"][0] != str(substituted)
+
+
+@pytest.mark.asyncio
+async def test_relative_explicit_command_is_pinned_before_repository_cwd_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    discovery_cwd = tmp_path / "discovery"
+    root = tmp_path / "root"
+    repository = root / "repo"
+    discovery_cwd.mkdir()
+    repository.mkdir(parents=True)
+    trusted = _make_executable(discovery_cwd / "bin" / "grok")
+    substituted = _make_executable(repository / "bin" / "grok")
+    runner = RecordingRunner([_result(_models_output("grok-4.5"))])
+
+    def unexpected_resolver(_: str) -> str | None:
+        pytest.fail("explicit executable paths must not use PATH resolution")
+
+    monkeypatch.chdir(discovery_cwd)
+    client = _client(
+        root,
+        runner,
+        command="bin/grok",
+        resolver=unexpected_resolver,
+    )
+    monkeypatch.chdir(repository)
+
+    result = await client.models()
+
+    assert result["models"] == ["grok-4.5"]
+    assert runner.calls[0]["argv"][0] == str(trusted)
+    assert runner.calls[0]["argv"][0] != str(substituted)
+
+
+@pytest.mark.asyncio
+async def test_discovered_executable_disappearance_does_not_rediscover_in_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    discovery_cwd = tmp_path / "discovery"
+    root = tmp_path / "root"
+    repository = root / "repo"
+    discovery_cwd.mkdir()
+    repository.mkdir(parents=True)
+    trusted = _make_executable(discovery_cwd / "grok")
+    _make_executable(repository / "grok")
+    runner = RecordingRunner([_result(_models_output("grok-4.5"))])
+    resolver_calls: list[Path] = []
+
+    def resolver(_: str) -> str:
+        candidate = Path.cwd() / "grok"
+        resolver_calls.append(candidate)
+        return str(candidate)
+
+    monkeypatch.chdir(discovery_cwd)
+    client = _client(root, runner, resolver=resolver)
+    trusted.unlink()
+    monkeypatch.chdir(repository)
+
+    with pytest.raises(GrokError) as caught:
+        await client.models()
+
+    _assert_grok_code(caught, "GROK_BUILD_CLI_NOT_FOUND")
+    assert resolver_calls == [discovery_cwd / "grok"]
+    assert runner.calls == []
 
 
 @pytest.mark.asyncio
@@ -416,9 +566,14 @@ async def test_status_parses_drifted_version_without_identity_or_paths(
 
 
 @pytest.mark.asyncio
-async def test_status_is_the_only_missing_binary_soft_failure() -> None:
+async def test_status_is_the_only_missing_binary_soft_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.chdir(root)
     runner = RecordingRunner([])
-    status_client = _client(None, runner, resolver=lambda _: None)
+    status_client = _client(root, runner, resolver=lambda _: None)
 
     assert await status_client.status() == {
         "installed": False,
@@ -427,7 +582,7 @@ async def test_status_is_the_only_missing_binary_soft_failure() -> None:
         "default_model": None,
         "models_count": 0,
     }
-    action_client = _client(Path.cwd(), runner, resolver=lambda _: None)
+    action_client = _client(root, runner, resolver=lambda _: None)
     with pytest.raises(GrokError) as caught:
         await action_client.models()
 
@@ -571,7 +726,12 @@ async def test_agent_plan_uses_exact_argv_and_projects_only_allowlisted_result(
         "changed_files": ["src/main.py", "new/module.py"],
     }
     argv = runner.calls[1]["argv"]
-    assert argv[:4] == ["grok", "--no-auto-update", "--cwd", str(cwd.resolve())]
+    assert argv[:4] == [
+        str(Path(sys.executable).resolve()),
+        "--no-auto-update",
+        "--cwd",
+        str(cwd.resolve()),
+    ]
     assert argv[argv.index("-p") + 1] == prompt
     assert argv.count(prompt) == 1
     assert argv[argv.index("--output-format") + 1] == "json"
@@ -660,9 +820,53 @@ async def test_agent_rejects_invalid_prompt_without_process(
     root.mkdir()
     runner = RecordingRunner([])
 
-    with pytest.raises(InputValidationError, match="grok_build.prompt"):
+    with pytest.raises(InputValidationError) as caught:
         await _client(root, runner).agent(prompt, cwd=str(root))
 
+    assert caught.value.invariant == (
+        "grok_build.prompt must be 1..65536 UTF-8 bytes"
+    )
+    assert runner.calls == []
+
+
+@pytest.mark.asyncio
+async def test_agent_prompt_encoding_error_has_no_raw_exception_chain(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    runner = RecordingRunner([])
+    planted = "xai-planted-prompt-secret"
+    prompt = f"{planted}\ud800"
+
+    with pytest.raises(InputValidationError) as caught:
+        await _client(root, runner).agent(prompt, cwd=str(root))
+
+    _assert_detached_input_error(
+        caught.value,
+        "grok_build.prompt must be 1..65536 UTF-8 bytes",
+        planted,
+    )
+    assert runner.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prompt", ["\x00", "safe\x00unsafe"])
+async def test_agent_rejects_embedded_nul_before_catalog_or_session(
+    tmp_path: Path, prompt: str
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    runner = RecordingRunner(
+        [_result(_models_output("grok-4.5")), _result('{"text":"done"}')]
+    )
+
+    with pytest.raises(InputValidationError) as caught:
+        await _client(root, runner).agent(prompt, cwd=str(root))
+
+    assert caught.value.invariant == (
+        "grok_build.prompt must be 1..65536 UTF-8 bytes"
+    )
     assert runner.calls == []
 
 

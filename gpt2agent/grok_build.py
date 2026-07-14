@@ -342,8 +342,9 @@ class GrokBuildClient:
         self._runner = runner
         self._resolver = resolver
         self._cwd_policy = cwd_policy or RootPolicy(config.roots)
+        self._command = self._discover_command()
 
-    def _resolved_command(self) -> str:
+    def _discover_command(self) -> str | None:
         expanded = str(Path(self.config.command).expanduser())
         is_explicit = (
             Path(expanded).is_absolute()
@@ -351,17 +352,22 @@ class GrokBuildClient:
             or bool(os.altsep and os.altsep in expanded)
         )
         if is_explicit:
-            return self._validated_executable(expanded)
+            try:
+                return self._validated_executable(expanded)
+            except GrokError:
+                return None
         resolved = self._resolver(expanded)
         if not resolved:
-            raise _grok_error("GROK_BUILD_CLI_NOT_FOUND")
-        if (
-            Path(resolved).is_absolute()
-            or os.sep in resolved
-            or bool(os.altsep and os.altsep in resolved)
-        ):
+            return None
+        try:
             return self._validated_executable(resolved)
-        return resolved
+        except GrokError:
+            return None
+
+    def _resolved_command(self) -> str:
+        if self._command is None:
+            raise _grok_error("GROK_BUILD_CLI_NOT_FOUND")
+        return self._validated_executable(self._command)
 
     @staticmethod
     def _validated_executable(value: str) -> str:
@@ -443,6 +449,7 @@ class GrokBuildClient:
 
     async def status(self) -> dict[str, Any]:
         """Return installed/version/authenticated/catalog counts without identity."""
+        cwd = self._cwd_policy.directory(None)
         try:
             self._resolved_command()
         except GrokError as exc:
@@ -455,7 +462,6 @@ class GrokBuildClient:
                 "default_model": None,
                 "models_count": 0,
             }
-        cwd = self._cwd_policy.directory(None)
         try:
             version_stdout, _ = self._decode(
                 await self._run(["--version"], cwd=cwd)
@@ -591,5 +597,5 @@ class GrokBuildClient:
             size = len(prompt.encode("utf-8"))
         except UnicodeEncodeError:
             raise _invalid("grok_build.prompt must be 1..65536 UTF-8 bytes") from None
-        if not prompt.strip() or size > _PROMPT_MAX_BYTES:
+        if not prompt.strip() or "\x00" in prompt or size > _PROMPT_MAX_BYTES:
             raise _invalid("grok_build.prompt must be 1..65536 UTF-8 bytes")
