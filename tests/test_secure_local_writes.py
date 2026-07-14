@@ -27,6 +27,27 @@ def test_read_private_json_accepts_bounded_current_user_file(tmp_path: Path) -> 
     assert read_private_json(path) == {"access_token": "planted-token"}
 
 
+def test_grok_web_auth_write_is_private_and_round_trips_closed_fixture(
+    tmp_path: Path,
+) -> None:
+    from gpt2agent._secure_file import read_private_json, write_private_json
+
+    path = tmp_path / "private" / "grok-web-auth.json"
+    payload = {
+        "schema_version": 1,
+        "source": "manual",
+        "browser_impersonation": "chrome131",
+        "cookies": [],
+    }
+
+    write_private_json(path, payload)
+
+    assert read_private_json(path) == payload
+    if os.name == "posix":
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
 @pytest.mark.parametrize(
     ("content", "invariant"),
     [
