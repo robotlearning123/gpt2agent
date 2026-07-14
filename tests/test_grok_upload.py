@@ -4,6 +4,7 @@ import errno
 import os
 import socket
 import stat
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,24 @@ def _assert_fd_closed(fd: int) -> None:
     with pytest.raises(OSError) as caught:
         os.fstat(fd)
     assert caught.value.errno == errno.EBADF
+
+
+def _assert_upload_traceback_locals_are_secret_free(
+    error: GrokError, planted: str, expected_function: str
+) -> None:
+    upload_frames: list[str] = []
+    traceback = error.__traceback__
+    while traceback is not None:
+        frame = traceback.tb_frame
+        if Path(frame.f_code.co_filename).name == "grok_upload.py":
+            upload_frames.append(frame.f_code.co_name)
+            assert frame.f_locals.get("self") is None
+            for local_name, value in frame.f_locals.items():
+                assert planted not in repr(value), (
+                    f"{planted!r} retained by {frame.f_code.co_name}.{local_name}"
+                )
+        traceback = traceback.tb_next
+    assert upload_frames == [expected_function]
 
 
 def test_upload_contract_constants_are_fixed() -> None:
@@ -139,6 +158,43 @@ def test_parent_replacement_after_descriptor_open_cannot_redirect_leaf(
         os.close(upload.fd)
 
 
+def test_leaf_swap_immediately_before_open_is_blocked_and_closes_descriptors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import gpt2agent.grok_upload as upload_module
+
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    source = root / "source.txt"
+    source.write_bytes(b"contained")
+    outside_source = outside / "source.txt"
+    outside_source.write_bytes(b"outside")
+    real_open = os.open
+    acquired: list[int] = []
+    swapped = False
+
+    def racing_open(path: str, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal swapped
+        if path == source.name and not flags & os.O_DIRECTORY and not swapped:
+            swapped = True
+            source.unlink()
+            source.symlink_to(outside_source)
+        fd = real_open(path, flags, *args, **kwargs)
+        acquired.append(fd)
+        return fd
+
+    monkeypatch.setattr(upload_module.os, "open", racing_open)
+
+    _rejected_open(GrokUploadPolicy((root,)), str(source))
+
+    assert swapped is True
+    assert source.is_symlink()
+    for fd in acquired:
+        _assert_fd_closed(fd)
+
+
 @pytest.mark.parametrize(
     "value",
     [None, 3, b"/tmp/file.txt", "", "   ", "bad\x00path.txt", "x" * 4_097],
@@ -147,6 +203,95 @@ def test_policy_rejects_invalid_and_overlong_paths(
     tmp_path: Path, value: object
 ) -> None:
     _rejected_open(GrokUploadPolicy((tmp_path,)), value)
+
+
+@pytest.mark.parametrize(
+    "unsafe_leaf",
+    [
+        "line\nbreak.txt",
+        "control\x1fname.txt",
+        "format\u200bname.txt",
+        f"{'é' * 126}.txt",
+    ],
+)
+def test_policy_rejects_nonprintable_and_encoded_overlong_leaf_components(
+    tmp_path: Path, unsafe_leaf: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import gpt2agent.grok_upload as upload_module
+
+    root = tmp_path / "root"
+    root.mkdir()
+    policy = GrokUploadPolicy((root,))
+    open_calls = 0
+    real_open = os.open
+
+    def recording_open(path: str, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal open_calls
+        open_calls += 1
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(upload_module.os, "open", recording_open)
+
+    _rejected_open(policy, str(root / unsafe_leaf))
+
+    assert open_calls == 0
+
+
+def test_policy_applies_a_cheap_character_bound_before_encoding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import gpt2agent.grok_upload as upload_module
+
+    policy = GrokUploadPolicy((tmp_path,))
+    encode_calls = 0
+
+    def recording_encode(path: str) -> bytes:
+        nonlocal encode_calls
+        encode_calls += 1
+        return path.encode()
+
+    monkeypatch.setattr(upload_module.os, "fsencode", recording_encode)
+
+    _rejected_open(policy, "/" + "x" * 4_097)
+
+    assert encode_calls == 0
+
+
+def test_policy_applies_a_cheap_component_bound_before_encoding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import gpt2agent.grok_upload as upload_module
+
+    root = tmp_path / "root"
+    root.mkdir()
+    policy = GrokUploadPolicy((root,))
+    encode_calls = 0
+
+    def recording_encode(path: str) -> bytes:
+        nonlocal encode_calls
+        encode_calls += 1
+        return path.encode()
+
+    monkeypatch.setattr(upload_module.os, "fsencode", recording_encode)
+
+    _rejected_open(policy, str(root / f"{'x' * 256}.txt"))
+
+    assert encode_calls == 0
+
+
+def test_policy_deliberately_allows_printable_unicode_components(tmp_path: Path) -> None:
+    root = tmp_path / "资料"
+    root.mkdir()
+    source = root / "报告.txt"
+    source.write_text("safe unicode")
+
+    upload = GrokUploadPolicy((root,)).open(str(source))
+
+    try:
+        assert upload.name == "报告.txt"
+        assert os.read(upload.fd, 64) == b"safe unicode"
+    finally:
+        os.close(upload.fd)
 
 
 def test_policy_rejects_disabled_relative_parent_and_outside_paths(
@@ -416,6 +561,30 @@ def test_policy_fails_closed_when_required_posix_primitive_is_unavailable(
     _rejected_open(GrokUploadPolicy((root,)), str(source))
 
 
+def test_constructor_error_traceback_scrubs_raw_root_locals() -> None:
+    planted = "xaiCtorTraceSecret42"
+    unsafe_root = Path("/tmp") / planted / ".."
+
+    with pytest.raises(GrokError) as caught:
+        GrokUploadPolicy((unsafe_root,))
+
+    _assert_blocked(caught.value, planted)
+    _assert_upload_traceback_locals_are_secret_free(caught.value, planted, "__init__")
+
+
+def test_open_error_traceback_scrubs_raw_path_and_name_locals(tmp_path: Path) -> None:
+    planted = "xaiOpenTraceSecret42"
+    root = tmp_path / "root"
+    root.mkdir()
+    unsafe_path = str(root / f"{planted}\n.txt")
+
+    with pytest.raises(GrokError) as caught:
+        GrokUploadPolicy((root,)).open(unsafe_path)
+
+    _assert_blocked(caught.value, planted)
+    _assert_upload_traceback_locals_are_secret_free(caught.value, planted, "open")
+
+
 def test_registry_records_and_validates_current_generation_ids() -> None:
     registry = AttachmentRegistry()
 
@@ -462,6 +631,16 @@ def test_registry_rejects_unbounded_or_invalid_server_ids(
     with pytest.raises(GrokError) as caught:
         registry.record(1, attachment_id)  # type: ignore[arg-type]
     _assert_blocked(caught.value, str(attachment_id))
+
+
+def test_record_error_traceback_scrubs_raw_attachment_id_locals() -> None:
+    planted = "xaiRecordTraceSecret42"
+
+    with pytest.raises(GrokError) as caught:
+        AttachmentRegistry().record(1, f"att/{planted}")
+
+    _assert_blocked(caught.value, planted)
+    _assert_upload_traceback_locals_are_secret_free(caught.value, planted, "record")
 
 
 def test_registry_rotates_generation_and_new_process_has_no_ids() -> None:
@@ -549,3 +728,90 @@ def test_registry_returns_an_immutable_tuple_in_caller_order() -> None:
 
     assert result == ("att_c", "att_a", "att_b")
     assert isinstance(result, tuple)
+
+
+def test_registry_uses_one_bounded_iterator_instead_of_a_lying_length() -> None:
+    class LyingSequence(Sequence[str]):
+        def __init__(self) -> None:
+            self.pulls = 0
+
+        def __len__(self) -> int:
+            return 0
+
+        def __getitem__(self, index: int) -> str:
+            if index >= 21:
+                raise IndexError
+            self.pulls += 1
+            return f"att_{index:02d}"
+
+    registry = AttachmentRegistry()
+    for index in range(21):
+        registry.record(1, f"att_{index:02d}")
+    values = LyingSequence()
+
+    with pytest.raises(GrokError) as caught:
+        registry.validate_many(1, values)
+
+    _assert_blocked(caught.value)
+    assert values.pulls == 21
+
+
+def test_registry_does_not_call_mutating_sequence_length() -> None:
+    class MutatingLengthSequence(Sequence[str]):
+        def __init__(self) -> None:
+            self.values = ["att_safe"]
+            self.length_calls = 0
+
+        def __len__(self) -> int:
+            self.length_calls += 1
+            self.values.extend(f"att_added_{index}" for index in range(20))
+            return 1
+
+        def __getitem__(self, index: int) -> str:
+            return self.values[index]
+
+    registry = AttachmentRegistry()
+    registry.record(1, "att_safe")
+    values = MutatingLengthSequence()
+
+    assert registry.validate_many(1, values) == ("att_safe",)
+    assert values.length_calls == 0
+
+
+def test_registry_bounds_a_sequence_that_does_not_terminate_itself() -> None:
+    class GuardedNonterminatingSequence(Sequence[str]):
+        def __init__(self) -> None:
+            self.pulls = 0
+
+        def __len__(self) -> int:
+            return 0
+
+        def __getitem__(self, index: int) -> str:
+            self.pulls += 1
+            if self.pulls > 25:
+                raise RuntimeError("test guard: iteration was not bounded")
+            return "att_forever"
+
+    registry = AttachmentRegistry()
+    registry.record(1, "att_forever")
+    values = GuardedNonterminatingSequence()
+
+    with pytest.raises(GrokError) as caught:
+        registry.validate_many(1, values)
+
+    _assert_blocked(caught.value)
+    assert values.pulls == 21
+
+
+def test_validate_many_error_traceback_scrubs_raw_id_and_sequence_locals() -> None:
+    planted = "xaiValidateTraceSecret42"
+    registry = AttachmentRegistry()
+    registry.record(2, "att_safe")
+
+    with pytest.raises(GrokError) as caught:
+        registry.validate_many(2, [f"att_{planted}"])
+
+    _assert_blocked(caught.value, planted)
+    _assert_upload_traceback_locals_are_secret_free(
+        caught.value, planted, "validate_many"
+    )

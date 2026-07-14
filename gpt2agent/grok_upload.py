@@ -12,6 +12,7 @@ import stat
 from collections import OrderedDict
 from collections.abc import Sequence, Set
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import AbstractSet, Any
 
@@ -44,6 +45,9 @@ _SUFFIX_MEDIA_TYPES = {
     ".webp": "image/webp",
 }
 _MAX_PATH_BYTES = 4_096
+_MAX_PATH_CHARS = 4_096
+_MAX_COMPONENT_CHARS = 255
+_MAX_COMPONENT_BYTES = 255
 _READ_CHUNK_BYTES = 64 * 1024
 _REGISTRY_CAPACITY = 256
 _MAX_ATTACHMENTS_PER_REQUEST = 20
@@ -95,24 +99,48 @@ def _validated_root_parts(roots: Sequence[Path]) -> tuple[tuple[str, ...], ...]:
         if not isinstance(root, Path) or not root.is_absolute():
             raise _blocked()
         raw = os.fspath(root)
-        if "\x00" in raw or len(os.fsencode(raw)) > _MAX_PATH_BYTES:
+        if len(raw) > _MAX_PATH_CHARS or "\x00" in raw:
             raise _blocked()
         parts = root.parts
         if not parts or parts[0] != os.sep or any(part in {"", ".", ".."} for part in parts[1:]):
+            raise _blocked()
+        for component in parts[1:]:
+            _validate_component_characters(component)
+        for component in parts[1:]:
+            _validate_component_bytes(component)
+        if len(os.fsencode(raw)) > _MAX_PATH_BYTES:
             raise _blocked()
         normalized.append(tuple(parts[1:]))
     return tuple(sorted(set(normalized), key=len, reverse=True))
 
 
-def _validated_target_parts(path: Any) -> tuple[str, ...]:
-    if not isinstance(path, str) or not path.strip() or "\x00" in path:
+def _validate_component_characters(component: str) -> None:
+    if len(component) > _MAX_COMPONENT_CHARS or not component.isprintable():
         raise _blocked()
-    if len(os.fsencode(path)) > _MAX_PATH_BYTES or not path.startswith(os.sep):
+
+
+def _validate_component_bytes(component: str) -> None:
+    if len(os.fsencode(component)) > _MAX_COMPONENT_BYTES:
+        raise _blocked()
+
+
+def _validated_target_parts(path: Any) -> tuple[str, ...]:
+    if not isinstance(path, str) or len(path) > _MAX_PATH_CHARS:
+        raise _blocked()
+    if not path.strip() or "\x00" in path:
+        raise _blocked()
+    if not path.startswith(os.sep):
         raise _blocked()
     if path.startswith(os.sep * 2):
         raise _blocked()
     components = path.split(os.sep)
     if any(component in {"", ".", ".."} for component in components[1:]):
+        raise _blocked()
+    for component in components[1:]:
+        _validate_component_characters(component)
+    for component in components[1:]:
+        _validate_component_bytes(component)
+    if len(os.fsencode(path)) > _MAX_PATH_BYTES:
         raise _blocked()
     return tuple(components[1:])
 
@@ -190,6 +218,48 @@ def _validate_descriptor(fd: int, maximum_bytes: int) -> int:
     return total
 
 
+def _validated_policy_configuration(
+    roots: Sequence[Path], maximum_bytes: int, allowed_types: AbstractSet[str]
+) -> tuple[tuple[tuple[str, ...], ...], int, frozenset[str]]:
+    if (
+        isinstance(maximum_bytes, bool)
+        or not isinstance(maximum_bytes, int)
+        or not 1 <= maximum_bytes <= DEFAULT_UPLOAD_MAX_BYTES
+    ):
+        raise _blocked()
+    if not isinstance(allowed_types, Set):
+        raise _blocked()
+    normalized_types = frozenset(allowed_types)
+    if (
+        not all(isinstance(value, str) for value in normalized_types)
+        or not normalized_types <= DEFAULT_UPLOAD_TYPES
+    ):
+        raise _blocked()
+    return _validated_root_parts(roots), maximum_bytes, normalized_types
+
+
+def _open_validated_upload(
+    roots: tuple[tuple[str, ...], ...],
+    maximum_bytes: int,
+    allowed_types: frozenset[str],
+    path: str,
+) -> ValidatedUpload:
+    target = _validated_target_parts(path)
+    root, relative = _relative_to_configured_root(target, roots)
+    name = relative[-1]
+    media_type = _media_type_for_name(name, allowed_types)
+    fd = _open_descriptor_relative(root, relative)
+    keep_fd = False
+    try:
+        size = _validate_descriptor(fd, maximum_bytes)
+        result = ValidatedUpload(fd=fd, name=name, media_type=media_type, size=size)
+        keep_fd = True
+        return result
+    finally:
+        if not keep_fd:
+            _close_quietly(fd)
+
+
 class GrokUploadPolicy:
     def __init__(
         self,
@@ -198,57 +268,41 @@ class GrokUploadPolicy:
         maximum_bytes: int = DEFAULT_UPLOAD_MAX_BYTES,
         allowed_types: AbstractSet[str] = DEFAULT_UPLOAD_TYPES,
     ) -> None:
-        failure: GrokError | None = None
-        normalized_roots: tuple[tuple[str, ...], ...] = ()
-        normalized_types: frozenset[str] = frozenset()
+        failed = False
+        configuration: tuple[tuple[tuple[str, ...], ...], int, frozenset[str]] | None = None
         try:
-            if (
-                isinstance(maximum_bytes, bool)
-                or not isinstance(maximum_bytes, int)
-                or not 1 <= maximum_bytes <= DEFAULT_UPLOAD_MAX_BYTES
-            ):
-                raise _blocked()
-            if not isinstance(allowed_types, Set):
-                raise _blocked()
-            normalized_types = frozenset(allowed_types)
-            if (
-                not all(isinstance(value, str) for value in normalized_types)
-                or not normalized_types <= DEFAULT_UPLOAD_TYPES
-            ):
-                raise _blocked()
-            normalized_roots = _validated_root_parts(roots)
+            configuration = _validated_policy_configuration(
+                roots, maximum_bytes, allowed_types
+            )
         except Exception:
-            failure = _blocked()
-        if failure is not None:
-            raise failure
+            failed = True
+        roots = ()
+        maximum_bytes = 0
+        allowed_types = frozenset()
+        if failed or configuration is None:
+            configuration = None
+            self = None  # type: ignore[assignment]
+            raise _blocked()
 
-        self._roots = normalized_roots
-        self._maximum_bytes = maximum_bytes
-        self._allowed_types = normalized_types
+        self._roots, self._maximum_bytes, self._allowed_types = configuration
 
     def open(self, path: str) -> ValidatedUpload:
         """Open one root-contained file; the caller owns the returned descriptor."""
-        failure: GrokError | None = None
+        failed = False
         result: ValidatedUpload | None = None
         try:
-            target = _validated_target_parts(path)
-            root, relative = _relative_to_configured_root(target, self._roots)
-            name = relative[-1]
-            media_type = _media_type_for_name(name, self._allowed_types)
-            fd = _open_descriptor_relative(root, relative)
-            keep_fd = False
-            try:
-                size = _validate_descriptor(fd, self._maximum_bytes)
-                result = ValidatedUpload(fd=fd, name=name, media_type=media_type, size=size)
-                keep_fd = True
-            finally:
-                if not keep_fd:
-                    _close_quietly(fd)
+            result = _open_validated_upload(
+                self._roots,
+                self._maximum_bytes,
+                self._allowed_types,
+                path,
+            )
         except Exception:
-            failure = _blocked()
-        if failure is not None:
-            raise failure
-        if result is None:  # pragma: no cover - defensive control-flow guard
+            failed = True
+        path = ""
+        if failed or result is None:
+            result = None
+            self = None  # type: ignore[assignment]
             raise _blocked()
         return result
 
@@ -265,53 +319,73 @@ def _validated_attachment_id(value: Any) -> str:
     return value
 
 
+def _record_attachment(
+    registry: AttachmentRegistry, auth_generation: int, attachment_id: str
+) -> None:
+    generation = _validated_generation(auth_generation)
+    identifier = _validated_attachment_id(attachment_id)
+    if registry._generation != generation:
+        if registry._generation is not None and generation < registry._generation:
+            raise _blocked()
+        registry._entries.clear()
+        registry._generation = generation
+    if identifier not in registry._entries:
+        registry._entries[identifier] = None
+        if len(registry._entries) > _REGISTRY_CAPACITY:
+            registry._entries.popitem(last=False)
+
+
+def _validated_attachments(
+    registry: AttachmentRegistry,
+    auth_generation: int,
+    attachment_ids: Sequence[str],
+) -> tuple[str, ...]:
+    generation = _validated_generation(auth_generation)
+    if isinstance(attachment_ids, (str, bytes, bytearray)) or not isinstance(
+        attachment_ids, Sequence
+    ):
+        raise _blocked()
+    values = tuple(islice(iter(attachment_ids), _MAX_ATTACHMENTS_PER_REQUEST + 1))
+    if len(values) > _MAX_ATTACHMENTS_PER_REQUEST:
+        raise _blocked()
+    values = tuple(_validated_attachment_id(value) for value in values)
+    if values and registry._generation != generation:
+        raise _blocked()
+    if len(set(values)) != len(values) or any(value not in registry._entries for value in values):
+        raise _blocked()
+    return values
+
+
 class AttachmentRegistry:
     def __init__(self) -> None:
         self._generation: int | None = None
         self._entries: OrderedDict[str, None] = OrderedDict()
 
     def record(self, auth_generation: int, attachment_id: str) -> None:
-        failure: GrokError | None = None
+        failed = False
         try:
-            generation = _validated_generation(auth_generation)
-            identifier = _validated_attachment_id(attachment_id)
-            if self._generation != generation:
-                if self._generation is not None and generation < self._generation:
-                    raise _blocked()
-                self._entries.clear()
-                self._generation = generation
-            if identifier not in self._entries:
-                self._entries[identifier] = None
-                if len(self._entries) > _REGISTRY_CAPACITY:
-                    self._entries.popitem(last=False)
+            _record_attachment(self, auth_generation, attachment_id)
         except Exception:
-            failure = _blocked()
-        if failure is not None:
-            raise failure
+            failed = True
+        auth_generation = 0
+        attachment_id = ""
+        if failed:
+            self = None  # type: ignore[assignment]
+            raise _blocked()
 
     def validate_many(
         self, auth_generation: int, attachment_ids: Sequence[str]
     ) -> tuple[str, ...]:
-        failure: GrokError | None = None
+        failed = False
         result: tuple[str, ...] | None = None
         try:
-            generation = _validated_generation(auth_generation)
-            if (
-                isinstance(attachment_ids, (str, bytes, bytearray))
-                or not isinstance(attachment_ids, Sequence)
-                or len(attachment_ids) > _MAX_ATTACHMENTS_PER_REQUEST
-            ):
-                raise _blocked()
-            values = tuple(_validated_attachment_id(value) for value in attachment_ids)
-            if values and self._generation != generation:
-                raise _blocked()
-            if len(set(values)) != len(values) or any(value not in self._entries for value in values):
-                raise _blocked()
-            result = values
+            result = _validated_attachments(self, auth_generation, attachment_ids)
         except Exception:
-            failure = _blocked()
-        if failure is not None:
-            raise failure
-        if result is None:  # pragma: no cover - defensive control-flow guard
+            failed = True
+        auth_generation = 0
+        attachment_ids = ()
+        if failed or result is None:
+            result = None
+            self = None  # type: ignore[assignment]
             raise _blocked()
         return result
