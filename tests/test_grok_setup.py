@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from gpt2agent._bounded_process import ProcessResult
+from gpt2agent._secure_file import write_private_json
 from gpt2agent.grok_errors import GrokError
 from gpt2agent.grok_setup import (
     import_browser_web_auth,
@@ -364,6 +365,84 @@ async def test_missing_browser_automatically_uses_hidden_manual_fallback(
 
     assert status["authenticated"] is True
     assert status["cookie_names"] == ["sso", "sso-rw"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_name", ["sso", "sso-rw"])
+@pytest.mark.parametrize(
+    ("case", "invalid_value"),
+    [
+        ("blank", ""),
+        ("blank-whitespace", "   "),
+        ("control", "planted-control\nsecret"),
+        ("oversized", "planted-" + "x" * (16_385 - len("planted-"))),
+    ],
+    ids=("blank", "blank-whitespace", "control", "oversized"),
+)
+async def test_invalid_manual_cookie_preserves_existing_private_auth(
+    tmp_path: Path,
+    invalid_name: str,
+    case: str,
+    invalid_value: str,
+) -> None:
+    now = int(time.time())
+    path = tmp_path / "private" / "grok-web-auth.json"
+    existing = {
+        "schema_version": 1,
+        "source": "manual",
+        "browser_impersonation": "chrome131",
+        "cookies": [
+            {
+                "name": name,
+                "domain": ".grok.com",
+                "path": "/",
+                "expires": now + 3_600,
+                "secure": True,
+                "http_only": True,
+                "value": f"planted-existing-{name}-secret",
+            }
+            for name in ("sso", "sso-rw")
+        ],
+    }
+    write_private_json(path, existing)
+    original_bytes = path.read_bytes()
+    original_stat = path.stat()
+    original_fingerprint = (
+        original_stat.st_dev,
+        original_stat.st_ino,
+        original_stat.st_size,
+        original_stat.st_mtime_ns,
+    )
+    answers = {
+        "sso": invalid_value
+        if invalid_name == "sso"
+        else "planted-replacement-sso-secret",
+        "sso-rw": invalid_value
+        if invalid_name == "sso-rw"
+        else "planted-replacement-rw-secret",
+    }
+    supplied = iter((answers["sso"], answers["sso-rw"]))
+
+    with pytest.raises(GrokError) as caught:
+        await setup_web_auth(
+            path,
+            manual=True,
+            getpass_fn=lambda _: next(supplied),
+        )
+
+    assert caught.value.code == "GROK_WEB_AUTH_MISSING"
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    if invalid_value:
+        assert invalid_value not in str(caught.value)
+    assert path.read_bytes() == original_bytes
+    current_stat = path.stat()
+    assert (
+        current_stat.st_dev,
+        current_stat.st_ino,
+        current_stat.st_size,
+        current_stat.st_mtime_ns,
+    ) == original_fingerprint, case
 
 
 class _TypedBuildFailure:

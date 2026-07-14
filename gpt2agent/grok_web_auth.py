@@ -78,7 +78,7 @@ def _fingerprint(path: Path) -> tuple[int, int, int, int]:
 
 
 def _bounded_cookie_value(value: Any) -> bool:
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str) or not value.strip():
         return False
     try:
         encoded = value.encode("utf-8")
@@ -90,7 +90,13 @@ def _bounded_cookie_value(value: Any) -> bool:
     )
 
 
-def _validate_payload(payload: Any, *, now: int) -> tuple[dict[str, str], str, int]:
+def validate_grok_web_auth_document(
+    payload: Any,
+    *,
+    now: int | None = None,
+) -> tuple[dict[str, str], str, int]:
+    """Validate one complete closed auth document without reading or writing."""
+    current_time = int(time.time()) if now is None else now
     if not isinstance(payload, dict) or frozenset(payload) != _ROOT_FIELDS:
         raise _error("GROK_WEB_AUTH_MISSING")
     if payload.get("schema_version") != 1 or payload.get("source") not in {
@@ -130,7 +136,7 @@ def _validate_payload(payload: Any, *, now: int) -> tuple[dict[str, str], str, i
             or not _bounded_cookie_value(raw_cookie.get("value"))
         ):
             raise _error("GROK_WEB_AUTH_MISSING")
-        if expires <= now:
+        if expires <= current_time:
             raise _error("GROK_WEB_AUTH_EXPIRED")
         cookies[name] = raw_cookie["value"]
         expirations.append(expires)
@@ -169,7 +175,7 @@ class GrokWebAuthStore:
             if before != after:
                 continue
             try:
-                cookies, profile, expires_at = _validate_payload(
+                cookies, profile, expires_at = validate_grok_web_auth_document(
                     payload,
                     now=int(time.time()),
                 )

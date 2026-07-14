@@ -26,6 +26,7 @@ from .grok_errors import GrokError
 from .grok_web_auth import (
     GrokWebAuthStore,
     browser_impersonation_by_major,
+    validate_grok_web_auth_document,
 )
 
 
@@ -231,16 +232,15 @@ async def import_browser_web_auth(
             cookie_data.get("cookies"),
             compatible_profile=compatible_profile,
         )
-        write_private_json(
-            path,
-            {
-                "schema_version": 1,
-                "source": "browser-use",
-                "browser_impersonation": compatible_profile
-                or _default_browser_profile(),
-                "cookies": cookies,
-            },
-        )
+        document = {
+            "schema_version": 1,
+            "source": "browser-use",
+            "browser_impersonation": compatible_profile
+            or _default_browser_profile(),
+            "cookies": cookies,
+        }
+        validate_grok_web_auth_document(document)
+        write_private_json(path, document)
         status = GrokWebAuthStore(path).status()
         if status.get("authenticated") is not True:
             failure = _error("GROK_WEB_AUTH_MISSING")
@@ -299,7 +299,9 @@ def _manual_document(getpass_fn: Getpass) -> dict[str, Any]:
 async def _manual_web_auth(path: Path, getpass_fn: Getpass) -> dict[str, Any]:
     failure: GrokError | None = None
     try:
-        write_private_json(path, _manual_document(getpass_fn))
+        document = _manual_document(getpass_fn)
+        validate_grok_web_auth_document(document)
+        write_private_json(path, document)
         status = GrokWebAuthStore(path).status()
         if status.get("authenticated") is not True:
             failure = _error("GROK_WEB_AUTH_MISSING")
