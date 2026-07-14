@@ -370,12 +370,16 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         raise ValueError("server.host must be a loopback address")
 
     from gpt2agent.backend import BackendClient
+    from gpt2agent.grok_build import GrokBuildClient, GrokBuildConfig
     from gpt2agent.model_catalog import ModelCatalog
     from gpt2agent.sse import ConversationClient
 
     _backend = BackendClient()
     model_catalog = ModelCatalog(_backend)
     conv = ConversationClient(_backend)
+    grok_build_client = GrokBuildClient(
+        GrokBuildConfig.from_mapping(cfg.get("grok_build", {}))
+    )
 
     mcp = FastMCP(
         "gpt2agent",
@@ -570,7 +574,13 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
     from gpt2agent.tools import register_all
 
-    register_all(mcp, _backend, conv, model_catalog=model_catalog)
+    register_all(
+        mcp,
+        _backend,
+        conv,
+        model_catalog=model_catalog,
+        grok_build_client=grok_build_client,
+    )
 
     return mcp
 
