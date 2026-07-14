@@ -31,6 +31,23 @@ def test_root_policy_rejects_non_path_values_with_the_fixed_invariant(
     _assert_cwd_rejected(RootPolicy((tmp_path,)), 42)  # type: ignore[arg-type]
 
 
+def test_root_policy_resolution_error_has_no_raw_exception_chain(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    planted = "xai-planted-absolute-cwd-secret"
+    missing = (root / planted / "missing").absolute()
+
+    with pytest.raises(InputValidationError) as caught:
+        RootPolicy((root,)).directory(missing)
+
+    assert caught.value.invariant == _CWD_INVARIANT
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert str(missing) not in str(caught.value)
+
+
 def test_root_policy_returns_canonical_contained_directory(tmp_path: Path) -> None:
     root = tmp_path / "root"
     nested = root / "source" / "package"

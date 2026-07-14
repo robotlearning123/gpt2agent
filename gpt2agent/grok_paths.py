@@ -21,12 +21,17 @@ class RootPolicy:
         """Return one existing directory contained by a configured root."""
         if not self.roots:
             raise InputValidationError(_CWD_INVARIANT)
+        resolution_failed = False
+        resolved: Path | None = None
+        is_directory = False
         try:
             candidate = Path.cwd() if value is None else Path(value).expanduser()
             resolved = candidate.resolve(strict=True)
             is_directory = resolved.is_dir()
         except (OSError, RuntimeError, TypeError, ValueError):
-            raise InputValidationError(_CWD_INVARIANT) from None
+            resolution_failed = True
+        if resolution_failed or resolved is None:
+            raise InputValidationError(_CWD_INVARIANT)
         if not is_directory or not any(
             resolved == root or root in resolved.parents for root in self.roots
         ):

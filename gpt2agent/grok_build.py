@@ -73,10 +73,14 @@ def _finite_float(value: Any, invariant: str) -> float:
         raise _invalid(invariant)
     if isinstance(value, float) and not math.isfinite(value):
         raise _invalid(invariant)
+    conversion_failed = False
+    result = 0.0
     try:
         result = float(value)
     except (TypeError, ValueError, OverflowError):
-        raise _invalid(invariant) from None
+        conversion_failed = True
+    if conversion_failed:
+        raise _invalid(invariant)
     if not math.isfinite(result):
         raise _invalid(invariant)
     return result
@@ -89,10 +93,14 @@ def _bounded_int(value: Any, invariant: str, minimum: int, maximum: int) -> int:
         not math.isfinite(value) or not value.is_integer()
     ):
         raise _invalid(invariant)
+    conversion_failed = False
+    result = 0
     try:
         result = int(value)
     except (TypeError, ValueError, OverflowError):
-        raise _invalid(invariant) from None
+        conversion_failed = True
+    if conversion_failed:
+        raise _invalid(invariant)
     if not minimum <= result <= maximum:
         raise _invalid(invariant)
     return result
@@ -593,9 +601,13 @@ class GrokBuildClient:
     def _validate_prompt(prompt: str) -> None:
         if not isinstance(prompt, str):
             raise _invalid("grok_build.prompt must be 1..65536 UTF-8 bytes")
+        encoding_failed = False
+        size = 0
         try:
             size = len(prompt.encode("utf-8"))
         except UnicodeEncodeError:
-            raise _invalid("grok_build.prompt must be 1..65536 UTF-8 bytes") from None
+            encoding_failed = True
+        if encoding_failed:
+            raise _invalid("grok_build.prompt must be 1..65536 UTF-8 bytes")
         if not prompt.strip() or "\x00" in prompt or size > _PROMPT_MAX_BYTES:
             raise _invalid("grok_build.prompt must be 1..65536 UTF-8 bytes")
