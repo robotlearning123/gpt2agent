@@ -156,6 +156,44 @@ async def test_run_bounded_process_timeout_kills_sigterm_resistant_grandchild(
                 os.kill(grandchild_pid, signal.SIGKILL)
 
 
+@pytest.mark.parametrize("returncode", [0, 7])
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group regression")
+@pytest.mark.asyncio
+async def test_run_bounded_process_normal_return_cleans_up_detached_descendant(
+    tmp_path: Path, returncode: int
+) -> None:
+    descendant_pid_file = tmp_path / f"descendant-{returncode}.pid"
+    descendant_code = "import time; time.sleep(30)"
+    parent_code = (
+        "import pathlib, subprocess, sys; "
+        f"child = subprocess.Popen([sys.executable, '-c', {descendant_code!r}], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, "
+        "stderr=subprocess.DEVNULL); "
+        f"pathlib.Path({str(descendant_pid_file)!r}).write_text(str(child.pid)); "
+        "print('out'); print('err', file=sys.stderr); "
+        f"sys.exit({returncode})"
+    )
+
+    try:
+        result = await run_bounded_process(
+            [sys.executable, "-c", parent_code],
+            cwd=tmp_path,
+            env=os.environ.copy(),
+            timeout_seconds=5.0,
+            max_output_bytes=1024,
+        )
+        await _wait_for_file(descendant_pid_file)
+        descendant_pid = int(descendant_pid_file.read_text())
+
+        assert result == ProcessResult(returncode, b"out\n", b"err\n")
+        assert not _pid_is_running(descendant_pid)
+    finally:
+        if descendant_pid_file.exists():
+            descendant_pid = int(descendant_pid_file.read_text())
+            if _pid_is_running(descendant_pid):
+                os.kill(descendant_pid, signal.SIGKILL)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX leak check")
 @pytest.mark.asyncio
 async def test_run_bounded_process_output_cap_stops_live_producer(

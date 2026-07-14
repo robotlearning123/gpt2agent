@@ -316,7 +316,10 @@ async def run_bounded_process(
         returncode, stdout, stderr = await asyncio.wait_for(
             asyncio.gather(*tasks), timeout=timeout_seconds
         )
-        return ProcessResult(returncode, stdout, stderr)
+        result = ProcessResult(returncode, stdout, stderr)
+        if os.name == "posix":
+            await _terminate_process_group(process, windows_job)
+        return result
     except asyncio.TimeoutError as exc:
         for task in tasks:
             if not task.done():
