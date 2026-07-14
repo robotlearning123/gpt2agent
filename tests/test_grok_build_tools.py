@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -11,6 +12,7 @@ import gpt2agent.backend as backend_module
 import gpt2agent.server as server_module
 import gpt2agent.sse as sse_module
 from gpt2agent.errors import InputValidationError
+from gpt2agent.grok_build import GrokBuildClient
 from gpt2agent.tool_manifest import CHATGPT_TOOL_NAMES, GROK_TOOL_NAMES, TOOL_NAMES
 from gpt2agent.tools import grok_build
 
@@ -218,7 +220,28 @@ def test_provider_manifests_partition_the_exact_global_manifest() -> None:
     assert len(CHATGPT_TOOL_NAMES) + len(GROK_TOOL_NAMES) == len(TOOL_NAMES)
 
 
-def test_server_registers_build_tools_without_binary_roots_or_auth(monkeypatch) -> None:
+def test_server_registers_build_tools_without_binary_roots_or_auth(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for name in (
+        "GROK_AUTH_PATH",
+        "GROK_CODE_XAI_API_KEY",
+        "GROK_HOME",
+        "XAI_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    def unexpected_startup_probe(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("Grok Build account or execution probe ran during startup")
+
+    for method_name in ("_run", "status", "models", "agent"):
+        monkeypatch.setattr(
+            GrokBuildClient,
+            method_name,
+            unexpected_startup_probe,
+        )
     monkeypatch.setattr(server_module, "FastMCP", _RecordingMCP)
     monkeypatch.setattr(backend_module, "BackendClient", _Backend)
     monkeypatch.setattr(sse_module, "ConversationClient", _Conversation)
@@ -227,7 +250,7 @@ def test_server_registers_build_tools_without_binary_roots_or_auth(monkeypatch) 
         {
             "server": {"host": "127.0.0.1", "port": 9000},
             "models": {"chat": "gpt-5-3"},
-            "grok_build": {"command": "/definitely/missing/grok", "roots": []},
+            "grok_build": {"command": str(tmp_path / "missing-grok"), "roots": []},
         }
     )
 
