@@ -13,7 +13,17 @@ $CODEX_HOME/auth.json (default ~/.codex/auth.json) ← bearer, auto-refreshed by
         │                                     ├── /conversation, /f/conversation   (SSE)
         │                                     └── /me, /models, /memories, /codex,  (REST)
         │                                         /gizmos, /files, /apps, ...
-   32 MCP tools + 2 packaged MCP resources
+   all registered ChatGPT tools + 2 packaged MCP resources
+```
+
+The Grok Build path is separate:
+
+```text
+configured repository root
+        │
+   gpt2agent (bounded stdio child)
+        │
+   official Grok Build CLI (subscription/OAuth; CLI-owned session history)
 ```
 
 ## Request path
@@ -75,6 +85,20 @@ General and Work model metadata use separate 60-second caches keyed by that auth
 generation. `chat` and `agent` validate their selected general model; `chat`
 also validates any optional `thinking_effort`. Work-only identifiers never leak
 into general chat validation.
+
+Grok Build never receives either ChatGPT auth source. gpt2agent also strips
+`XAI_API_KEY` and `GROK_CODE_XAI_API_KEY` from the CLI environment, so the Build
+path uses the official CLI's separate subscription/OAuth state. Explicit
+`GROK_HOME` and `GROK_AUTH_PATH` locations can be configured. No ChatGPT, Build,
+or website authentication lane falls back to another.
+
+Build command execution is constrained to configured roots and bounded by time
+and output size. Empty roots disable both probes and agent sessions. Plan mode
+uses the CLI's plan/read-only sandbox; apply is an explicit destructive choice
+using the strict sandbox. The CLI retains history; gpt2agent exposes only a
+sanitized session ID, not a transcript or resume/delete operation. See xAI's
+[CLI reference](https://docs.x.ai/build/cli/reference) and [headless scripting
+guide](https://docs.x.ai/build/cli/headless-scripting).
 
 ## Bounded request policy
 

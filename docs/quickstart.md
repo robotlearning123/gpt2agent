@@ -41,6 +41,24 @@ If you've run `codex login`, you're done — gpt2agent picks up the token automa
 No codex? Run `gpt2agent setup` to paste a ChatGPT token once
 (saved to `~/.gpt2agent/token.json`, mode `600`).
 
+For Grok repository coding, install and authenticate the official Grok Build
+CLI separately using xAI's [enterprise/authentication
+guidance](https://docs.x.ai/build/enterprise). Do not paste its credential into
+gpt2agent. Add an explicit root to `~/.gpt2agent/config.toml`; the empty default
+disables all Build probes and actions:
+
+```toml
+[grok_build]
+command = "grok"
+roots = ["/absolute/path/to/repository-root"]
+timeout_seconds = 120
+max_output_bytes = 1048576
+default_max_turns = 20
+```
+
+Start the MCP server from within that root. ChatGPT auth and Grok Build OAuth
+remain independent and never fall back to one another.
+
 ## 4. Verify
 
 ```bash
@@ -50,9 +68,10 @@ gpt2agent run --stdio        # smoke test: should start and wait on stdin (Ctrl-
 
 Then **restart your MCP client** (Claude Code spawns the server fresh on restart;
 Codex picks it up on next run). Ask your agent to call `account_status`, then
-list the server's MCP tools and resources. Version 0.0.12 exposes exactly 32
-tools plus the static `chatgpt://feature-coverage` and
-`chatgpt://update-evidence` resources.
+list all registered tools and resources. The ChatGPT provider exposes the static
+`chatgpt://feature-coverage` and `chatgpt://update-evidence` resources. For the
+official CLI lane, call read-only `grok_build_status` and `grok_build_models`
+only after configuring a root.
 
 ## 5. First calls
 
@@ -63,6 +82,15 @@ tools plus the static `chatgpt://feature-coverage` and
 - `account_capabilities` — get shape-only, explicit current account truth.
 - `list_scheduled_tasks` — inspect scheduled automations; use `list_tasks` for
   generic background jobs.
+- `grok_build_agent` — repository coding through the official CLI. Use the
+  default `mode="plan"`; select `mode="apply"` only when the user explicitly
+  authorizes source changes. The tool is always annotated destructive.
+
+The CLI retains its own session history. gpt2agent returns a sanitized session
+ID but does not copy transcripts or expose resume/deletion operations. See the
+official [CLI reference](https://docs.x.ai/build/cli/reference), [headless
+scripting](https://docs.x.ai/build/cli/headless-scripting), and [modes and
+commands](https://docs.x.ai/build/modes-and-commands) documentation.
 
 > **Heads up:** `chat` defaults to `temporary=True`, which disables image gen / code
 > interpreter / canvas. Use the dedicated tools (`generate_image`, `code_interpreter`,

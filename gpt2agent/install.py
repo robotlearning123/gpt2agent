@@ -713,7 +713,7 @@ def install_claude_skill(
     The deep-research skill calls gpt2agent's ConversationClient directly
     (bypasses MCP) so it works even before restarting Claude Code.
     The gpt2agent skill provides full account access instructions and
-    pre-approves all 32 MCP tools.
+    pre-approves all registered MCP tools.
 
     The historical top-level result describes the final skill; ``skills``
     reports every attempted bundle without breaking existing callers.

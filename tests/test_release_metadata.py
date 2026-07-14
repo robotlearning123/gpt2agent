@@ -395,14 +395,115 @@ def test_release_workflow_uses_shared_exact_changelog_extractor() -> None:
     assert 'if ($0 ~ "## \\\\[" ver "\\\\]")' not in release
 
 
-def test_active_plugin_surfaces_advertise_current_tool_count() -> None:
+def test_active_product_surfaces_are_provider_aware_and_count_independent() -> None:
     marketplace = json.loads(
         (PROJECT_ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8")
     )
+    plugin = json.loads(
+        (PROJECT_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+    )
+    server = json.loads((PROJECT_ROOT / "server.json").read_text(encoding="utf-8"))
     installer = (PROJECT_ROOT / "gpt2agent" / "install.py").read_text(encoding="utf-8")
+    active_prose = "\n".join(
+        (PROJECT_ROOT / relative).read_text(encoding="utf-8")
+        for relative in (
+            "README.md",
+            "SECURITY.md",
+            "docs/README.md",
+            "docs/configuration.md",
+            "docs/how-it-works.md",
+            "docs/quickstart.md",
+            "docs/troubleshooting.md",
+            "docs/faq.md",
+            "gpt2agent/skills/gpt2agent/SKILL.md",
+            "gpt2agent/skills/gpt2agent/tools-reference.md",
+        )
+    )
 
-    assert "32 MCP tools" in marketplace["plugins"][0]["description"]
-    assert "pre-approves all 32 MCP tools" in installer
+    for text in (
+        active_prose,
+        marketplace["plugins"][0]["description"],
+        plugin["description"],
+        server["description"],
+        installer,
+    ):
+        assert "32" + " MCP tools" not in text
+        assert "all 32 tools" not in text
+    assert (
+        "ChatGPT tools plus Grok Build tools"
+        in marketplace["plugins"][0]["description"]
+    )
+    assert "ChatGPT tools plus Grok Build tools" in plugin["description"]
+    assert "ChatGPT tools plus Grok Build tools" in server["description"]
+    assert "pre-approves all registered MCP tools" in installer
+
+
+def test_active_docs_cover_only_the_implemented_grok_build_surface() -> None:
+    config = (PROJECT_ROOT / "config.example.toml").read_text(encoding="utf-8")
+    docs = "\n".join(
+        (PROJECT_ROOT / relative).read_text(encoding="utf-8")
+        for relative in (
+            "README.md",
+            "SECURITY.md",
+            "docs/configuration.md",
+            "docs/how-it-works.md",
+            "docs/quickstart.md",
+            "docs/troubleshooting.md",
+            "docs/faq.md",
+            "gpt2agent/skills/gpt2agent/SKILL.md",
+            "gpt2agent/skills/gpt2agent/tools-reference.md",
+        )
+    )
+
+    expected_config = """[grok_build]
+command = "grok"
+# home = "~/.grok"
+# auth_path = "~/.grok/auth.json"
+roots = []
+timeout_seconds = 120
+max_output_bytes = 1048576
+default_max_turns = 20"""
+    assert expected_config in config
+    for tool_name in (
+        "grok_build_agent",
+        "grok_build_models",
+        "grok_build_status",
+    ):
+        assert tool_name in docs
+    for unavailable_tool in (
+        "grok_chat",
+        "grok_heavy",
+        "grok_web_status",
+        "grok_upload_file",
+    ):
+        assert unavailable_tool not in docs
+    for reference in (
+        "https://docs.x.ai/build/enterprise",
+        "https://docs.x.ai/build/cli/reference",
+        "https://docs.x.ai/build/cli/headless-scripting",
+        "https://docs.x.ai/build/modes-and-commands",
+    ):
+        assert reference in docs
+    for error_code in (
+        "GROK_BUILD_CLI_NOT_FOUND",
+        "GROK_BUILD_AUTH_MISSING",
+        "GROK_BUILD_QUOTA",
+        "GROK_BUILD_TIMEOUT",
+        "GROK_BUILD_OUTPUT_TOO_LARGE",
+        "GROK_BUILD_FAILED",
+    ):
+        assert error_code in docs
+
+
+def test_package_smoke_checks_source_and_installed_provider_manifests() -> None:
+    smoke = (PROJECT_ROOT / "scripts" / "package_smoke.sh").read_text(encoding="utf-8")
+
+    assert "len(TOOL_NAMES)" + " == 32" not in smoke
+    assert "CHATGPT_TOOL_NAMES" in smoke
+    assert "GROK_TOOL_NAMES" in smoke
+    assert "source_tool_names" in smoke
+    assert "assert list(TOOL_NAMES) == source_tool_names" in smoke
+    assert 'coverage["tools"] == list(CHATGPT_TOOL_NAMES)' in smoke
 
 
 @pytest.mark.parametrize(

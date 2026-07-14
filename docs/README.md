@@ -6,8 +6,8 @@ User-facing documentation. (Project/contributor internals live in
 - **[Quickstart](./quickstart.md)** — prereqs → one-line install → verify → first call.
 - **[Client setup](./clients.md)** — per-host config (Claude Code, Codex, Cursor,
   Windsurf, Claude Desktop, Zed, VS Code, Cline, generic stdio).
-- **[Configuration](./configuration.md)** — config file paths, `[server]`/`[models]`
-  keys, local transports, and bounded request concurrency.
+- **[Configuration](./configuration.md)** — config file paths, ChatGPT models,
+  fail-closed Grok Build roots, local transports, and bounded execution.
 - **[Migrating to 0.0.12](./migration-0.0.12.md)** — new account discovery,
   removed legacy escape hatches, Deep Research artifacts, Voice boundary, and
   the exact-commit release receipt.
@@ -17,7 +17,7 @@ User-facing documentation. (Project/contributor internals live in
 - **[How it works](./how-it-works.md)** — the no-proxy architecture.
 
 For the full per-tool and resource reference (every argument, return shape, and
-gotcha for all 32 tools and both resources), see
+gotcha for all registered tools and both resources), see
 [`gpt2agent/skills/gpt2agent/tools-reference.md`](../gpt2agent/skills/gpt2agent/tools-reference.md).
 
 Security model and ToS/account-ban risk are covered in the main

@@ -54,6 +54,28 @@ way. `unverified` means the release intentionally made no live claim, including
 Voice in 0.0.12. Update gpt2agent and inspect the public radar or sanitized local
 account receipt before assuming the feature is absent.
 
+### Grok Build errors
+
+Grok Build uses the official CLI's subscription/OAuth state, never the ChatGPT
+token or an ambient xAI API key. Configure at least one `[grok_build].roots`
+entry and run the MCP server from within a configured root before probing. Use
+these bounded actions; never paste credentials, auth files, or raw CLI output
+into prompts, logs, or bug reports.
+
+| Code | Bounded action |
+|---|---|
+| `GROK_BUILD_CLI_NOT_FOUND` | Install the official CLI or set `grok_build.command` to its reviewed executable, then restart the MCP server. |
+| `GROK_BUILD_AUTH_MISSING` | Open the official CLI locally and complete xAI's OAuth flow; then call `grok_build_status` again. |
+| `GROK_BUILD_QUOTA` | Stop retrying and wait for the account-reported quota window before one deliberate retry. |
+| `GROK_BUILD_TIMEOUT` | Reduce task scope or raise `timeout_seconds` within 1–600 seconds, then retry once. |
+| `GROK_BUILD_OUTPUT_TOO_LARGE` | Reduce requested output or raise `max_output_bytes` within the configured bound, then retry once. |
+| `GROK_BUILD_FAILED` | Call secret-free `grok_build_status`, verify the configured root and official CLI version, then retry one smaller plan-mode request. |
+
+`grok_build_status` and `grok_build_models` are read-only. The
+`grok_build_agent` default is `mode="plan"`; `mode="apply"` is an explicit
+destructive choice. See xAI's [CLI reference](https://docs.x.ai/build/cli/reference)
+and [headless scripting guide](https://docs.x.ai/build/cli/headless-scripting).
+
 ### `thinking_effort ... is not valid` / unsupported model
 
 Call `list_models` and use one of the selected general model's advertised

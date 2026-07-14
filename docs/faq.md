@@ -64,6 +64,25 @@ its auth file; gpt2agent creates or tightens the manual fallback to mode `600`
 where POSIX supports it. The token is sent only to `chatgpt.com`, and gpt2agent
 redacts token/secret values from error output.
 
+### Does Grok Build reuse my ChatGPT login or an xAI API key?
+
+No. The three Grok Build tools use the official CLI's independent
+subscription/OAuth state. gpt2agent strips `XAI_API_KEY` and
+`GROK_CODE_XAI_API_KEY` from the child environment and never falls back between
+ChatGPT auth, Grok Build OAuth, or a website session. Optional `GROK_HOME` and
+`GROK_AUTH_PATH` locations are configured as paths, not pasted credentials.
+
+Build remains disabled while `roots = []`. Once an explicit root is configured,
+`grok_build_status` and `grok_build_models` are read-only; `grok_build_agent`
+defaults to plan mode and requires an explicit `mode="apply"` choice for source
+changes. The official CLI retains session history. gpt2agent returns a sanitized
+session ID but does not copy transcripts or expose resume/deletion tools.
+
+See xAI's [enterprise/authentication guidance](https://docs.x.ai/build/enterprise),
+[CLI reference](https://docs.x.ai/build/cli/reference), [headless scripting
+guide](https://docs.x.ai/build/cli/headless-scripting), and [modes and
+commands](https://docs.x.ai/build/modes-and-commands).
+
 ### What's NOT supported?
 
 Sora video, Operator/CUA, Projects, and Voice sessions. The Projects candidate
@@ -74,5 +93,5 @@ read-only voice catalog is planned for 0.0.13; AgentRTC is later work.
 The current official [Voice in ChatGPT](https://help.openai.com/en/articles/20001274)
 guidance describes Live as a separate human-facing feature and says it does not
 initially support connected apps or Plugins, Work, Codex, Custom GPTs, Temporary
-Chats, or desktop. gpt2agent therefore does not present GPT-Live audio as one of
-its 32 MCP tools or as a supported account capability.
+Chats, or desktop. gpt2agent therefore does not present GPT-Live audio among its
+registered tools or as a supported account capability.

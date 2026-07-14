@@ -39,6 +39,15 @@ if [ "${#DIST_ENTRIES[@]}" -ne 2 ] \
 fi
 WHEEL=${WHEELS[0]}
 SDIST=${SDISTS[0]}
+SOURCE_TOOL_NAMES_JSON=$(
+  PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$SCRIPT_ROOT/.." python - <<'PY'
+import json
+
+from gpt2agent.tool_manifest import TOOL_NAMES
+
+print(json.dumps(list(TOOL_NAMES), separators=(",", ":")))
+PY
+)
 
 hash_dist() {
   python - "$WHEEL" "$SDIST" <<'PY'
@@ -92,7 +101,7 @@ check_installed_package() {
     test "$(run_scrubbed "$PRIVATE_HOME" "$VENV_ROOT/bin/python" -m gpt2agent --version)" = \
       "gpt2agent $PROJECT_VERSION"
     run_scrubbed "$PRIVATE_HOME" "$VENV_ROOT/bin/python" - \
-      "$DIST_VERSION" "$FORBIDDEN_SOURCE" <<'PY'
+      "$DIST_VERSION" "$FORBIDDEN_SOURCE" "$SOURCE_TOOL_NAMES_JSON" <<'PY'
 from importlib import import_module
 from importlib.metadata import version
 from importlib.resources import files
@@ -103,6 +112,7 @@ import re
 import sys
 
 expected_distribution = sys.argv[1]
+source_tool_names = json.loads(sys.argv[3])
 assert version("gpt2agent") == expected_distribution
 
 module_file = import_module("gpt2agent").__file__
@@ -134,10 +144,15 @@ manifest_spec = find_spec("gpt2agent.tool_manifest")
 if requires_account_manifest:
     assert manifest_spec is not None
 if manifest_spec is not None:
-    from gpt2agent.tool_manifest import TOOL_NAMES
+    from gpt2agent.tool_manifest import CHATGPT_TOOL_NAMES, GROK_TOOL_NAMES, TOOL_NAMES
 
-    assert len(TOOL_NAMES) == 32
+    assert TOOL_NAMES
     assert len(set(TOOL_NAMES)) == len(TOOL_NAMES)
+    assert CHATGPT_TOOL_NAMES
+    assert GROK_TOOL_NAMES
+    assert set(CHATGPT_TOOL_NAMES).isdisjoint(GROK_TOOL_NAMES)
+    assert CHATGPT_TOOL_NAMES + GROK_TOOL_NAMES == TOOL_NAMES
+    assert list(TOOL_NAMES) == source_tool_names
 
 resources_dir = root.joinpath("resources")
 if requires_account_manifest:
@@ -146,6 +161,10 @@ if resources_dir.is_dir():
     for name in ("feature-coverage.v1.json", "update-evidence.v1.json"):
         payload = json.loads(resources_dir.joinpath(name).read_text(encoding="utf-8"))
         assert payload["schema_version"] == "1"
+    coverage = json.loads(
+        resources_dir.joinpath("feature-coverage.v1.json").read_text(encoding="utf-8")
+    )
+    assert coverage["tools"] == list(CHATGPT_TOOL_NAMES)
 PY
   )
 }
