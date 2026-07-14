@@ -12,6 +12,151 @@ from pathlib import Path
 import pytest
 
 
+def _write_private_fixture(path: Path, content: bytes) -> None:
+    path.write_bytes(content)
+    if os.name == "posix":
+        path.chmod(0o600)
+
+
+def test_read_private_json_accepts_bounded_current_user_file(tmp_path: Path) -> None:
+    from gpt2agent._secure_file import read_private_json
+
+    path = tmp_path / "grok-auth.json"
+    _write_private_fixture(path, b'{"access_token":"planted-token"}')
+
+    assert read_private_json(path) == {"access_token": "planted-token"}
+
+
+@pytest.mark.parametrize(
+    ("content", "invariant"),
+    [
+        (b"", "positive bounded size"),
+        (b"{not-json}", "valid UTF-8 JSON"),
+        (b'"\xff"', "valid UTF-8 JSON"),
+    ],
+)
+def test_read_private_json_rejects_invalid_content_without_echo(
+    tmp_path: Path,
+    content: bytes,
+    invariant: str,
+) -> None:
+    from gpt2agent._secure_file import read_private_json
+
+    path = tmp_path / "private.json"
+    _write_private_fixture(path, content)
+
+    with pytest.raises(RuntimeError, match=invariant) as caught:
+        read_private_json(path)
+
+    assert "not-json" not in str(caught.value)
+    assert "\\xff" not in str(caught.value)
+
+
+def test_read_private_json_rejects_oversized_file_without_reading_content(
+    tmp_path: Path,
+) -> None:
+    from gpt2agent._secure_file import read_private_json
+
+    path = tmp_path / "private.json"
+    _write_private_fixture(path, b'"planted-oversized-secret"')
+
+    with pytest.raises(RuntimeError, match="positive bounded size") as caught:
+        read_private_json(path, maximum_bytes=8)
+
+    assert "planted-oversized-secret" not in str(caught.value)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes are unavailable")
+def test_read_private_json_rejects_group_or_world_access(tmp_path: Path) -> None:
+    from gpt2agent._secure_file import read_private_json
+
+    path = tmp_path / "private.json"
+    path.write_text("{}", encoding="utf-8")
+    path.chmod(0o640)
+
+    with pytest.raises(RuntimeError, match="owner-only mode"):
+        read_private_json(path)
+
+
+def test_read_private_json_rejects_symlink(tmp_path: Path) -> None:
+    from gpt2agent._secure_file import read_private_json
+
+    target = tmp_path / "target.json"
+    _write_private_fixture(target, b"{}")
+    link = tmp_path / "private.json"
+    link.symlink_to(target)
+
+    with pytest.raises(RuntimeError, match="regular non-symlink file"):
+        read_private_json(link)
+
+
+def test_read_private_json_rejects_lstat_fstat_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gpt2agent import _secure_file
+
+    path = tmp_path / "private.json"
+    _write_private_fixture(path, b"{}")
+    original_fstat = _secure_file.os.fstat
+
+    def mismatched_fstat(fd: int) -> os.stat_result:
+        observed = original_fstat(fd)
+        values = list(observed)
+        values[stat.ST_INO] += 1
+        return os.stat_result(values)
+
+    monkeypatch.setattr(_secure_file.os, "fstat", mismatched_fstat)
+
+    with pytest.raises(RuntimeError, match="changed while being validated"):
+        _secure_file.read_private_json(path)
+
+
+def test_read_private_json_hides_low_level_read_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gpt2agent import _secure_file
+
+    path = tmp_path / "private.json"
+    _write_private_fixture(path, b"{}")
+
+    def fail_read(fd: int, maximum: int) -> bytes:
+        raise OSError("planted-read-secret")
+
+    monkeypatch.setattr(_secure_file.os, "read", fail_read)
+
+    with pytest.raises(RuntimeError, match="could not be read") as caught:
+        _secure_file.read_private_json(path)
+
+    assert str(path) in str(caught.value)
+    assert "planted-read-secret" not in str(caught.value)
+
+
+def test_read_private_json_hides_decoder_value_errors(tmp_path: Path) -> None:
+    from gpt2agent._secure_file import read_private_json
+
+    path = tmp_path / "private.json"
+    _write_private_fixture(path, b"9" * 5000)
+
+    with pytest.raises(RuntimeError, match="valid UTF-8 JSON") as caught:
+        read_private_json(path)
+
+    assert str(path) in str(caught.value)
+    assert "digit" not in str(caught.value).lower()
+
+
+def test_read_private_json_invalid_bound_names_only_path_and_invariant(
+    tmp_path: Path,
+) -> None:
+    from gpt2agent._secure_file import read_private_json
+
+    path = tmp_path / "private.json"
+
+    with pytest.raises(ValueError, match=str(path)):
+        read_private_json(path, maximum_bytes=0)
+
+
 @pytest.mark.parametrize("path_kind", ["bare", "absolute-cwd", "traversal", "root"])
 def test_private_json_rejects_paths_without_a_dedicated_parent(
     path_kind: str,

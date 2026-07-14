@@ -15,6 +15,7 @@ from gpt2agent.errors import (
     BackendHTTPError,
     InputValidationError,
 )
+from gpt2agent.grok_errors import GrokError
 
 
 def serialize_tool_error(error: BaseException) -> str:
@@ -31,7 +32,8 @@ def serialize_tool_error(error: BaseException) -> str:
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         if isinstance(
-            current, (BackendHTTPError, BackendContractError, InputValidationError)
+            current,
+            (BackendHTTPError, BackendContractError, InputValidationError, GrokError),
         ):
             return str(current)
         current = current.__cause__
