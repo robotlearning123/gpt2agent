@@ -17,7 +17,7 @@ host = "127.0.0.1"
 port = 9000
 
 [models]
-chat     = "gpt-5-3"      # default model for the `chat` tool
+chat     = "gpt-5-6"      # default model for the `chat` tool
 agent    = "agent-mode"   # default for the `agent` tool
 heavy_dr = "gpt-5-5-pro"  # override slug for `deep_research_heavy`
 ```

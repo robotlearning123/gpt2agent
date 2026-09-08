@@ -10,7 +10,7 @@ port = 9000
 
 [models]
 # Default model for the `chat` tool
-chat = "gpt-5-3"
+chat = "gpt-5-6"
 
 # Override the model for `agent` (default: agent-mode)
 # agent = "agent-mode"

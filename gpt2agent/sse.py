@@ -76,7 +76,7 @@ _F_CONV_URL = _BASE + "/backend-api/f/conversation"
 DR_MODEL = "research"
 
 #: Model slug for heavy Deep Research — gpt-5-5-pro with extended thinking + DR connector
-HEAVY_DR_MODEL = "gpt-5-5-pro"
+HEAVY_DR_MODEL = "gpt-6-pro"
 
 #: System hint for heavy Deep Research (connector identifier from chatgpt.com frontend)
 HEAVY_DR_HINT = "connector:connector_openai_deep_research"
@@ -796,7 +796,7 @@ class ConversationClient:
         self,
         prompt: str,
         *,
-        model: str = "gpt-5-3",
+        model: str = "gpt-5-6",
         poll_interval: float = 5.0,
         max_wait: float = 300.0,
     ) -> dict:
@@ -971,7 +971,7 @@ class ConversationClient:
         self,
         prompt: str,
         *,
-        model: str = "gpt-5-3",
+        model: str = "gpt-5-6",
         temporary: bool = False,
         poll_interval: float = 5.0,
         max_wait: float = 300.0,

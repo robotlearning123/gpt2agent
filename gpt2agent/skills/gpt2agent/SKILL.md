@@ -80,7 +80,7 @@ If any precondition fails, stop and tell the user the exact fix command.
 
 | Need | Tool | Notes |
 |---|---|---|
-| Quick Q&A with a ChatGPT model | `chat` | Default: gpt-5-3, temporary=True |
+| Quick Q&A with a ChatGPT model | `chat` | Default: gpt-5-6, temporary=True |
 | Chat that needs image gen / code / canvas | `chat(temporary=False)` | Temporary chats block these features |
 | Multi-step task with browsing + code exec | `agent` | 262K context, autonomous |
 | Web research with citations (30-120s) | `deep_research` | Costs 1 DR quota |
@@ -155,7 +155,7 @@ host = "127.0.0.1"   # loopback only; HTTP transport is unauthenticated
 port = 9000
 
 [models]
-chat = "gpt-5-3"
+chat = "gpt-5-6"
 # agent = "agent-mode"
 # heavy_dr = "gpt-5-5-pro"
 ```
