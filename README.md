@@ -132,10 +132,10 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 
 | Tool | What it does |
 |---|---|
-| `chat` | Talk to any model on your account (`gpt-5-3` default, override via `model=`). Pass `gpt-5-5-pro`, `o3-pro`, `gpt-5-4-thinking`, … |
+| `chat` | Talk to any model on your account (`gpt-5-6` default, override via `model=`). Pass `gpt-5-5-pro`, `o3-pro`, `gpt-5-6-thinking`, … |
 | `agent` | **Agent Mode** — 262K context with autonomous browsing, code execution, tool use |
 | `deep_research` | Web-augmented research with citations (~30–120 s). Auto-confirms by default |
-| `deep_research_heavy` | Long-form DR via `gpt-5-5-pro` + connector (5–30 min, monthly quota). Configurable via `[models].heavy_dr` |
+| `deep_research_heavy` | Long-form DR via `gpt-6-pro` + connector (5–30 min, monthly quota). Configurable via `[models].heavy_dr` |
 | `gpt_chat` | Talk through one of your private Custom GPTs (`g-p-*`) — *experimental* |
 
 ### Image & file management
@@ -220,9 +220,9 @@ host = "127.0.0.1"   # loopback only; the HTTP transport is UNAUTHENTICATED
 port = 9000
 
 [models]
-chat     = "gpt-5-3"        # default for chat tool
+chat     = "gpt-5-6"        # default for chat tool
 agent    = "agent-mode"     # default for agent tool
-heavy_dr = "gpt-5-5-pro"    # override slug for deep_research_heavy
+heavy_dr = "gpt-6-pro"      # override slug for deep_research_heavy
 ```
 
 ---

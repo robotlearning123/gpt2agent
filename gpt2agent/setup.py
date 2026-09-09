@@ -179,7 +179,7 @@ MCP_PORT = 9000
 def write_mcp_config(plan: str) -> None:
     from gpt2agent.install import _atomic_write, _backup
 
-    chat_model = "gpt-5-5-pro" if plan == "pro" else "gpt-5-3"
+    chat_model = "gpt-6-pro" if plan == "pro" else "gpt-5-6"
     cfg = f"""[server]
 # Loopback only — the HTTP transport is unauthenticated and proxies your full
 # ChatGPT account. To expose it, set host explicitly AND GPT2AGENT_ALLOW_REMOTE=1.
