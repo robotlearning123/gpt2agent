@@ -9,7 +9,7 @@ def register(mcp, client: BackendClient, conv=None) -> None:
     @mcp.tool()
     async def code_interpreter(
         prompt: str,
-        model: str = "gpt-5-3",
+        model: str = "gpt-5-6",
     ) -> dict:
         """Execute code via ChatGPT's code interpreter.
 
@@ -18,7 +18,7 @@ def register(mcp, client: BackendClient, conv=None) -> None:
 
         Args:
             prompt: The code or instruction to execute (e.g. "Run this Python code: ...").
-            model: ChatGPT model to use. Defaults to gpt-5-3.
+            model: ChatGPT model to use. Defaults to gpt-5-6.
 
         Returns:
             Dict with: conversation_id, text (assistant explanation),
@@ -35,7 +35,7 @@ def register(mcp, client: BackendClient, conv=None) -> None:
     @mcp.tool()
     async def canvas_execute(
         prompt: str,
-        model: str = "gpt-5-3",
+        model: str = "gpt-5-6",
     ) -> dict:
         """Execute code via ChatGPT's Canvas feature.
 
@@ -44,7 +44,7 @@ def register(mcp, client: BackendClient, conv=None) -> None:
 
         Args:
             prompt: The code or instruction (e.g. "Create a React component that...").
-            model: ChatGPT model to use. Defaults to gpt-5-3.
+            model: ChatGPT model to use. Defaults to gpt-5-6.
 
         Returns:
             Dict with: conversation_id, text, tool_calls, tool_responses.
