@@ -84,7 +84,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 
 ### deep_research_heavy
 
-- **Purpose**: Long-form Deep Research using gpt-5-5-pro with the DR connector. Produces extended multi-section reports.
+- **Purpose**: Long-form Deep Research using gpt-6-pro with the DR connector. Produces extended multi-section reports.
 - **Parameters**:
   - `query` (str, required) -- the research question.
   - `auto_confirm` (bool, default: `True`) -- same behavior as `deep_research`.
@@ -103,7 +103,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
   - **Quota**: limits and reset timing are account-reported and can change. Run the bundled `deep-research/bin/quota.sh` before heavy calls.
   - Takes 5-30 minutes. Use `run_in_background` for shell integration.
   - Uses `/backend-api/f/conversation` (frontend endpoint), not the standard `/backend-api/conversation`.
-  - Model slug configurable via `[models].heavy_dr` in `config.toml` (default: `gpt-5-5-pro`).
+  - Model slug configurable via `[models].heavy_dr` in `config.toml` (default: `gpt-6-pro`).
   - **Report + citations recovered from the connector widget state** (fixed in 0.0.4): the connector never writes the report as an assistant text node, so the poll fetches the conversation with `include_widget_state=true` and recovers `widget_state.report_message` (text + `content_references`). Grouped source URLs are usually present but not guaranteed; if absent, the model may have cited sources inline in the body.
   - If the DR connector is unavailable, a warning is appended explaining how to enable it in chatgpt.com Settings > Connectors.
 

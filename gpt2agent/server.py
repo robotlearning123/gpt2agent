@@ -122,7 +122,7 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         """Chat with any ChatGPT model on your account.
 
         Pass `model` to switch slugs — e.g. `gpt-5-5-pro` (410K, pro reasoning),
-        `gpt-6-pro`, `gpt-5-6-thinking`, `gpt-5-6` (default). Call `list_models`
+        `gpt-6-pro`, `o3-pro`, `gpt-5-6-thinking`, `gpt-5-6` (default). Call `list_models`
         first to enumerate what your account has access to.
 
         Set `temporary=False` to allow tool-based features (image gen, code
@@ -196,7 +196,7 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
     @mcp.tool()
     async def deep_research_heavy(query: str, auto_confirm: bool = True) -> str:
-        """Long-form Deep Research using gpt-5-5-pro (5–30 min, uses monthly DR quota — check /backend-api/conversation/init for remaining). For short web-augmented answers use `deep_research` instead.
+        """Long-form Deep Research using gpt-6-pro (5–30 min, uses monthly DR quota — check /backend-api/conversation/init for remaining). For short web-augmented answers use `deep_research` instead.
 
         When `auto_confirm` is True (default), an imperative prefix is prepended
         so the model proceeds without asking "Do you want me to start?".

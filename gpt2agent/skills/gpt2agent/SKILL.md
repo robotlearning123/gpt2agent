@@ -157,7 +157,7 @@ port = 9000
 [models]
 chat = "gpt-5-6"
 # agent = "agent-mode"
-# heavy_dr = "gpt-5-5-pro"
+# heavy_dr = "gpt-6-pro"
 ```
 
 ## Troubleshooting

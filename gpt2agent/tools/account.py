@@ -38,7 +38,7 @@ def register(mcp, client: BackendClient) -> None:
         """List the models available on your account.
 
         Returns a list of model dicts; the `slug` field of each (e.g.
-        "gpt-6-pro", "o3-pro") is exactly what you pass as `model=` to the
+        "gpt-5-5-pro", "o3-pro") is exactly what you pass as `model=` to the
         `chat` tool. Other keys: title, description, max_tokens, reasoning_type,
         capabilities, enabled_tools.
         """
