@@ -137,7 +137,7 @@ def _patched_setup(monkeypatch, tmp_path):
 def test_write_mcp_config_creates_file_and_parent(monkeypatch, tmp_path) -> None:
     setup_mod, cfg_path = _patched_setup(monkeypatch, tmp_path)
     setup_mod.write_mcp_config("pro")
-    assert 'chat = "gpt-5-5-pro"' in cfg_path.read_text()
+    assert 'chat = "gpt-6-pro"' in cfg_path.read_text()
 
 
 def test_write_mcp_config_backs_up_existing(monkeypatch, tmp_path) -> None:
@@ -147,7 +147,7 @@ def test_write_mcp_config_backs_up_existing(monkeypatch, tmp_path) -> None:
     setup_mod.write_mcp_config("plus")
     bak = cfg_path.with_name(cfg_path.name + ".bak-gpt2agent")
     assert bak.read_text() == "# user-edited config\n"
-    assert 'chat = "gpt-5-3"' in cfg_path.read_text()
+    assert 'chat = "gpt-5-6"' in cfg_path.read_text()
 
 
 def test_write_mcp_config_same_content_is_noop(monkeypatch, tmp_path) -> None:
