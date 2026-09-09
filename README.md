@@ -17,6 +17,62 @@ Zed, and any MCP client.
 
 ---
 
+## Status — read-only tools work, conversation tools are blocked upstream
+
+> Checked 2026-09-08 against a live account. Re-check your own account any time
+> with **`gpt2agent doctor`** (below).
+
+ChatGPT changed the Sentinel challenge that guards `/backend-api/conversation`.
+The proof-of-work stage still solves, but the Turnstile stage no longer completes,
+so **every tool that opens a conversation fails**. That is an upstream change at
+chatgpt.com — not a token, login, or configuration problem on your side, so
+re-logging in will not fix it.
+
+| State | Tools |
+|---|---|
+| ✅ Working (probed) | `list_models`, `account_status`, `list_conversations`, `get_conversation`, `list_custom_gpts`, `custom_instructions_get`, `memory_list`, `memory_search`, `list_tasks`, `list_apps`, `list_codex_envs`, `list_codex_tasks` |
+| 🚫 Blocked upstream (sentinel challenge) | `chat`, `agent`, `gpt_chat`, `deep_research`, `deep_research_heavy`, `generate_image`, `code_interpreter`, `canvas_execute`, `memory_create_via_chat` |
+| ❓ Unverified | `custom_instructions_set`, `codex_task_create` — plain REST writes that bypass the sentinel gate; not probed, because probing them means writing to your account. `get_file_info`, `get_file_download_url` — need a `file_id` there is no read-only way to discover. |
+
+
+The blocked tools raise `gpt2agent.backend.UpstreamChallengeError` (a
+`RuntimeError` subclass, so existing handlers keep working) with a message that
+says all three of those things. Everything else below is still documented as
+designed — the annotations mark what is currently blocked, they do not remove
+the feature.
+
+### `gpt2agent doctor`
+
+```bash
+gpt2agent doctor
+```
+
+Probes each read-only surface and prints a status table plus a one-line summary.
+It never sends a message, never creates a conversation, and never spends quota —
+read-only GETs plus one sentinel probe — and it says `UNVERIFIED` for the write
+tools rather than pretending it probed them. Exit code is 0 when everything it
+could check is healthy, non-zero otherwise (including a clean message and exit 2
+when no token is configured).
+
+```text
+$ gpt2agent doctor
+tool                      result     detail
+list_models               OK         22 models
+account_status            OK         chatgptpro plan, US
+memory_list               OK         67 memories
+list_apps                 OK         94 apps/connectors
+sentinel (chat-requirements) BLOCKED    turnstile required, solver returns no token — changed upstream
+chat                      BLOCKED    upstream challenge — see the sentinel row above
+custom_instructions_set   UNVERIFIED plain POST, bypasses the sentinel gate — not probed (would overwrite your instructions)
+
+blocked tools need ChatGPT's sentinel challenge, which changed upstream — not a token or configuration problem. Read-only tools still work.
+gpt2agent doctor: 12 OK, 0 failed, 10 blocked upstream, 4 unverified
+```
+
+*(abridged — the real table has one row per MCP tool, 26 in total)*
+
+---
+
 ## What it does
 
 gpt2agent exposes **25 MCP tools** that forward requests directly to ChatGPT's backend API.
@@ -130,6 +186,10 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 
 ### Chat & reasoning
 
+> ⚠ **Blocked upstream** — every tool in this table opens a conversation and so
+> needs the Sentinel challenge, which changed upstream (see **Status** above).
+> They fail with `UpstreamChallengeError` until the challenge is handled again.
+
 | Tool | What it does |
 |---|---|
 | `chat` | Talk to any model on your account (`gpt-5-6` default, override via `model=`). Pass `gpt-5-5-pro`, `o3-pro`, `gpt-5-6-thinking`, … |
@@ -142,11 +202,14 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 
 | Tool | What it does |
 |---|---|
-| `generate_image` | Generate images via ChatGPT's built-in DALL-E. Returns download URLs + metadata |
+| `generate_image` | Generate images via ChatGPT's built-in DALL-E. Returns download URLs + metadata — ⚠ *blocked upstream* |
 | `get_file_info` | Metadata for any ChatGPT file (images, uploads) |
 | `get_file_download_url` | Temporary download URL for a ChatGPT file (~1h expiry) |
 
 ### Code execution
+
+> ⚠ **Blocked upstream** — both tools go through the conversation endpoint (see
+> **Status** above).
 
 | Tool | What it does |
 |---|---|
@@ -171,7 +234,7 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 |---|---|
 | `memory_list` | List all ChatGPT memory entries (emails/phones redacted) |
 | `memory_search` | Keyword filter over memories |
-| `memory_create_via_chat` | Add a memory (model-initiated workaround — POST `/memories` is 405) |
+| `memory_create_via_chat` | Add a memory (model-initiated workaround — POST `/memories` is 405) — ⚠ *blocked upstream: it needs a conversation* |
 | `custom_instructions_get` | Read your current `about_user` / `about_model` |
 | `custom_instructions_set` | Update them (read-modify-write, preserves unspecified fields) |
 
@@ -190,7 +253,8 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 Native Python implementation — no proxy. The server calls
 `/backend-api/conversation` (SSE) directly using `curl_cffi` for TLS
 impersonation. Vendored POW and Turnstile solvers handle the OpenAI Sentinel
-challenge. Token is reloaded from disk on each request, so codex's background
+challenge (the Turnstile stage currently does not pass — see **Status** above).
+Token is reloaded from disk on each request, so codex's background
 refresh propagates transparently. See [NOTICES](./NOTICES.md) for attribution.
 
 ```
@@ -229,6 +293,13 @@ heavy_dr = "gpt-6-pro"      # override slug for deep_research_heavy
 
 ## Limitations
 
+- **Conversation tools are blocked upstream.** chatgpt.com changed its Sentinel
+  challenge; the proof-of-work stage still solves but the Turnstile stage does
+  not, so `chat`, `agent`, `gpt_chat`, both Deep Research tools,
+  `generate_image`, `code_interpreter`, `canvas_execute` and
+  `memory_create_via_chat` all fail with `UpstreamChallengeError`. This is not a
+  token or configuration problem, and re-logging in will not fix it. Read-only
+  tools are unaffected — run `gpt2agent doctor` for a live check.
 - **Deep Research quota:** limits and reset timing are account-reported and can
   change. Run the bundled `deep-research/bin/quota.sh` before heavy work and run
   heavy Deep Research serially.

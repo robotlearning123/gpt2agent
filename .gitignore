@@ -34,3 +34,7 @@ uv.lock
 research/dr-*/events.jsonl
 gpt2agent-raw-dump*.jsonl
 .gpt2agent-raw-dump*.jsonl
+
+# Internal design specs, plans and cross-model reviews. Local only —
+# this repo is public and these describe unreleased work and host paths.
+docs/superpowers/

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from gpt2agent.backend import BackendClient
+from gpt2agent.backend import BackendClient, UpstreamEndpointError
 from gpt2agent.tools._backend import async_get
 
 
@@ -16,11 +16,26 @@ def register(mcp, client: BackendClient) -> None:
     @mcp.tool()
     async def list_apps() -> list:
         """Return ChatGPT connected apps/connectors. Names unresolvable — IDs with type classification returned."""
-        data = await async_get(
-            client,
-            "/backend-api/apps/list",
-            target_path="/backend-api/apps/list",
-        ) or {}
+        try:
+            data = await async_get(
+                client,
+                "/backend-api/apps/list",
+                target_path="/backend-api/apps/list",
+            ) or {}
+        except RuntimeError as exc:
+            # 405 = the endpoint no longer accepts this request shape at all.
+            # Surface it as a named upstream change instead of a raw HTTP error:
+            # retrying or re-logging in cannot fix a moved endpoint.
+            if "405" in str(exc):
+                raise UpstreamEndpointError(
+                    f"list_apps is broken upstream: {exc}.\n"
+                    "ChatGPT moved or removed this endpoint, so the installed "
+                    "gpt2agent can no longer list connected apps. This is not a "
+                    "problem with your token or configuration. Other read-only "
+                    "tools still work — run `gpt2agent doctor` for a live "
+                    "status table."
+                ) from exc
+            raise
         return [
             {
                 "id": a.get("id"),

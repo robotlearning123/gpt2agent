@@ -30,6 +30,30 @@ class TokenNotFoundError(RuntimeError):
     """
 
 
+class UpstreamChallengeError(RuntimeError):
+    """ChatGPT's Sentinel challenge changed and can no longer be satisfied.
+
+    A ``RuntimeError`` subclass so existing ``except RuntimeError`` handlers and
+    ``pytest.raises(RuntimeError, ...)`` assertions keep working, while callers
+    that need to tell "chatgpt.com moved the goalposts" apart from "your token
+    expired" can catch this specific type. Raised by ``sentinel.py`` when the
+    proof-of-work or Turnstile stage of ``sentinel/chat-requirements`` cannot be
+    completed — the read-only REST endpoints keep working, so this is never a
+    login or configuration problem on the user's side.
+    """
+
+
+class UpstreamEndpointError(RuntimeError):
+    """A backend-api endpoint changed or disappeared upstream.
+
+    A ``RuntimeError`` subclass so existing ``except RuntimeError`` handlers and
+    ``pytest.raises(RuntimeError, ...)`` assertions keep working. Raised where a
+    tool's endpoint returns a permanent protocol-level refusal (e.g. HTTP 405
+    where a GET used to be served) — retrying or re-authenticating cannot help,
+    so the tool is broken until gpt2agent is updated to match the new surface.
+    """
+
+
 def _load_token_with_source() -> tuple[str, Path | None]:
     """Load the ChatGPT bearer token and return its source file for mtime tracking.
 
