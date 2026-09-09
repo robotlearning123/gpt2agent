@@ -6,6 +6,56 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.0.12] - 2026-09-08
+
+Maintenance release. `0.0.11` cannot be installed from PyPI on a fresh
+environment, and every open pull request was red on the same required check.
+Both causes were unbounded dependency ranges.
+
+### Fixed
+
+- Bound `mcp` to `>=1.27,<2`. The range was `>=1.26.0` with no upper bound,
+  so a clean install resolved mcp 2.2.0, where `FastMCP` was renamed to
+  `MCPServer`, and the package died at
+  `from mcp.server.fastmcp import FastMCP`. The 2026-07-10 cross-model review
+  had already settled on this bound; it had not reached `pyproject.toml`.
+- `sse.py` no longer assumes a present key holds a dict. `msg.get("author", {})`
+  returns `None` when the server sends `"author": null`, so the following
+  `.get("role")` raised `AttributeError` mid-stream and lost the response.
+  Author, content and metadata lookups now use `or {}` (#34).
+- A missing ChatGPT token exits with a one-line message instead of a
+  traceback. `get_token` raises a new `TokenNotFoundError`, a `RuntimeError`
+  subclass so existing handlers and tests keep working, which lets the CLI
+  tell "not logged in yet" apart from a real backend failure (#33).
+- Bound `ruff` to `>=0.6,<0.16`. The range was `>=0.6` with no upper bound,
+  so CI installed whatever was newest and the lint gate failed on `main`
+  itself with 112 errors, blocking the entire pull request queue. Bisecting
+  released versions against an untouched checkout puts the break at 0.16.0
+  exactly: 0.12.0, 0.13.0, 0.14.0 and 0.15.0 all pass.
+
+### Changed
+
+- Pinned GitHub Actions moved up: `actions/checkout` 4.3.1 to 7.0.0 (#25),
+  `actions/upload-artifact` 4.6.2 to 7.0.1 (#35) and
+  `softprops/action-gh-release` 2.6.2 to 3.0.2 (#36).
+- Refreshed model defaults against the live account. `gpt-5-3` is no longer
+  served: listing `/backend-api/models` returns 22 slugs and it is not among
+  them, so every code path falling back to that default was requesting a
+  retired model. The chat default is now `gpt-5-6` (GPT-5.6 Sol); the pro
+  plan and `HEAVY_DR_MODEL` now use `gpt-6-pro` (GPT-6 Pro). Both carry image
+  generation. `gpt-5-5-pro` and `o3-pro` remain live and are unchanged.
+- Replaced the retired `gpt-5-4-thinking` and `gpt-5-4-pro` in documentation
+  and skills with `gpt-5-6-thinking` and `gpt-5-6-pro`.
+
+### Known issues
+
+- The conversation endpoints (`complete`, `image_gen`) fail with
+  `required Turnstile challenge could not be solved` from every machine
+  tested, while read-only requests such as `/backend-api/models` still
+  succeed. This is a live-service change against `sentinel.py` and is not
+  addressed by this release.
+
+
 ## [0.0.11] - 2026-07-10
 
 Recovery release carrying forward every change in the
