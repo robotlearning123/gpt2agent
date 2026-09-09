@@ -406,7 +406,16 @@ def main() -> None:
     if getattr(args, "host", None):
         cfg["server"]["host"] = args.host
 
-    mcp = build_server(cfg)
+    from gpt2agent.backend import TokenNotFoundError
+
+    try:
+        mcp = build_server(cfg)
+    except TokenNotFoundError as exc:
+        # Common first-run state: installed + registered with the MCP client, but
+        # `codex login` / `gpt2agent setup` not run yet, so no token exists. Exit
+        # with a clean, actionable one-liner (like the HTTP-bind refusal below)
+        # instead of dumping a backend.py traceback into the client's MCP logs.
+        raise SystemExit(str(exc)) from None
     tools = list(cfg["models"].keys())
     stdio = getattr(args, "stdio", False)
 

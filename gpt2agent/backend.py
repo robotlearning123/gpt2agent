@@ -19,6 +19,17 @@ _CLIENT_VERSION = "prod-be885abbfcfe7b1f511e88b3003d9ee44757fbad"
 _CLIENT_BUILD = "5955942"
 
 
+class TokenNotFoundError(RuntimeError):
+    """No ChatGPT token could be located from any known source.
+
+    A ``RuntimeError`` subclass so existing ``except RuntimeError`` handlers and
+    ``pytest.raises(RuntimeError, ...)`` assertions keep working, while callers
+    that want to distinguish "not logged in yet" (an expected first-run state)
+    from a genuine backend failure can catch this specific type — e.g. the CLI
+    turns it into a clean one-line message instead of a traceback.
+    """
+
+
 def _load_token_with_source() -> tuple[str, Path | None]:
     """Load the ChatGPT bearer token and return its source file for mtime tracking.
 
@@ -69,11 +80,11 @@ def _load_token_with_source() -> tuple[str, Path | None]:
     # Nothing worked — surface the most informative error we have.
     if codex_err or wizard_err:
         details = "; ".join(e for e in (codex_err, wizard_err) if e)
-        raise RuntimeError(
+        raise TokenNotFoundError(
             f"No ChatGPT token found — run `codex login` or `gpt2agent setup` "
             f"({details})"
         )
-    raise RuntimeError(
+    raise TokenNotFoundError(
         "No ChatGPT token found — run `codex login` or `gpt2agent setup` "
         f"(checked {codex_path} and {wizard_path})"
     )
