@@ -669,7 +669,7 @@ class ConversationClient:
                 if not isinstance(msg, dict):
                     continue
                 _track_message_lifecycle(msg)
-                if msg.get("author", {}).get("role") != "assistant":
+                if (msg.get("author") or {}).get("role") != "assistant":
                     continue
                 content = msg.get("content") or {}
                 ct = content.get("content_type")
@@ -867,7 +867,7 @@ class ConversationClient:
                 msg = obj.get("message", {})
                 if not isinstance(msg, dict):
                     continue
-                role = msg.get("author", {}).get("role", "")
+                role = (msg.get("author") or {}).get("role", "")
                 ct = (msg.get("content") or {}).get("content_type", "")
                 parts = (msg.get("content") or {}).get("parts", [])
 
@@ -1047,7 +1047,7 @@ class ConversationClient:
                 msg = obj.get("message", {})
                 if not isinstance(msg, dict):
                     continue
-                role = msg.get("author", {}).get("role", "")
+                role = (msg.get("author") or {}).get("role", "")
                 recipient = msg.get("recipient", "all")
                 content = msg.get("content") or {}
                 ct = content.get("content_type", "")
@@ -1240,11 +1240,11 @@ class ConversationClient:
                         if not isinstance(msg, dict):
                             continue
 
-                        role = msg.get("author", {}).get("role", "")
-                        content = msg.get("content", {})
+                        role = (msg.get("author") or {}).get("role", "")
+                        content = msg.get("content") or {}
                         ct = content.get("content_type", "")
                         status = msg.get("status", "")
-                        meta = msg.get("metadata", {})
+                        meta = msg.get("metadata") or {}
                         recipient = msg.get("recipient")
 
                         # Capture latest assistant message id so the next turn
