@@ -6,6 +6,8 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.0.13] - 2026-09-09
+
 ### Added
 
 - `gpt2agent doctor`: a new subcommand next to `setup`, `install` and `run`
