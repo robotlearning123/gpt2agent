@@ -10,10 +10,10 @@ port = 9000
 
 [models]
 # Default model for the `chat` tool
-chat = "gpt-5-3"
+chat = "gpt-5-6"
 
 # Override the model for `agent` (default: agent-mode)
 # agent = "agent-mode"
 
-# Override the model for `deep_research_heavy` (default: gpt-5-5-pro)
-# heavy_dr = "gpt-5-5-pro"
+# Override the model for `deep_research_heavy` (default: gpt-6-pro)
+# heavy_dr = "gpt-6-pro"

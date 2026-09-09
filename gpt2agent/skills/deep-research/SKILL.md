@@ -3,7 +3,7 @@ name: deep-research
 version: 0.1.2
 description: |
   ChatGPT Pro Deep Research via gpt2agent. Two modes: light (model=research,
-  30-120s, citations preserved) and heavy (gpt-5-5-pro + connector, 5-30 min,
+  30-120s, citations preserved) and heavy (gpt-6-pro + connector, 5-30 min,
   long-form report recovered from the connector widget state, citations included).
   Reuses `$CODEX_HOME/auth.json` (or `~/.codex/auth.json`) or the manual
   `~/.gpt2agent/token.json` fallback.
@@ -39,7 +39,7 @@ test -f "${CODEX_HOME:-$HOME/.codex}/auth.json" || test -f "$HOME/.gpt2agent/tok
 ```
 
 - Default mode: **light** (`deep_research`, ~1 min, citations included).
-- `--heavy`: **deep_research_heavy** (5-30 min, gpt-5-5-pro + connector). The
+- `--heavy`: **deep_research_heavy** (5-30 min, gpt-6-pro + connector). The
   connector renders an embedded-UI widget; the report is recovered from the
   hidden widget state (`widget_state.report_message`) via
   `?include_visually_hidden_messages=true&include_widget_state=true` — see
