@@ -12,7 +12,7 @@
     {
       "name": "gpt2agent",
       "source": "./",
-      "description": "ChatGPT Plus/Pro account as 32 MCP tools + the deep-research and gpt2agent skills. Requires `pipx install gpt2agent`.",
+      "description": "ChatGPT tools plus Grok Build tools with the deep-research and gpt2agent skills. Requires `pipx install gpt2agent`.",
       "author": { "name": "robotlearning123" },
       "license": "MIT",
       "keywords": ["mcp", "chatgpt", "openai", "deep-research"]

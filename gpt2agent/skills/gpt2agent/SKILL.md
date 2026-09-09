@@ -1,7 +1,8 @@
 ---
 name: gpt2agent
 description: |
-  ChatGPT Plus/Pro account access via 32 MCP tools and 2 static resources covering chat,
+  ChatGPT Plus/Pro account access plus an independent official Grok Build CLI
+  lane via all registered MCP tools and 2 static resources covering chat,
   agent mode, deep research, image generation, code execution, canvas,
   memory, custom instructions, conversations, Custom GPTs, Codex, Apps,
   Plugins, Work models, automations, Sites, and capability truth.
@@ -45,6 +46,9 @@ allowed-tools:
   - mcp__gpt2agent__sites_access
   - mcp__gpt2agent__list_sites
   - mcp__gpt2agent__account_capabilities
+  - mcp__gpt2agent__grok_build_agent
+  - mcp__gpt2agent__grok_build_models
+  - mcp__gpt2agent__grok_build_status
 ---
 
 # gpt2agent — ChatGPT Account Access via MCP
@@ -85,6 +89,7 @@ If any precondition fails, stop and tell the user the exact fix command.
 | Memory | `memory_list`, `memory_search`, `memory_create_via_chat` |
 | Instructions | `custom_instructions_get`, `custom_instructions_set` |
 | Codex | `list_codex_envs`, `list_codex_tasks`, `codex_task_create` |
+| Grok Build | `grok_build_agent`, `grok_build_models`, `grok_build_status` |
 
 ## When to Use Which Tool
 
@@ -164,6 +169,20 @@ account. Use `account_capabilities` for live state.
 3. codex_task_create(repo, desc)  -- spin up a coding task
 ```
 
+### Grok Build repository coding
+
+1. Configure at least one explicit `[grok_build].roots` entry. Empty roots
+   disable every Build probe and action.
+2. Run the MCP server from a current working directory within a configured root.
+3. Use `grok_build_models` and `grok_build_status` for the official CLI lane only.
+4. Use `grok_build_agent` for repository coding work.
+5. Use `mode="plan"` unless the user explicitly authorizes source changes.
+
+Grok Build uses its own official CLI subscription/OAuth state. It never falls
+back to ChatGPT auth, an ambient API key, or a website session. The CLI retains
+history; gpt2agent returns a sanitized session ID but does not copy transcripts
+or expose resume/deletion operations.
+
 ## Quota Management
 
 Deep Research limits and reset timing are reported by the current account and
@@ -190,7 +209,24 @@ port = 9000          # retained for compatibility; stdio does not bind
 chat = "gpt-5-3"
 # agent = "agent-mode"
 # heavy_dr = "gpt-5-5-pro"
+
+[grok_build]
+command = "grok"
+# home = "~/.grok"
+# auth_path = "~/.grok/auth.json"
+roots = []
+timeout_seconds = 120
+max_output_bytes = 1048576
+default_max_turns = 20
 ```
+
+The Build defaults and CLI mapping are documented by xAI's
+[enterprise/authentication guidance](https://docs.x.ai/build/enterprise), [CLI
+reference](https://docs.x.ai/build/cli/reference), [headless scripting
+guide](https://docs.x.ai/build/cli/headless-scripting), and [modes and
+commands](https://docs.x.ai/build/modes-and-commands). gpt2agent strips
+`XAI_API_KEY` and `GROK_CODE_XAI_API_KEY` from the child environment; optional
+`home`/`auth_path` set explicit `GROK_HOME`/`GROK_AUTH_PATH` paths.
 
 Ordinary REST/JSON backend calls share a process-wide limit of 4. Set
 `GPT2AGENT_MAX_IN_FLIGHT` only to an integer from 1 through 8. A 429 activates a
@@ -212,6 +248,15 @@ should run serially.
 | `contract_changed` | Private response no longer satisfies the bounded adapter; update and inspect sanitized evidence |
 | HTTP transport disabled | Expected in 0.0.12: use stdio |
 | Invalid `thinking_effort` | Call `list_models`; use an effort advertised by that exact general model or leave it unset |
+| `GROK_BUILD_CLI_NOT_FOUND` | Install the official CLI or set a reviewed `grok_build.command`, then restart the server |
+| `GROK_BUILD_AUTH_MISSING` | Complete the official CLI OAuth flow locally, then call `grok_build_status` |
+| `GROK_BUILD_QUOTA` | Stop retrying and wait for the account-reported quota window |
+| `GROK_BUILD_TIMEOUT` | Reduce scope or increase the configured timeout within 1–600 seconds, then retry once |
+| `GROK_BUILD_OUTPUT_TOO_LARGE` | Reduce output or increase the configured output bound, then retry once |
+| `GROK_BUILD_FAILED` | Check secret-free status, root, and CLI version; retry one smaller plan request |
+
+Never paste or log a Grok credential, auth file, or raw CLI failure while
+troubleshooting.
 
 ## Detailed Reference
 

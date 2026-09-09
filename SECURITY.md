@@ -59,6 +59,14 @@ not bugs:
   commitment. Safe publication also requires independent live tag-creation and
   protected-environment approval controls, with self-review and administrator
   bypass disabled; without them, do not tag or publish.
+- **Grok Build is a separate official CLI boundary.** It uses the CLI's own
+  subscription/OAuth login and never falls back to ChatGPT authentication.
+  gpt2agent removes `XAI_API_KEY` and `GROK_CODE_XAI_API_KEY` from the child
+  environment, fails closed while `[grok_build].roots` is empty, constrains the
+  working directory to configured roots, and bounds execution time and output.
+  Plan mode is read-only; apply mode is an explicit destructive choice. The CLI
+  retains its own session history, while gpt2agent returns only a sanitized
+  session ID and does not copy transcripts.
 
 In-scope reports we want to hear about: token/secret leakage in logs or errors,
 ways to expose a network transport or cross the stdio process boundary, injection that makes a

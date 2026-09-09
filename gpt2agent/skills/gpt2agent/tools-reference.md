@@ -1,6 +1,6 @@
 # gpt2agent MCP Tools Reference
 
-Complete parameter reference for all 32 MCP tools and 2 static resources exposed by the gpt2agent server.
+Complete parameter reference for all registered MCP tools and 2 static resources exposed by the gpt2agent server.
 Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 
 Every tool declares all four standard MCP annotations: read-only, destructive,
@@ -17,6 +17,7 @@ they are not an authorization boundary.
 - [Account Discovery (14)](#account-discovery)
 - [Memory & Instructions (5)](#memory--instructions)
 - [Codex (3)](#codex)
+- [Grok Build (3)](#grok-build)
 - [Static Resources (2)](#static-resources)
 
 ---
@@ -841,6 +842,56 @@ they are not an authorization boundary.
 
 ---
 
+## Grok Build
+
+These tools call the official Grok Build CLI through its independent
+subscription/OAuth lane. They do not reuse ChatGPT auth or ambient xAI API
+keys. Configure at least one repository root and run the MCP server from within
+a configured root before using any of them.
+
+### grok_build_agent
+
+- **Purpose**: Run one bounded official-CLI repository coding session.
+- **Parameters**:
+  - `prompt` (str, required) -- nonempty UTF-8 task, at most 65,536 bytes.
+  - `cwd` (str or None, default: `None`) -- existing directory under a configured root; `None` uses the server current working directory.
+  - `mode` (`"plan"` or `"apply"`, default: `"plan"`) -- plan maps to the CLI plan permission mode and read-only sandbox; apply maps to bypass-permissions and the strict sandbox.
+  - `model` (str or None, default: `None`) -- authenticated account-catalog model; when omitted, use the configured or catalog default.
+  - `max_turns` (int or None, default: `None`) -- 1–100; when omitted, use `default_max_turns`.
+  - `subagents` (bool, default: `False`) -- opt in to official CLI subagents.
+- **Returns**: A bounded dict containing `surface`, `status`, sanitized
+  `session_id`, selected `model`, response `text`, bounded `stop_reason`, safe
+  aggregate `usage`, and validated relative `changed_files`.
+- **Notes**: The MCP tool remains annotated destructive for every invocation
+  because annotations cannot vary with `mode`. Use plan unless the user
+  explicitly authorizes source changes. The official CLI retains session
+  history; gpt2agent does not copy transcripts or expose resume/deletion tools.
+
+### grok_build_models
+
+- **Purpose**: Read the authenticated official CLI account model catalog.
+- **Parameters**: None. The server current working directory must be in a configured root.
+- **Returns**: `authenticated`, `default_model`, ordered `models`, and `count`.
+- **Annotations**: Read-only, idempotent, closed-world.
+
+### grok_build_status
+
+- **Purpose**: Read secret-free official CLI installation, version,
+  authentication, default-model, and catalog-count status.
+- **Parameters**: None. The server current working directory must be in a configured root.
+- **Returns**: `installed`, bounded `version`, `authenticated`, `default_model`,
+  and `models_count`; no identity or credential fields.
+- **Annotations**: Read-only, idempotent, closed-world.
+
+`roots = []` disables all three calls. gpt2agent strips `XAI_API_KEY` and
+`GROK_CODE_XAI_API_KEY`; optional configuration paths set `GROK_HOME` and
+`GROK_AUTH_PATH`. No fallback exists between ChatGPT auth, Grok Build OAuth, or
+a website session. See xAI's [enterprise/authentication
+guidance](https://docs.x.ai/build/enterprise), [CLI
+reference](https://docs.x.ai/build/cli/reference), [headless scripting
+guide](https://docs.x.ai/build/cli/headless-scripting), and [modes and
+commands](https://docs.x.ai/build/modes-and-commands).
+
 ## Static Resources
 
 Resource reads are deterministic package reads. They perform no account or
@@ -850,8 +901,8 @@ responses, or private URLs.
 ### chatgpt://feature-coverage
 
 - **MIME type**: `application/json`
-- **Purpose**: Versioned 0.0.12 contract snapshot containing the exact 32-tool
-  manifest plus bounded feature status. Voice catalog/transcript/GPT-Live are
+- **Purpose**: Versioned 0.0.12 contract snapshot containing the exact ChatGPT
+  provider manifest plus bounded feature status. Voice catalog/transcript/GPT-Live are
   deferred and Projects is unsupported; those records do not claim live reachability.
 - **Use instead of**: Hard-coding a tool count or inferring that every ChatGPT
   product is exposed by this adapter.
@@ -970,7 +1021,7 @@ requested `report.md` and shape-only `status.txt`, never raw SSE/server metadata
 
 14. **No Voice/audio surface in 0.0.12**: Voice catalog work starts in 0.0.13.
 GPT-Live audio, microphone capture, WebRTC sessions, and an API fallback are not
-among the 32 tools or 2 resources.
+among the registered tools or 2 resources.
 
 15. **Final receipts are authoritative**: every `chat`, `agent`, and `gpt_chat`
 completion ends with a server-appended receipt, including `none`. Ignore any

@@ -196,6 +196,24 @@ TOOL_ANNOTATION_MANIFEST: dict[str, dict[str, bool]] = {
         "idempotentHint": True,
         "openWorldHint": False,
     },
+    "grok_build_agent": {
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+    "grok_build_models": {
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+    "grok_build_status": {
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
 }
 
 

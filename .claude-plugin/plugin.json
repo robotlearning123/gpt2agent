@@ -3,7 +3,7 @@
   "name": "gpt2agent",
   "displayName": "gpt2agent",
   "version": "0.0.12",
-  "description": "Your ChatGPT Plus/Pro account as 32 MCP tools and 2 static resources — reuses your codex login. Requires the gpt2agent CLI on PATH (pipx install gpt2agent).",
+  "description": "ChatGPT tools plus Grok Build tools and 2 static resources — each provider keeps independent auth. Requires the gpt2agent CLI on PATH (pipx install gpt2agent).",
   "author": {
     "name": "robotlearning123",
     "url": "https://github.com/robotlearning123"

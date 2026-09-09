@@ -50,6 +50,9 @@ _EXPECTED: dict[str, tuple[bool, bool, bool, bool]] = {
     "sites_access": (True, False, True, False),
     "list_sites": (True, False, True, False),
     "account_capabilities": (True, False, True, False),
+    "grok_build_agent": (False, True, False, True),
+    "grok_build_models": (True, False, True, False),
+    "grok_build_status": (True, False, True, False),
 }
 
 class _RecordingMCP:

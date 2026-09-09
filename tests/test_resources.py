@@ -40,11 +40,12 @@ def test_static_resource_reads_are_deterministic_valid_json() -> None:
 
 def test_feature_coverage_matches_manifest_and_defers_voice() -> None:
     from gpt2agent.capabilities import CAPABILITY_IDS
-    from gpt2agent.tool_manifest import TOOL_NAMES
+    from gpt2agent.tool_manifest import CHATGPT_TOOL_NAMES
 
     coverage = json.loads(resources.read_packaged_json("feature-coverage.v1.json"))
     assert coverage["schema_version"] == "1"
-    assert coverage["tools"] == list(TOOL_NAMES)
+    assert coverage["tools"] == list(CHATGPT_TOOL_NAMES)
+    assert not any(name.startswith("grok_") for name in coverage["tools"])
     capabilities = {item["id"]: item for item in coverage["capabilities"]}
     assert list(capabilities) == list(CAPABILITY_IDS)
     expected_fields = {

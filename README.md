@@ -19,9 +19,10 @@ Codex, Cursor, Windsurf, Zed, and any MCP client.
 
 ## What it does
 
-gpt2agent exposes **32 MCP tools and 2 static MCP resources** backed by ChatGPT's
-private account surface. No proxy process. No separate account. No platform API
-key. Your `codex login`, your token, your quota.
+gpt2agent exposes **ChatGPT tools plus Grok Build tools and 2 static MCP
+resources**. The ChatGPT tools use ChatGPT's private account surface; the Grok
+Build tools use the official Grok Build CLI subscription/OAuth lane. The two
+accounts and credentials stay independent, with no cross-provider fallback.
 
 If you already have the [`codex`](https://github.com/openai/codex) CLI logged in,
 setup is **zero extra steps** — gpt2agent reuses `$CODEX_HOME/auth.json` (or
@@ -125,7 +126,7 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 
 ---
 
-## Tools (32)
+## Tools
 
 ### Chat & reasoning
 
@@ -189,6 +190,20 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 | `list_codex_tasks` | Recent Codex tasks + status |
 | `codex_task_create` | Kick off a new Codex task (resolves env from `repo_label`) |
 
+### Grok Build (official CLI lane)
+
+| Tool | What it does |
+|---|---|
+| `grok_build_agent` | Run one bounded repository-coding session. It defaults to `mode="plan"`; `mode="apply"` is an explicit source-changing choice. |
+| `grok_build_models` | Read the authenticated Grok Build account model catalog. |
+| `grok_build_status` | Read secret-free CLI installation, version, authentication, and catalog status. |
+
+Configure at least one explicit `[grok_build].roots` entry first. `roots = []`
+fails closed, and status/model probes also require the MCP server's current
+working directory to be within a configured root. The official CLI owns its
+session history; gpt2agent returns only a sanitized session ID and does not copy
+transcripts or expose resume/deletion tools.
+
 ---
 
 ## Architecture
@@ -208,10 +223,18 @@ $CODEX_HOME/auth.json (default ~/.codex/auth.json) ← auto-refreshed by Codex
    curl_cffi  →  chatgpt.com /backend-api/{conversation,f/conversation,me,
                                           models, memories, codex, gizmos, ...}
         |
-   32 MCP tools + 2 static resources
+   all registered ChatGPT tools + 2 static resources
         (chat, agent, DR ×2, GPT chat, image gen, code interpreter,
          canvas, memory/instructions/codex, Apps, Plugins, Work,
          automations, Sites, capability truth, release evidence)
+```
+
+```text
+Configured repository root
+        |
+   gpt2agent (stdio MCP server; bounded child process)
+        |
+   official Grok Build CLI (subscription/OAuth; CLI-owned session history)
 ```
 
 ---
@@ -230,7 +253,32 @@ port = 9000          # retained for compatibility; stdio does not bind it
 chat     = "gpt-5-3"        # default for chat tool
 agent    = "agent-mode"     # default for agent tool
 heavy_dr = "gpt-5-5-pro"    # override slug for deep_research_heavy
+
+[grok_build]
+command = "grok"
+# home = "~/.grok"
+# auth_path = "~/.grok/auth.json"
+roots = []                   # fail-closed until an explicit root is added
+timeout_seconds = 120
+max_output_bytes = 1048576
+default_max_turns = 20
 ```
+
+Run the MCP server from a current working directory inside a configured root
+before calling `grok_build_status` or `grok_build_models`. `grok_build_agent`
+defaults to `mode="plan"`, which uses the CLI's plan/read-only sandbox. The
+explicit `mode="apply"` path uses the CLI's strict sandbox and bypass-permissions
+mode; the MCP tool remains annotated destructive on every invocation because
+annotations cannot vary by argument. See xAI's [enterprise/authentication
+guidance](https://docs.x.ai/build/enterprise), [CLI
+reference](https://docs.x.ai/build/cli/reference), [headless scripting
+guide](https://docs.x.ai/build/cli/headless-scripting), and [modes and
+commands](https://docs.x.ai/build/modes-and-commands).
+
+gpt2agent removes `XAI_API_KEY` and `GROK_CODE_XAI_API_KEY` from the CLI child
+environment. Authentication therefore stays on the official CLI subscription
+lane. Optional `home` and `auth_path` map to explicit `GROK_HOME` and
+`GROK_AUTH_PATH` values; never paste either credential into a prompt or log.
 
 Ordinary REST/JSON account requests share a process-wide limit of four in-flight
 calls. `GPT2AGENT_MAX_IN_FLIGHT` may be set to an integer from 1 through 8.
@@ -241,7 +289,7 @@ should run serially.
 
 ### MCP contract
 
-All 32 tools declare the four standard MCP tool annotations (`readOnlyHint`,
+All registered tools declare the four standard MCP tool annotations (`readOnlyHint`,
 `destructiveHint`, `idempotentHint`, and `openWorldHint`). These are client hints,
 not an authorization boundary. The package stays on the stable MCP Python v1
 line with `mcp>=1.26,<2` and tests the minimum and latest resolvable v1 versions.
@@ -274,6 +322,9 @@ Plugin bundles distribution.
   established adapter. Version 0.0.12 exposes no Voice tool, audio, microphone,
   WebRTC session, or OpenAI API fallback. A bounded read-only voice catalog is
   planned for 0.0.13; later AgentRTC work is a separate transport project.
+- **Grok website chat is not exposed by this documented surface.** This release
+  documents only the three implemented official-CLI Build tools. It does not
+  fall back from ChatGPT auth to Grok Build OAuth or to a website session.
 - **GPT-Live is not a supported MCP audio capability.** Current official
   [Voice guidance](https://help.openai.com/en/articles/20001274) describes Live
   as a separate human feature and says it does not initially support connected
@@ -320,6 +371,11 @@ has real consequences; please understand them before pointing it at your account
   to `chatgpt.com`.
   gpt2agent never transmits it anywhere else. Token/secret values are redacted
   from error messages and logs (best-effort).
+- **Grok Build uses a separate official CLI login.** gpt2agent removes ambient
+  xAI API-key variables from the child, constrains execution to configured
+  roots, bounds time/output, and treats apply mode as destructive. Empty roots
+  disable every Build action and probe. ChatGPT credentials are never used as a
+  Grok fallback.
 - **Keep the account transport in its dedicated MCP child process.** It ignores
   ambient proxy and CA-bundle variables, uses the directly declared `certifi`
   trust bundle, and refuses account I/O while `SSLKEYLOGFILE` is set. Libcurl

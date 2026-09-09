@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from gpt2agent.tools._redact import redact
 from gpt2agent.tools.conversations import normalize_conversation_detail
 from gpt2agent.tools.instructions import normalize_custom_instructions
@@ -16,6 +18,11 @@ PRIVATE_KEY = (
     "U1lOVEhFVElDLU5PVC1BLVJFQUklWQVRFLUtFWQ==\n"
     "-----END " + "PRIVATE KEY-----"
 )
+GROK_CONVERSATION_ID = "conv-private-42"
+GROK_RESPONSE_ID = "resp-private-99"
+GROK_ATTACHMENT_ID = "attach-private-17"
+GROK_UUID_ID = "8cb6f8ef-b988-4f5a-a721-926c7e52e770"
+GROK_UUID_LIKE_ID = "00000000-0000-0000-0000-000000000042"
 
 
 def test_memory_projection_redacts_complete_provider_credentials() -> None:
@@ -136,4 +143,53 @@ def test_secret_redaction_preserves_noncredential_near_misses() -> None:
     )
 
     for value in near_misses:
+        assert redact(value) == value
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "sso=planted-sso-secret",
+        "sso-rw=planted-sso-rw-secret",
+        'sso="planted-quoted-cookie-secret"',
+        "cf_clearance=planted-clearance-secret",
+        "grok_device_id=planted-device-secret",
+        "Cookie: sso=planted-cookie-secret",
+        "Set-Cookie: sso-rw=planted-set-cookie-secret",
+        "xai-planted-api-token-1234567890",
+        "/asset?X-Amz-Credential=planted-credential&X-Amz-Signature=planted-signature"
+        "&X-Amz-Security-Token=planted-security-token",
+        "identity_id=identity-private-3 accountId=account-private-8",
+    ],
+)
+def test_grok_free_text_redacts_credentials_and_identity_fields(source: str) -> None:
+    rendered = redact(source)
+
+    assert isinstance(rendered, str)
+    for secret in (
+        "planted-sso-secret",
+        "planted-sso-rw-secret",
+        "planted-quoted-cookie-secret",
+        "planted-clearance-secret",
+        "planted-device-secret",
+        "planted-cookie-secret",
+        "planted-set-cookie-secret",
+        "xai-planted-api-token-1234567890",
+        "planted-credential",
+        "planted-signature",
+        "planted-security-token",
+        "identity-private-3",
+        "account-private-8",
+    ):
+        assert secret not in rendered
+
+
+def test_grok_opaque_ids_are_not_globally_erased_from_structured_fields() -> None:
+    for value in (
+        GROK_CONVERSATION_ID,
+        GROK_RESPONSE_ID,
+        GROK_ATTACHMENT_ID,
+        GROK_UUID_ID,
+        GROK_UUID_LIKE_ID,
+    ):
         assert redact(value) == value

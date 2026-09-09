@@ -16,7 +16,7 @@ import re
 
 # 1. JSON-encoded session-scoped headers — redact the value, keep the key.
 _SENSITIVE_KEY_RE = re.compile(
-    r'"(Openai-Sentinel-[A-Za-z-]+-Token|Authorization|OAI-[A-Za-z-]+)"\s*:\s*"[^"]*"',
+    r'"(Openai-Sentinel-[A-Za-z-]+-Token|Authorization|Cookie|Set-Cookie|OAI-[A-Za-z-]+)"\s*:\s*"[^"]*"',
     re.IGNORECASE,
 )
 
@@ -47,8 +47,30 @@ _COOKIE_RE = re.compile(
 # 5. Token-bearing query params, e.g. `?access_token=…` / `&token=…` / `&accessToken=…`.
 _QUERY_TOKEN_RE = re.compile(
     r"([?&](?:access[_-]?token|accessToken|session[_-]?token|sessionToken|auth[_-]?token"
-    r"|id_token|refresh_token|token|sig|signature)=)[^&\s\"]+",
+    r"|id_token|refresh_token|token|sig|signature|credential|googleaccessid"
+    r"|x-amz-credential|x-amz-security-token|x-amz-signature|x-goog-credential"
+    r"|x-goog-signature)=)[^&\s\"]+",
     re.IGNORECASE,
+)
+
+_COOKIE_HEADER_RE = re.compile(r"\b(Cookie|Set-Cookie)\s*:\s*[^\r\n]+", re.IGNORECASE)
+_GROK_COOKIE_RE = re.compile(
+    r'''\b(sso-rw|sso|cf_clearance|grok_device_id)=(?:"[^"\r\n]*"|'[^'\r\n]*'|[^;\s"&]+)''',
+    re.IGNORECASE,
+)
+_XAI_TOKEN_RE = re.compile(r"\bxai-[A-Za-z0-9._~+/\-]{12,}=*", re.IGNORECASE)
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+_IDENTITY_FIELD_RE = re.compile(
+    r"(?P<prefix>\b(?:account|identity|profile|user|workspace|organization|org)"
+    r"(?:[_-]?id|Id)\s*(?:=|:)\s*[\"']?)[^\s,;}\]\"']+",
+    re.IGNORECASE,
+)
+_GROK_OPAQUE_ID_RE = re.compile(
+    r"\b(?:conv|resp|attach)(?:[-_][A-Za-z0-9]+)+\b", re.IGNORECASE
+)
+_UUID_RE = re.compile(
+    r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{12}\b"
 )
 
 
@@ -66,10 +88,17 @@ def redact_error(text: str, max_len: int = 200) -> str:
     if not isinstance(text, str):
         text = str(text)
     cleaned = _SENSITIVE_KEY_RE.sub(r'"\1":"<REDACTED>"', text)
+    cleaned = _COOKIE_HEADER_RE.sub(r"\1: <REDACTED>", cleaned)
+    cleaned = _GROK_COOKIE_RE.sub(r"\1=<REDACTED>", cleaned)
     cleaned = _TOKEN_FIELD_RE.sub(r'"\1":"<REDACTED>"', cleaned)
     cleaned = _BEARER_RE.sub("Bearer <REDACTED>", cleaned)
+    cleaned = _XAI_TOKEN_RE.sub("<TOKEN>", cleaned)
     cleaned = _COOKIE_RE.sub(r"\1=<REDACTED>", cleaned)
     cleaned = _QUERY_TOKEN_RE.sub(r"\1<REDACTED>", cleaned)
+    cleaned = _EMAIL_RE.sub("<EMAIL>", cleaned)
+    cleaned = _IDENTITY_FIELD_RE.sub(r"\g<prefix><REDACTED>", cleaned)
+    cleaned = _GROK_OPAQUE_ID_RE.sub("<ID>", cleaned)
+    cleaned = _UUID_RE.sub("<ID>", cleaned)
     if len(cleaned) > max_len:
         cleaned = cleaned[:max_len] + "...[truncated]"
     return cleaned

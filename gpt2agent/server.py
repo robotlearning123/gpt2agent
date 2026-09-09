@@ -370,12 +370,16 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         raise ValueError("server.host must be a loopback address")
 
     from gpt2agent.backend import BackendClient
+    from gpt2agent.grok_build import GrokBuildClient, GrokBuildConfig
     from gpt2agent.model_catalog import ModelCatalog
     from gpt2agent.sse import ConversationClient
 
     _backend = BackendClient()
     model_catalog = ModelCatalog(_backend)
     conv = ConversationClient(_backend)
+    grok_build_client = GrokBuildClient(
+        GrokBuildConfig.from_mapping(cfg.get("grok_build", {}))
+    )
 
     mcp = FastMCP(
         "gpt2agent",
@@ -570,7 +574,13 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
     from gpt2agent.tools import register_all
 
-    register_all(mcp, _backend, conv, model_catalog=model_catalog)
+    register_all(
+        mcp,
+        _backend,
+        conv,
+        model_catalog=model_catalog,
+        grok_build_client=grok_build_client,
+    )
 
     return mcp
 
@@ -592,6 +602,26 @@ def main() -> None:
 
     # setup subcommand
     sub.add_parser("setup", help="First-time setup wizard (login + register)")
+
+    grok_setup_p = sub.add_parser(
+        "grok-setup",
+        help="Configure independent Grok Build and website authentication",
+    )
+    grok_setup_p.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Refresh the stored website authentication",
+    )
+    grok_setup_p.add_argument(
+        "--chrome-profile",
+        default="Default",
+        help="Chrome profile selected for browser-assisted website setup",
+    )
+    grok_setup_p.add_argument(
+        "--manual",
+        action="store_true",
+        help="Use hidden manual cookie input instead of browser assistance",
+    )
 
     # install subcommand — register gpt2agent with one or more MCP clients
     from gpt2agent.install import SUPPORTED_CLIENTS
@@ -666,6 +696,22 @@ def main() -> None:
 
         run_setup()
         return
+
+    if args.command == "grok-setup":
+        import asyncio
+        import json
+
+        from gpt2agent.grok_setup import run_grok_setup
+
+        receipt = asyncio.run(
+            run_grok_setup(
+                refresh=args.refresh,
+                chrome_profile=args.chrome_profile,
+                manual=args.manual,
+            )
+        )
+        print(json.dumps(receipt, sort_keys=True))
+        raise SystemExit(0 if receipt["status"] == "ok" else 1)
 
     if args.command == "install":
         from gpt2agent.install import run_install

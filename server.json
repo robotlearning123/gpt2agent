@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.robotlearning123/gpt2agent",
   "title": "gpt2agent",
-  "description": "ChatGPT Plus/Pro account access as 32 MCP tools and 2 static resources.",
+  "description": "ChatGPT tools plus Grok Build tools and 2 static resources.",
   "version": "0.0.12",
   "repository": {
     "url": "https://github.com/robotlearning123/gpt2agent",

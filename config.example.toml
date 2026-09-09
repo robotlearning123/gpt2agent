@@ -16,3 +16,14 @@ chat = "gpt-5-3"
 
 # Override the model for `deep_research_heavy` (default: gpt-5-5-pro)
 # heavy_dr = "gpt-5-5-pro"
+
+# Official Grok Build CLI subscription/OAuth lane. Empty roots fail closed:
+# configure at least one explicit repository root before calling Build tools.
+[grok_build]
+command = "grok"
+# home = "~/.grok"
+# auth_path = "~/.grok/auth.json"
+roots = []
+timeout_seconds = 120
+max_output_bytes = 1048576
+default_max_turns = 20

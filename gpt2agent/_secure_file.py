@@ -115,6 +115,95 @@ def _current_uid() -> int | None:
     return get_euid() if get_euid is not None else None
 
 
+def _private_json_failure(path: Path, invariant: str) -> RuntimeError:
+    return RuntimeError(f"{path} {invariant}")
+
+
+def read_private_json(
+    path: Path,
+    *,
+    maximum_bytes: int = 131_072,
+) -> Any:
+    """Read bounded JSON only from a current-user regular 0600 file."""
+    path = Path(path)
+    if (
+        isinstance(maximum_bytes, bool)
+        or not isinstance(maximum_bytes, int)
+        or maximum_bytes <= 0
+    ):
+        raise ValueError(f"{path} maximum_bytes must be a positive integer")
+
+    try:
+        observed = path.lstat()
+    except OSError:
+        raise _private_json_failure(path, "could not be inspected as a private JSON file") from None
+    if stat.S_ISLNK(observed.st_mode) or not stat.S_ISREG(observed.st_mode):
+        raise _private_json_failure(path, "must be a regular non-symlink file")
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        raise _private_json_failure(path, "could not be opened as a private JSON file") from None
+
+    try:
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode):
+                raise _private_json_failure(path, "must be a regular non-symlink file")
+            if (opened.st_dev, opened.st_ino) != (observed.st_dev, observed.st_ino):
+                raise _private_json_failure(path, "changed while being validated")
+
+            expected_uid = _current_uid()
+            if expected_uid is not None and opened.st_uid != expected_uid:
+                raise _private_json_failure(path, "must be owned by the current user")
+            if os.name == "posix" and opened.st_mode & 0o077:
+                raise _private_json_failure(path, "must use owner-only mode")
+            if not 0 < opened.st_size <= maximum_bytes:
+                raise _private_json_failure(path, "must have a positive bounded size")
+
+            remaining = opened.st_size
+            chunks: list[bytes] = []
+            while remaining:
+                try:
+                    chunk = os.read(fd, min(65_536, remaining))
+                except InterruptedError:
+                    continue
+                if not chunk:
+                    raise _private_json_failure(path, "changed while being read")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            if os.read(fd, 1):
+                raise _private_json_failure(path, "changed while being read")
+            final = os.fstat(fd)
+            if (
+                (final.st_dev, final.st_ino, final.st_size)
+                != (opened.st_dev, opened.st_ino, opened.st_size)
+            ):
+                raise _private_json_failure(path, "changed while being read")
+        except OSError:
+            raise _private_json_failure(path, "could not be read as private JSON") from None
+        try:
+            decoded = json.loads(b"".join(chunks).decode("utf-8"))
+        except (UnicodeError, ValueError, RecursionError):
+            raise _private_json_failure(path, "must contain valid UTF-8 JSON") from None
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+    else:
+        try:
+            os.close(fd)
+        except OSError:
+            raise _private_json_failure(
+                path, "could not be closed after reading private JSON"
+            ) from None
+    return decoded
+
+
 def _validate_owner(path: Path, owner: int, expected: int | None) -> None:
     if expected is not None and owner != expected:
         raise RuntimeError(

@@ -9,10 +9,16 @@ _PHONE_RE = re.compile(r"\+?\d[\d ()\-]{8,}\d")
 # leading date. Only the date itself is preserved; the rest of the match is
 # re-scanned so "2026-05-26 617-555-0123" still masks the phone.
 _DATE_PREFIX_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}|\d{1,2}-\d{1,2}-\d{4})(?=$|[^\d])")
+_UUID_LIKE_RE = re.compile(
+    r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{12}\b"
+)
 
 
 def _phone_repl(m: re.Match) -> str:
     text = m.group(0)
+    if _UUID_LIKE_RE.fullmatch(text):
+        return text
     parts = []
     position = 0
     while position < len(text):
@@ -61,6 +67,22 @@ _DB_CREDENTIAL_URL_RE = re.compile(
     r"(?P<scheme>\b(?:cockroachdb|mariadb|mongodb(?:\+srv)?|"
     r"mysql(?:\+[A-Za-z0-9_.-]+)?|postgres(?:ql)?|rediss?)://)"
     r"[^:@/\s]+:[^@\s]+@",
+    re.IGNORECASE,
+)
+_COOKIE_HEADER_RE = re.compile(r"\b(Cookie|Set-Cookie)\s*:\s*[^\r\n]+", re.IGNORECASE)
+_GROK_COOKIE_RE = re.compile(
+    r'''\b(sso-rw|sso|cf_clearance|grok_device_id)=(?:"[^"\r\n]*"|'[^'\r\n]*'|[^;\s"&]+)''',
+    re.IGNORECASE,
+)
+_XAI_TOKEN_RE = re.compile(r"\bxai-[A-Za-z0-9._~+/\-]{12,}=*", re.IGNORECASE)
+_SIGNED_QUERY_RE = re.compile(
+    r"([?&](?:credential|googleaccessid|signature|x-amz-credential|x-amz-security-token"
+    r"|x-amz-signature|x-goog-credential|x-goog-signature)=)[^&\s\"]+",
+    re.IGNORECASE,
+)
+_IDENTITY_FIELD_RE = re.compile(
+    r"(?P<prefix>\b(?:account|identity|profile|user|workspace|organization|org)"
+    r"(?:[_-]?id|Id)\s*(?:=|:)\s*[\"']?)[^\s,;}\]\"']+",
     re.IGNORECASE,
 )
 
@@ -120,6 +142,11 @@ def redact(s: object) -> object:
     s = _GOOGLE_API_KEY_RE.sub("<APIKEY>", s)
     s = _PEM_PRIVATE_KEY_RE.sub("<PRIVATE_KEY>", s)
     s = _DB_CREDENTIAL_URL_RE.sub(r"\g<scheme><REDACTED>@", s)
+    s = _COOKIE_HEADER_RE.sub(r"\1: <REDACTED>", s)
+    s = _GROK_COOKIE_RE.sub(r"\1=<REDACTED>", s)
+    s = _XAI_TOKEN_RE.sub("<TOKEN>", s)
+    s = _SIGNED_QUERY_RE.sub(r"\1<REDACTED>", s)
+    s = _IDENTITY_FIELD_RE.sub(r"\g<prefix><REDACTED>", s)
     s = _SECRET_ASSIGNMENT_RE.sub(_secret_assignment_repl, s)
     s = _BARE_KEY_ASSIGNMENT_RE.sub(_secret_assignment_repl, s)
     s = _EMAIL_RE.sub("<EMAIL>", s)

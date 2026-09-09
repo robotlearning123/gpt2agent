@@ -4,9 +4,17 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from gpt2agent.backend import BackendClient
+    from gpt2agent.grok_build import GrokBuildClient
 
 
-def register_all(mcp, client: BackendClient, conv=None, *, model_catalog=None) -> None:
+def register_all(
+    mcp,
+    client: BackendClient,
+    conv=None,
+    *,
+    model_catalog=None,
+    grok_build_client: GrokBuildClient | None = None,
+) -> None:
     """Register every backend tool on *mcp*."""
     # Keep package initialization dependency-free. Domain modules such as
     # model_catalog import focused helpers below this package; eager imports here
@@ -45,6 +53,10 @@ def register_all(mcp, client: BackendClient, conv=None, *, model_catalog=None) -
     writes.register(mcp, client)
     images.register(mcp, client, conv)
     tools_features.register(mcp, client, conv)
+    if grok_build_client is not None:
+        from gpt2agent.tools import grok_build
+
+        grok_build.register(mcp, grok_build_client)
     from gpt2agent.resources import register as register_resources
 
     register_resources(mcp)
