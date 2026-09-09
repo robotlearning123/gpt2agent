@@ -71,7 +71,7 @@ def test_heavy_dr_payload_structure():
     payload = _build_heavy_dr_payload("What is the tallest mountain?")
 
     # Core fields
-    assert payload["model"] == "gpt-5-5-pro", f"model mismatch: {payload['model']}"
+    assert payload["model"] == "gpt-6-pro", f"model mismatch: {payload['model']}"
     assert payload["system_hints"] == ["connector:connector_openai_deep_research"]
     assert payload["thinking_effort"] == "extended"
     assert payload["conversation_mode"] == {"kind": "primary_assistant"}

@@ -23,20 +23,20 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Purpose**: Send a single prompt to any ChatGPT model and get a text response.
 - **Parameters**:
   - `prompt` (str, required) -- the user message to send.
-  - `model` (str, default: value from `config.toml` `[models].chat`, fallback `"gpt-5-3"`) -- model slug. Run `list_models` to see all available slugs.
+  - `model` (str, default: value from `config.toml` `[models].chat`, fallback `"gpt-5-6"`) -- model slug. Run `list_models` to see all available slugs.
   - `temporary` (bool, default: `True`) -- when `True`, sets `history_and_training_disabled=True` which prevents the conversation from being saved and **blocks tool-based features** (image gen, code interpreter, canvas, memory persistence). Set `False` to enable those features.
 - **Returns**: `str` -- the assistant's reply text.
 - **When to use**: General Q&A, text generation, translation, summarization. Default choice for single-turn queries.
 - **Example**:
   ```python
   chat("Explain the difference between LTP and LTD in hippocampal neurons.")
-  chat("Summarize this abstract:", model="o3")
-  chat("Generate a chart of this data", model="gpt-5-3", temporary=False)
+  chat("Summarize this abstract:", model="o3-pro")
+  chat("Generate a chart of this data", model="gpt-5-6", temporary=False)
   ```
 - **Notes**:
   - `temporary=True` (default) means the conversation is ephemeral -- not saved to ChatGPT history, cannot use image gen / code interpreter / canvas.
   - If you need tool-based features (image gen, code interpreter, canvas), you **must** pass `temporary=False`.
-  - Available model slugs depend on your subscription tier. Pro plan unlocks `gpt-5-5-pro`, `gpt-5-4-pro`, `o3-pro`, etc.
+  - Available model slugs depend on your subscription tier. Pro plan unlocks `gpt-5-5-pro`, `gpt-5-6-pro`, `o3-pro`, etc.
 
 ---
 
@@ -84,7 +84,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 
 ### deep_research_heavy
 
-- **Purpose**: Long-form Deep Research using gpt-5-5-pro with the DR connector. Produces extended multi-section reports.
+- **Purpose**: Long-form Deep Research using gpt-6-pro with the DR connector. Produces extended multi-section reports.
 - **Parameters**:
   - `query` (str, required) -- the research question.
   - `auto_confirm` (bool, default: `True`) -- same behavior as `deep_research`.
@@ -103,7 +103,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
   - **Quota**: limits and reset timing are account-reported and can change. Run the bundled `deep-research/bin/quota.sh` before heavy calls.
   - Takes 5-30 minutes. Use `run_in_background` for shell integration.
   - Uses `/backend-api/f/conversation` (frontend endpoint), not the standard `/backend-api/conversation`.
-  - Model slug configurable via `[models].heavy_dr` in `config.toml` (default: `gpt-5-5-pro`).
+  - Model slug configurable via `[models].heavy_dr` in `config.toml` (default: `gpt-6-pro`).
   - **Report + citations recovered from the connector widget state** (fixed in 0.0.4): the connector never writes the report as an assistant text node, so the poll fetches the conversation with `include_widget_state=true` and recovers `widget_state.report_message` (text + `content_references`). Grouped source URLs are usually present but not guaranteed; if absent, the model may have cited sources inline in the body.
   - If the DR connector is unavailable, a warning is appended explaining how to enable it in chatgpt.com Settings > Connectors.
 
@@ -139,7 +139,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Purpose**: Generate an image using ChatGPT's built-in image generation (DALL-E).
 - **Parameters**:
   - `prompt` (str, required) -- description of the image to generate.
-  - `model` (str, default: `"gpt-5-3"`) -- model to use (must have `image_gen_tool_enabled`).
+  - `model` (str, default: `"gpt-5-6"`) -- model to use (must have `image_gen_tool_enabled`).
 - **Returns**: `dict` with keys:
   - `conversation_id` (str)
   - `assets` (list) -- each asset contains: `asset_pointer`, `file_id`, `width`, `height`, `size_bytes`, `download_url`, `file_name`, `mime_type`
@@ -201,7 +201,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Purpose**: Execute Python code in ChatGPT's sandboxed code interpreter.
 - **Parameters**:
   - `prompt` (str, required) -- the code or instruction to execute (e.g., `"Run this Python code: ..."`).
-  - `model` (str, default: `"gpt-5-3"`) -- model to use.
+  - `model` (str, default: `"gpt-5-6"`) -- model to use.
 - **Returns**: `dict` with keys:
   - `conversation_id` (str)
   - `text` (str) -- assistant's explanation of the output
@@ -231,7 +231,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Purpose**: Execute code via ChatGPT's Canvas feature -- a live editing environment.
 - **Parameters**:
   - `prompt` (str, required) -- the code or instruction (e.g., `"Create a React component that..."`).
-  - `model` (str, default: `"gpt-5-3"`) -- model to use.
+  - `model` (str, default: `"gpt-5-6"`) -- model to use.
 - **Returns**: `dict` with keys: `conversation_id`, `text`, `tool_calls`, `tool_responses`.
 - **When to use**: Create and test interactive documents, React components, HTML pages, code with live preview.
 - **Example**:
@@ -281,7 +281,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Purpose**: Return all available ChatGPT models with full metadata.
 - **Parameters**: None.
 - **Returns**: `list[dict]` -- each dict contains:
-  - `slug` (str) -- model identifier (e.g., `"gpt-5-3"`, `"o3-pro"`)
+  - `slug` (str) -- model identifier (e.g., `"gpt-5-6"`, `"o3-pro"`)
   - `title` (str) -- display name
   - `description` (str)
   - `max_tokens` (int)
@@ -491,7 +491,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
   - **Workaround**: `POST /backend-api/memories` returns 405 (Method Not Allowed). ChatGPT only allows model-initiated memory writes. This tool asks the model to remember the content directly.
   - Uses `temporary=False` (memory persistence requires non-temporary conversations).
   - The model may paraphrase or summarize rather than store verbatim. Use `memory_search` to verify.
-  - Uses `gpt-5-3` by default (from config).
+  - Uses `gpt-5-6` by default (from config).
 
 ---
 
