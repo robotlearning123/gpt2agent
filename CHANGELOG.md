@@ -6,6 +6,43 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `gpt2agent doctor`: a new subcommand next to `setup`, `install` and `run`
+  that probes every read-only surface against the live account and prints a
+  status table plus a one-line summary. It never sends a message, never creates
+  a conversation and never spends quota — read-only GETs plus one sentinel
+  probe to classify the challenge state — and it reports the write tools
+  (`custom_instructions_set`, `codex_task_create`) as `UNVERIFIED` rather than
+  pretending it probed them, because probing them means writing to the account.
+  Exits 0 when everything it could check is healthy, non-zero otherwise, and 2
+  with a clean message when no token is configured.
+
+### Changed
+
+- Upstream breakage now raises a named error instead of a bare `RuntimeError`.
+  `UpstreamChallengeError` is raised from the three "challenge could not be
+  solved" paths in `sentinel.py` (proof-of-work, missing Turnstile payload,
+  unsolved Turnstile) and `UpstreamEndpointError` from `list_apps` when its
+  endpoint returns HTTP 405. Both subclass `RuntimeError`, so existing
+  `except RuntimeError` handlers and `pytest.raises(RuntimeError, ...)`
+  assertions keep passing. The message states that the breakage is on
+  ChatGPT's side rather than the user's token or configuration, names the
+  affected tool families, and notes that the read-only tools still work.
+
+### Fixed
+
+- `list_apps` no longer surfaces a raw `HTTP 405 for /backend-api/apps/list`
+  error when ChatGPT moves that endpoint; it raises `UpstreamEndpointError`
+  naming the endpoint instead.
+
+### Documented
+
+- `README.md` gained a clearly marked status section describing what works and
+  what is blocked upstream, pointing at `gpt2agent doctor`, and the affected
+  tool tables and Limitations are annotated. No feature documentation was
+  removed.
+
 ## [0.0.12] - 2026-09-08
 
 Maintenance release. `0.0.11` cannot be installed from PyPI on a fresh

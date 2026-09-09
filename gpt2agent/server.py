@@ -326,6 +326,12 @@ def main() -> None:
     # setup subcommand
     sub.add_parser("setup", help="First-time setup wizard (login + register)")
 
+    # doctor subcommand — read-only health check against the live account
+    sub.add_parser(
+        "doctor",
+        help="Probe the account read-only and report which tools work right now",
+    )
+
     # install subcommand — register gpt2agent with one or more MCP clients
     from gpt2agent.install import SUPPORTED_CLIENTS
 
@@ -385,6 +391,11 @@ def main() -> None:
 
         run_setup()
         return
+
+    if args.command == "doctor":
+        from gpt2agent.doctor import run_doctor
+
+        raise SystemExit(run_doctor())
 
     if args.command == "install":
         from gpt2agent.install import run_install
