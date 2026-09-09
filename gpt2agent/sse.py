@@ -75,8 +75,8 @@ _F_CONV_URL = _BASE + "/backend-api/f/conversation"
 #: Model slug for legacy Deep Research (resolves to i-mini-m / web-search backend)
 DR_MODEL = "research"
 
-#: Model slug for heavy Deep Research — gpt-5-5-pro with extended thinking + DR connector
-HEAVY_DR_MODEL = "gpt-5-5-pro"
+#: Model slug for heavy Deep Research — gpt-6-pro with extended thinking + DR connector
+HEAVY_DR_MODEL = "gpt-6-pro"
 
 #: System hint for heavy Deep Research (connector identifier from chatgpt.com frontend)
 HEAVY_DR_HINT = "connector:connector_openai_deep_research"
@@ -465,7 +465,7 @@ def _build_heavy_dr_payload(query: str, *, model: str | None = None) -> dict:
     (2026-04-23).  Key differences from legacy DR:
 
     * URL target: /backend-api/f/conversation  (frontend endpoint)
-    * model: gpt-5-5-pro
+    * model: gpt-6-pro
     * system_hints: ["connector:connector_openai_deep_research"]
     * thinking_effort: "extended"
     * message.metadata contains deep_research_version / venus_model_variant / caterpillar fields
@@ -796,7 +796,7 @@ class ConversationClient:
         self,
         prompt: str,
         *,
-        model: str = "gpt-5-3",
+        model: str = "gpt-5-6",
         poll_interval: float = 5.0,
         max_wait: float = 300.0,
     ) -> dict:
@@ -971,7 +971,7 @@ class ConversationClient:
         self,
         prompt: str,
         *,
-        model: str = "gpt-5-3",
+        model: str = "gpt-5-6",
         temporary: bool = False,
         poll_interval: float = 5.0,
         max_wait: float = 300.0,
@@ -1396,7 +1396,7 @@ class ConversationClient:
         Payload + endpoint ground-truth reverse-engineered from
         chatgpt.com/deep-research browser traffic (2026-04-23):
 
-            model = gpt-5-5-pro
+            model = gpt-6-pro
             system_hints = ["connector:connector_openai_deep_research"]
             thinking_effort = "extended"
             message.metadata.deep_research_version = "standard"
