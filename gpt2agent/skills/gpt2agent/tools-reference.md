@@ -30,7 +30,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Example**:
   ```python
   chat("Explain the difference between LTP and LTD in hippocampal neurons.")
-  chat("Summarize this abstract:", model="o3")
+  chat("Summarize this abstract:", model="o3-pro")
   chat("Generate a chart of this data", model="gpt-5-6", temporary=False)
   ```
 - **Notes**:
