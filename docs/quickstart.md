@@ -13,7 +13,7 @@ Get gpt2agent running in any MCP client in ~5 minutes.
 ## 2. Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/robotlearning123/chatgpt2agent/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/robotlearning123/gpt2agent/main/install.sh | bash
 ```
 
 This installs the `gpt2agent` package (via pipx) and registers it with every MCP
