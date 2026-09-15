@@ -1,0 +1,19 @@
+{
+  "status": "manual_handoff",
+  "tool": "chat",
+  "prompt": "Reply with exactly: RELEASE CHECK v0.0.14 OK",
+  "url": "https://chatgpt.com/",
+  "model_hint": "gpt-5-6",
+  "temporary_hint": true,
+  "steps": [
+    "1. Open https://chatgpt.com/ in a browser signed in to your ChatGPT account.",
+    "2. Select the gpt-5-6 model in the model picker.",
+    "3. Start a temporary chat (hourglass icon) so it is not saved.",
+    "4. Paste the prompt text from this payload and send it.",
+    "5. When the reply finishes, run list_conversations to find the new conversation, then get_conversation to read the result back."
+  ],
+  "readback": {
+    "list": "list_conversations",
+    "fetch": "get_conversation"
+  }
+}

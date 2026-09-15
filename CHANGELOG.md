@@ -6,6 +6,39 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.0.14] - 2026-09-15
+
+### Added
+
+- Manual handoff mode: all 9 conversation-class tools (`chat`, `agent`,
+  `deep_research`, `deep_research_heavy`, `gpt_chat`, `memory_create_via_chat`,
+  `generate_image`, `code_interpreter`, `canvas_execute`) accept
+  `manual=True` to skip the backend entirely and return a JSON handoff — the
+  exact prompt text the REST/SSE path would send (byte-identical via shared
+  wrapper constants), the URL to paste it into, and readback steps via
+  `list_conversations`/`get_conversation`. Zero network calls. This keeps
+  blocked workflows usable while the upstream Sentinel/Turnstile challenge
+  blocks `/backend-api/conversation` (see the README status table).
+- `docs/release-validation.md`: pre-release validation runbook (doctor
+  archive, manual-handoff roundtrip receipt, pytest archive, README-vs-doctor
+  status check, artifact outsider emulation) with receipts under
+  `artifacts/verify/`.
+- `scripts/release-emulation-test.sh`: outsider emulation gate for releases —
+  builds the artifact, installs the wheel into a clean venv, exercises
+  no-token first run, client registration under an isolated HOME, a real MCP
+  stdio client session (tool schemas, live read-only calls, `manual=True`
+  handoff), the 0.0.13→new upgrade path, and uninstall cleanliness. 11 checks,
+  must end `RESULT: N passed, 0 failed`.
+- `docs/dev/specs/phase0-manual-handoff.md`: the spec the manual handoff mode
+  was built and reviewed against.
+
+### Changed
+
+- Repository renamed `gpt2agent` → `chatgpt2agent`; all living references
+  updated (badges, install one-liner, plugin marketplace command, PyPI
+  metadata URLs, MCP registry id `io.github.robotlearning123/chatgpt2agent`).
+  Old URLs redirect; the PyPI package name stays `gpt2agent`.
+
 ## [0.0.13] - 2026-09-09
 
 ### Added
