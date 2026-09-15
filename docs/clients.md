@@ -55,7 +55,7 @@ Instead of `gpt2agent install --client claude-code`, you can install via the plu
 marketplace (bundles the MCP server registration + both skills):
 
 ```text
-/plugin marketplace add robotlearning123/gpt2agent
+/plugin marketplace add robotlearning123/chatgpt2agent
 /plugin install gpt2agent@gpt2agent
 ```
 

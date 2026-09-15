@@ -2,7 +2,7 @@
 # gpt2agent — one-line installer.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/robotlearning123/gpt2agent/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/robotlearning123/chatgpt2agent/main/install.sh | bash
 #   ./install.sh                                          # from a checkout
 #   ./install.sh --client claude-code                     # install for one client only
 #   ./install.sh --transport http --port 9000             # use HTTP transport
