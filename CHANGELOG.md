@@ -6,6 +6,18 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Repository rename rolled back same day (2026-09-15): the repo is
+  `robotlearning123/gpt2agent` again and all living references were restored.
+  The rename to `chatgpt2agent` broke the PyPI trusted-publisher binding
+  (claims are registered against the old repository path), blocking the
+  v0.0.14 publish. A future rename must migrate the PyPI trusted publisher
+  BEFORE the repository rename.
+- Release process: publishing now requires an explicit owner approval of a
+  release summary BEFORE the publish step runs (added to
+  `docs/release-validation.md` as the final gate).
+
 ## [0.0.14] - 2026-09-15
 
 ### Added

@@ -60,3 +60,13 @@ scripts/release-emulation-test.sh <release-worktree> | tee artifacts/verify/huma
 Must end `RESULT: N passed, 0 failed`. Introduced after v0.0.14's first cut
 caught a missed `.claude-plugin/plugin.json` version bump and a test-harness
 stdio flag error before they reached users.
+
+## 6. Owner publish gate (added 2026-09-15 — mandatory)
+
+Before the publish step runs (tag push triggers `release.yml` automatically,
+so this gate sits BEFORE tagging), present the owner a release summary:
+version, CHANGELOG highlights, CI state, runbook receipts (steps 1-5), and
+the planned tag. **Do not push the release tag until the owner explicitly
+approves.** If a publish run fails and a rerun would retry the publish step,
+the same approval applies to the rerun. A repo rename additionally requires
+migrating the PyPI trusted publisher to the new repository path FIRST.

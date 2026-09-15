@@ -121,7 +121,7 @@ completed reports headlessly (45.6K / 52.4K / 51.5K chars). Set
 > later/longer `done`; the bin script mitigates by picking the longest `done`.
 > A dedicated light-mode fix is tracked separately.
 
-Upstream tracking: see `gpt2agent/sse.py` (https://github.com/robotlearning123/chatgpt2agent/blob/main/gpt2agent/sse.py)
+Upstream tracking: see `gpt2agent/sse.py` (https://github.com/robotlearning123/gpt2agent/blob/main/gpt2agent/sse.py)
 around `_dr_report_from_widget_state` / `_poll_dr_completion`.
 
 ## Quota management

@@ -8,8 +8,8 @@
     "name": "robotlearning123",
     "url": "https://github.com/robotlearning123"
   },
-  "homepage": "https://github.com/robotlearning123/chatgpt2agent#readme",
-  "repository": "https://github.com/robotlearning123/chatgpt2agent",
+  "homepage": "https://github.com/robotlearning123/gpt2agent#readme",
+  "repository": "https://github.com/robotlearning123/gpt2agent",
   "license": "MIT",
   "keywords": ["mcp", "chatgpt", "openai", "deep-research", "agent", "llm"],
   "skills": "./gpt2agent/skills/",

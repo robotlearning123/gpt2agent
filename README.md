@@ -1,6 +1,6 @@
 # gpt2agent
 
-<!-- mcp-name: io.github.robotlearning123/chatgpt2agent -->
+<!-- mcp-name: io.github.robotlearning123/gpt2agent -->
 
 > **MCP server for your ChatGPT account: `codex login` → ChatGPT Plus/Pro inside any MCP client.**
 
@@ -9,7 +9,7 @@ and the account-tier features below — inside Claude Code, Codex, Cursor, Winds
 Zed, and any MCP client.
 
 [![PyPI version](https://img.shields.io/pypi/v/gpt2agent)](https://pypi.org/project/gpt2agent/)
-[![CI](https://github.com/robotlearning123/chatgpt2agent/actions/workflows/ci.yml/badge.svg)](https://github.com/robotlearning123/chatgpt2agent/actions/workflows/ci.yml)
+[![CI](https://github.com/robotlearning123/gpt2agent/actions/workflows/ci.yml/badge.svg)](https://github.com/robotlearning123/gpt2agent/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://pypi.org/project/gpt2agent/)
 
@@ -91,7 +91,7 @@ Works with Claude Code, Codex CLI, and any client that speaks the MCP protocol o
 ## Install — one line
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/robotlearning123/chatgpt2agent/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/robotlearning123/gpt2agent/main/install.sh | bash
 ```
 
 That command:
@@ -120,7 +120,7 @@ gpt2agent install --transport http --http-port 9000
 ### Or as a Claude Code plugin
 
 ```text
-/plugin marketplace add robotlearning123/chatgpt2agent
+/plugin marketplace add robotlearning123/gpt2agent
 /plugin install gpt2agent@gpt2agent
 ```
 

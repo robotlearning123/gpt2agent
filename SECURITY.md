@@ -7,7 +7,7 @@ seriously. Please read this before filing.
 
 **Do not open a public issue for a vulnerability.** Instead use GitHub's private
 reporting: **Security → Report a vulnerability** on
-<https://github.com/robotlearning123/chatgpt2agent/security/advisories/new>.
+<https://github.com/robotlearning123/gpt2agent/security/advisories/new>.
 
 Include: affected version/commit, a minimal reproduction, the impact, and any
 suggested fix. We aim to acknowledge within a few days.
