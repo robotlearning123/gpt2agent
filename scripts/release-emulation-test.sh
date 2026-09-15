@@ -15,11 +15,12 @@ check() { # check <name> <exit-code> [detail]
 
 echo "═══ A. build & artifact checks ═══"
 cd -P "$W" || exit 2
+EXPECTED=$(python3 -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
 rm -rf dist && python -m build > "$OUT/build.log" 2>&1
-check "A1 python -m build" $? "$(ls dist/ 2>/dev/null | tr '\n' ' ')"
+check "A1 python -m build" $? "$(find dist -maxdepth 1 -type f -printf '%f ' 2>/dev/null)"
 python -m twine check dist/* > "$OUT/twine.log" 2>&1
 check "A2 twine check" $?
-SDIST=$(ls dist/*.tar.gz); WHEEL=$(ls dist/*.whl)
+WHEEL=$(find dist -maxdepth 1 -name '*.whl' | head -1)
 
 echo "═══ B. outsider first install (isolated HOME, no dev deps) ═══"
 VENV=/tmp/gpt2agent-rel14-venv; ISOHOME=/tmp/gpt2agent-rel14-home
@@ -27,11 +28,15 @@ rm -rf "$VENV" "$ISOHOME"; mkdir -p "$ISOHOME"
 python -m venv "$VENV" > /dev/null 2>&1
 "$VENV/bin/pip" install --quiet "$WHEEL" > "$OUT/pip-install.log" 2>&1
 check "B1 pip install wheel (clean venv)" $?
-V=$("$VENV/bin/gpt2agent" --version 2>&1); check "B2 gpt2agent --version == 0.0.14" $([ "$V" = "gpt2agent 0.0.14" ] || [ "$V" = "0.0.14" ]; echo $?) "got: $V"
+V=$("$VENV/bin/gpt2agent" --version 2>&1)
+if [ "$V" = "gpt2agent $EXPECTED" ] || [ "$V" = "$EXPECTED" ]; then VB=0; else VB=1; fi
+check "B2 gpt2agent --version == pyproject version" "$VB" "got: $V (expected $EXPECTED)"
 
 echo "═══ C. first-run flows without token (isolated HOME) ═══"
 HOME="$ISOHOME" CODEX_HOME="$ISOHOME/.codex" "$VENV/bin/gpt2agent" doctor > "$OUT/doctor-notoken.log" 2>&1
-RC=$?; check "C1 doctor no-token exits 2 with clean message" $([ $RC -eq 2 ]; echo $?; ) "exit=$RC $(tail -1 "$OUT/doctor-notoken.log" | head -c 120)"
+RC=$?
+if [ "$RC" -eq 2 ]; then C1OK=0; else C1OK=1; fi
+check "C1 doctor no-token exits 2 with clean message" "$C1OK" "exit=$RC $(tail -1 "$OUT/doctor-notoken.log" | head -c 120)"
 HOME="$ISOHOME" CODEX_HOME="$ISOHOME/.codex" "$VENV/bin/gpt2agent" install --client claude-code > "$OUT/install-claude.log" 2>&1
 check "C2 install --client claude-code (isolated HOME)" $? "$(grep -c gpt2agent "$ISOHOME/.claude.json" 2>/dev/null || echo 0) refs in .claude.json"
 
@@ -80,7 +85,7 @@ async def main():
 asyncio.run(main())
 PYEOF
 "$VENV/bin/python" /tmp/gpt2agent-rel14-mcp.py > "$OUT/mcp-client.json" 2> "$OUT/mcp-client.err"
-check "E1 MCP stdio client session" $? "$(cat "$OUT/mcp-client.json" 2>/dev/null | head -c 300)"
+check "E1 MCP stdio client session" $? "$(head -c 300 "$OUT/mcp-client.json" 2>/dev/null)"
 python3 -c "
 import json;d=json.load(open('$OUT/mcp-client.json'))
 assert d['tool_count']>=25, d; assert d['manual_param_on_9'], d
@@ -100,7 +105,8 @@ check "F1 0.0.13 install + upgrade to wheel" $((RC1|RC2)) "now: $V2"
 
 echo "═══ G. uninstall cleanliness ═══"
 "$UVENV/bin/pip" uninstall -y -q gpt2agent > /dev/null 2>&1
-check "G1 pip uninstall" $([ ! -e "$UVENV/bin/gpt2agent" ]; echo $?)
+if [ ! -e "$UVENV/bin/gpt2agent" ]; then G1OK=0; else G1OK=1; fi
+check "G1 pip uninstall" "$G1OK"
 
 echo
 echo "RESULT: $PASS passed, $FAIL failed"
