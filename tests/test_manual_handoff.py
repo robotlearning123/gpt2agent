@@ -174,7 +174,7 @@ def test_manual_param_exists_defaults_false_and_is_last(monkeypatch) -> None:
 
 def test_chat_manual_handoff_defaults(monkeypatch) -> None:
     tools = _build_with_conv(monkeypatch, _FailConv())
-    h = _assert_handoff(
+    _assert_handoff(
         _run(tools["chat"].fn, "hello world", manual=True),
         tool="chat", prompt="hello world", url=CHATGPT_URL,
         model_hint="gpt-5-3", temporary_hint=True)  # cfg models.chat default
@@ -182,7 +182,7 @@ def test_chat_manual_handoff_defaults(monkeypatch) -> None:
 
 def test_chat_manual_handoff_custom_model_and_temporary(monkeypatch) -> None:
     tools = _build_with_conv(monkeypatch, _FailConv())
-    h = _assert_handoff(
+    _assert_handoff(
         _run(tools["chat"].fn, "ping", model="gpt-6-pro", temporary=False,
              manual=True),
         tool="chat", prompt="ping", url=CHATGPT_URL,
