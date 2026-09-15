@@ -17,3 +17,14 @@ chat = "gpt-5-6"
 
 # Override the model for `deep_research_heavy` (default: gpt-6-pro)
 # heavy_dr = "gpt-6-pro"
+
+# Phase-1 browser transport (EXPERIMENTAL, chat only): drives chatgpt.com in a
+# real Chrome via Playwright while the sentinel challenge blocks the
+# conversation endpoint. Requires: pip install "gpt2agent[browser]".
+# First run opens a headed Chrome — log in once in that window; the dedicated
+# profile keeps the session afterwards.
+# [browser]
+# enabled = false                        # master switch for chat(browser=True)
+# headed = true                          # headed Chrome is the known-good path
+# timeout_s = 180                        # streaming/reply deadline (seconds)
+# profile_dir = "~/.gpt2agent/chrome-profile"  # persistent Chrome profile dir
