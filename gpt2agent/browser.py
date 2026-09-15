@@ -119,7 +119,11 @@ class BrowserTransport:
                 await ctx.close()
 
     async def _await_composer(self, page: Any) -> None:
-        """Wait for the composer; on miss, distinguish logged-out from drift."""
+        """Wait for the composer; logged-out goes to the one-time login path
+        immediately instead of burning the full composer timeout first."""
+        if await page.locator(SEL_LOGGED_OUT).count() > 0:
+            await self._await_login(page)
+            return
         composer = page.locator(SEL_PROMPT).first
         try:
             await composer.wait_for(state="visible", timeout=self.timeout_s * 1000)
@@ -127,17 +131,28 @@ class BrowserTransport:
         except TimeoutError:
             pass
         if await page.locator(SEL_LOGGED_OUT).count() > 0:
-            # One-time interactive login into the persistent profile — the
-            # only human step, once ever; the profile keeps the session.
-            print("log in once in the opened window", flush=True)
-            try:
-                await composer.wait_for(
-                    state="visible", timeout=self.timeout_s * 1000
-                )
-                return
-            except TimeoutError:
-                pass
+            await self._await_login(page)
+            return
         raise _drift("SEL_PROMPT", "find the chat composer")
+
+    async def _await_login(self, page: Any) -> None:
+        """One-time interactive login into the persistent profile — the only
+        human step, once ever; the profile keeps the session. Logged via
+        WARNING (not print): stdout is the MCP stdio protocol channel."""
+        _log.warning(
+            "chatgpt.com is logged out in browser profile %s — log in once "
+            "in the opened Chrome window (one-time; the profile persists the "
+            "session); waiting up to %ss",
+            self.profile_dir,
+            self.timeout_s,
+        )
+        composer = page.locator(SEL_PROMPT).first
+        try:
+            await composer.wait_for(state="visible", timeout=self.timeout_s * 1000)
+            return
+        except TimeoutError:
+            pass
+        raise _drift("SEL_PROMPT", "find the chat composer after login")
 
     async def _click_required(
         self, page: Any, const: str, name: str, action: str
@@ -164,11 +179,23 @@ class BrowserTransport:
         await opt.first.click()
 
     async def _await_reply_done(self, page: Any) -> None:
-        """Poll the streaming indicator until it disappears or times out."""
+        """Two-phase wait (grok review finding, 2026-09-15): right after send
+        the streaming indicator has not rendered yet, so its ABSENCE is the
+        pre-send DOM, not completion. Phase 1 — wait until the reply STARTS
+        (streaming indicator or assistant node appears). Phase 2 — wait until
+        the streaming indicator disappears. Ultra-fast replies that finish
+        before any indicator is seen still pass: the assistant node starts
+        phase 2, and one more poll confirms the indicator is absent."""
         deadline = time.monotonic() + self.timeout_s
+        started = False
         while True:
-            if await page.locator(SEL_STREAMING).count() == 0:
+            streaming = await page.locator(SEL_STREAMING).count()
+            if started and streaming == 0:
                 return
+            if not started and (
+                streaming > 0 or await page.locator(SEL_ASSISTANT).count() > 0
+            ):
+                started = True
             if time.monotonic() >= deadline:
                 raise TimeoutError(
                     f"timeout after {self.timeout_s}s waiting for the "

@@ -352,6 +352,53 @@ def test_happy_path_launch_goto_verbatim_prompt_and_reply(
     assert b.SEL_SEND in page.clicks
 
 
+def test_streaming_appears_late_is_awaited(monkeypatch) -> None:
+    """grok BLOCKING finding (2026-09-15): right after send, the streaming
+    indicator has not rendered yet — its absence is the PRE-send DOM and must
+    not be read as completion. Here streaming/assistant are absent for the
+    first two polls, streaming shows for polls 3-4, then clears. The
+    transport must actually OBSERVE the indicator present before treating
+    absence as done; the pre-fix code returned on poll 1 and then raised a
+    false SEL_ASSISTANT drift."""
+    b = _browser_mod()
+    spec = _full_spec(b)
+    state = {"stream_reads": 0, "present_observed": False}
+
+    class _Delayed(dict):
+        def get(self, key, default=None):
+            v = super().get(key, default)
+            if key == b.SEL_STREAMING:
+                state["stream_reads"] += 1
+                if state["stream_reads"] <= 2:
+                    return {"count": 0}
+                if state["stream_reads"] <= 4:
+                    state["present_observed"] = True
+                    return {"count": 1}
+                return {"count": 0}
+            if key == b.SEL_ASSISTANT:
+                # the assistant node only renders once the reply starts
+                if state["stream_reads"] >= 3:
+                    return {"count": 1, "text": "ASSISTANT REPLY"}
+                return {"count": 0}
+            return v
+
+    page = _FakePage(_Delayed(spec))
+    _install_fake_playwright(monkeypatch, page)
+
+    async def _nosleep(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(b.asyncio, "sleep", _nosleep)
+
+    out = asyncio.run(b.BrowserTransport().chat("hi", temporary=False))
+
+    assert out == "ASSISTANT REPLY"
+    assert state["present_observed"] is True, (
+        "transport returned without ever observing the streaming indicator "
+        "PRESENT — first-poll absence was wrongly treated as completion"
+    )
+
+
 def test_default_profile_dir(monkeypatch) -> None:
     b = _browser_mod()
     page = _FakePage(_full_spec(b))
@@ -457,17 +504,20 @@ def test_prompt_miss_logged_out_absent_drifts(monkeypatch) -> None:
     assert "selector" not in str(ei.value)
 
 
-def test_logged_out_prints_login_hint_then_drifts(monkeypatch, capsys) -> None:
+def test_logged_out_warns_login_hint_then_drifts(monkeypatch, capsys, caplog) -> None:
     b = _browser_mod()
     spec = _full_spec(b)
     spec[b.SEL_PROMPT] = {"count": 0}
     spec[b.SEL_LOGGED_OUT] = {"count": 1}
     page = _FakePage(spec)
     _install_fake_playwright(monkeypatch, page)
-    with pytest.raises(b.BrowserDriftError) as ei:
-        asyncio.run(b.BrowserTransport().chat("hi", temporary=False))
+    with caplog.at_level("WARNING", logger="gpt2agent.browser"):
+        with pytest.raises(b.BrowserDriftError) as ei:
+            asyncio.run(b.BrowserTransport().chat("hi", temporary=False))
     assert "SEL_PROMPT" in str(ei.value)
-    assert "log in once in the opened window" in capsys.readouterr().out
+    assert "log in once" in caplog.text
+    # stdout is the MCP stdio protocol channel — the hint must NOT print there
+    assert capsys.readouterr().out == ""
 
 
 def test_send_miss_fails_closed(monkeypatch) -> None:
