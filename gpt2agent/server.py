@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 from pathlib import Path
@@ -34,6 +35,13 @@ _DEFAULTS: dict[str, Any] = {
 # Hosts that keep the unauthenticated HTTP transport reachable only from the
 # local machine. Anything else requires an explicit GPT2AGENT_ALLOW_REMOTE opt-in.
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "::ffff:127.0.0.1"})
+
+# Prompt wrapper for memory_create_via_chat — shared by the REST/SSE path and
+# the manual=True handoff so both send byte-identical text.
+_MEMORY_PROMPT_PREFIX = (
+    "Please commit the following to memory verbatim. "
+    "Do not summarize, paraphrase, or ask for confirmation:\n\n"
+)
 
 
 def _http_bind_decision(host: str, allow_remote: bool) -> str:
@@ -97,6 +105,7 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
     from gpt2agent.backend import BackendClient
     from gpt2agent.sse import ConversationClient
+    from gpt2agent.tools.manual import build_handoff
 
     _backend = BackendClient()
     conv = ConversationClient(_backend)
@@ -118,7 +127,12 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
     )
 
     @mcp.tool()
-    async def chat(prompt: str, model: str = chat_model, temporary: bool = True) -> str:
+    async def chat(
+        prompt: str,
+        model: str = chat_model,
+        temporary: bool = True,
+        manual: bool = False,
+    ) -> str:
         """Chat with any ChatGPT model on your account.
 
         Pass `model` to switch slugs — e.g. `gpt-5-5-pro` (410K, pro reasoning),
@@ -127,21 +141,40 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
         Set `temporary=False` to allow tool-based features (image gen, code
         interpreter, canvas). Temporary chats (default) cannot use these tools.
+
+        Set `manual=True` to get a paste-into-chatgpt.com handoff JSON instead
+        of calling the backend (zero network calls).
         """
+        if manual:
+            return json.dumps(
+                build_handoff("chat", prompt, model=model, temporary=temporary),
+                indent=2,
+            )
         text = await conv.complete(
             model, [{"role": "user", "content": prompt}], temporary=temporary
         )
         return text or "(no response)"
 
     @mcp.tool()
-    async def agent(prompt: str) -> str:
+    async def agent(prompt: str, manual: bool = False) -> str:
         """ChatGPT Agent Mode — 262K context with autonomous browsing, code
         execution, and tool use. Best for multi-step tasks (literature gathering,
         document workflows, browser automation). SSE-only (no REST endpoint).
 
         Returns "(no response)" if the agent run times out rather than an empty
         string, so callers can tell a timeout apart from a real empty answer.
+
+        Set `manual=True` to get a paste-into-chatgpt.com handoff JSON instead
+        of calling the backend (zero network calls).
         """
+        if manual:
+            return json.dumps(
+                build_handoff(
+                    "agent", prompt, model=None, temporary=False,
+                    extra={"mode": "agent"},
+                ),
+                indent=2,
+            )
         text = await conv.complete(
             agent_model,
             [{"role": "user", "content": prompt}],
@@ -151,7 +184,9 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         return text or "(no response)"
 
     @mcp.tool()
-    async def deep_research(query: str, auto_confirm: bool = True) -> str:
+    async def deep_research(
+        query: str, auto_confirm: bool = True, manual: bool = False
+    ) -> str:
         """Search the web and synthesize a detailed report with citations.
 
         Best for: current events, literature review, market research.
@@ -159,8 +194,19 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
         When `auto_confirm` is True (default), an imperative prefix is prepended
         so the model proceeds without asking "Do you want me to start?".
+
+        Set `manual=True` to get a paste-into-chatgpt.com handoff JSON instead
+        of calling the backend (zero network calls).
         """
         q = _DR_IMPERATIVE_PREFIX + query if auto_confirm else query
+        if manual:
+            return json.dumps(
+                build_handoff(
+                    "deep_research", q, model=None, temporary=False,
+                    extra={"mode": "deep_research"},
+                ),
+                indent=2,
+            )
         final_text = ""
         tool_calls: list[str] = []
         refs: list = []
@@ -195,7 +241,9 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         return final_text or "(no response)"
 
     @mcp.tool()
-    async def deep_research_heavy(query: str, auto_confirm: bool = True) -> str:
+    async def deep_research_heavy(
+        query: str, auto_confirm: bool = True, manual: bool = False
+    ) -> str:
         """Long-form Deep Research using gpt-6-pro (5–30 min, uses monthly DR quota — check /backend-api/conversation/init for remaining). For short web-augmented answers use `deep_research` instead.
 
         When `auto_confirm` is True (default), an imperative prefix is prepended
@@ -205,8 +253,19 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         recovered from the connector's widget state; grouped source URLs are
         usually present but not guaranteed — if absent, the model may have cited
         sources inline in the body. Returns "(no response)" on timeout.
+
+        Set `manual=True` to get a paste-into-chatgpt.com handoff JSON instead
+        of calling the backend (zero network calls).
         """
         q = _DR_IMPERATIVE_PREFIX + query if auto_confirm else query
+        if manual:
+            return json.dumps(
+                build_handoff(
+                    "deep_research_heavy", q, model=None, temporary=False,
+                    extra={"mode": "deep_research"},
+                ),
+                indent=2,
+            )
         final_text = ""
         refs: list = []
         connector_failed = False
@@ -258,7 +317,7 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         return final_text or "(no response)"
 
     @mcp.tool()
-    async def gpt_chat(gizmo_id: str, prompt: str) -> str:
+    async def gpt_chat(gizmo_id: str, prompt: str, manual: bool = False) -> str:
         """Chat through one of your private Custom GPTs.
 
         `gizmo_id`: pass the `short_url` returned by `list_custom_gpts` (call it
@@ -268,7 +327,18 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         EXPERIMENTAL: passes `gizmo_id` into the conversation payload via the
         `conversation_origin` field reverse-engineered from chatgpt.com web
         bundles. Returns "(no response)" on timeout.
+
+        Set `manual=True` to get a paste-into-chatgpt.com handoff JSON instead
+        of calling the backend (zero network calls).
         """
+        if manual:
+            return json.dumps(
+                build_handoff(
+                    "gpt_chat", prompt, model=None, temporary=False,
+                    extra={"gizmo_id": gizmo_id},
+                ),
+                indent=2,
+            )
         text = await conv.complete(
             chat_model,
             [{"role": "user", "content": prompt}],
@@ -278,18 +348,26 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         return text or "(no response)"
 
     @mcp.tool()
-    async def memory_create_via_chat(content: str) -> str:
+    async def memory_create_via_chat(content: str, manual: bool = False) -> str:
         """Add an entry to your ChatGPT memories.
 
         Workaround for `POST /backend-api/memories` returning 405 — ChatGPT only
         allows model-initiated memory writes. This tool asks the model to remember
         the content directly, then returns the assistant's reply (which usually
         confirms what was stored). Use `memory_search` to verify after.
+
+        Set `manual=True` to get a paste-into-chatgpt.com handoff JSON instead
+        of calling the backend (zero network calls).
         """
-        prompt = (
-            "Please commit the following to memory verbatim. "
-            "Do not summarize, paraphrase, or ask for confirmation:\n\n" + content
-        )
+        prompt = _MEMORY_PROMPT_PREFIX + content
+        if manual:
+            return json.dumps(
+                build_handoff(
+                    "memory_create_via_chat", prompt, model=None,
+                    temporary=False,
+                ),
+                indent=2,
+            )
         text = await conv.complete(
             chat_model, [{"role": "user", "content": prompt}], temporary=False
         )
