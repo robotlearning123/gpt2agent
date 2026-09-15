@@ -1,0 +1,66 @@
+"""Phase 0 manual handoff mode — self-contained paste/send instructions.
+
+When a conversation-class tool is called with ``manual=True`` it makes zero
+network calls and returns ``build_handoff`` serialized as JSON: the exact
+prompt text the REST/SSE path would send, where to paste it, and which
+existing tools to use for readback.
+"""
+from __future__ import annotations
+
+CHATGPT_URL = "https://chatgpt.com/"
+
+_READBACK = {"list": "list_conversations", "fetch": "get_conversation"}
+
+_MODE_LABELS = {
+    "agent": "Agent",
+    "deep_research": "Deep Research",
+    "canvas": "Canvas",
+    "images": "image generation",
+}
+
+
+def build_handoff(
+    tool: str,
+    prompt: str,
+    *,
+    model: str | None = None,
+    temporary: bool | None = None,
+    extra: dict | None = None,
+) -> dict:
+    """Assemble the manual-handoff payload for a conversation-class tool."""
+    extra = dict(extra or {})
+    if tool == "gpt_chat":
+        slug = str(extra.get("gizmo_id", "")).removeprefix("g/")
+        url = f"{CHATGPT_URL}g/{slug}"
+    else:
+        url = CHATGPT_URL
+
+    steps = [f"Open {url} in a browser signed in to your ChatGPT account."]
+    mode = extra.get("mode")
+    if mode:
+        steps.append(
+            f"Enable {_MODE_LABELS.get(mode, mode)} mode in the composer."
+        )
+    if model:
+        steps.append(f"Select the {model} model in the model picker.")
+    if temporary:
+        steps.append("Start a temporary chat (hourglass icon) so it is not saved.")
+    steps.append("Paste the prompt text from this payload and send it.")
+    steps.append(
+        "When the reply finishes, run list_conversations to find the new "
+        "conversation, then get_conversation to read the result back."
+    )
+    steps = [f"{i}. {s}" for i, s in enumerate(steps, 1)]
+
+    handoff = {
+        "status": "manual_handoff",
+        "tool": tool,
+        "prompt": prompt,
+        "url": url,
+        "model_hint": model,
+        "temporary_hint": temporary,
+        "steps": steps,
+        "readback": dict(_READBACK),
+    }
+    handoff.update(extra)
+    return handoff

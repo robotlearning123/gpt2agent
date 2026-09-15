@@ -1,9 +1,12 @@
 """Image generation and file download tools."""
 from __future__ import annotations
 
+import json
+
 from gpt2agent.backend import BackendClient
 from gpt2agent.tools._backend import async_get
 from gpt2agent.tools._ids import validate_path_id
+from gpt2agent.tools.manual import build_handoff
 
 
 def register(mcp, client: BackendClient, conv=None) -> None:
@@ -12,6 +15,7 @@ def register(mcp, client: BackendClient, conv=None) -> None:
     async def generate_image(
         prompt: str,
         model: str = "gpt-5-6",
+        manual: bool = False,
     ) -> dict:
         """Generate an image using ChatGPT's built-in image generation.
 
@@ -26,7 +30,18 @@ def register(mcp, client: BackendClient, conv=None) -> None:
         Returns:
             Dict with: conversation_id, assets (list with asset_pointer, file_id,
             width, height, size_bytes, download_url, file_name), metadata.
+
+        Set `manual=True` to get a paste-into-chatgpt.com handoff JSON instead
+        of calling the backend (zero network calls).
         """
+        if manual:
+            return json.dumps(
+                build_handoff(
+                    "generate_image", prompt, model=None, temporary=False,
+                    extra={"mode": "images"},
+                ),
+                indent=2,
+            )
         if conv is None:
             from gpt2agent.sse import ConversationClient
             _conv = ConversationClient(client)

@@ -242,7 +242,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
   )
   ```
 - **Notes**:
-  - Internally prepends `"Use Canvas to: "` to the prompt before sending.
+  - Internally prepends a canvas-instruction prefix (`CANVAS_PROMPT_PREFIX` in `tools_features.py`) to the prompt before sending.
   - Uses `temporary=False` internally.
   - Similar to `code_interpreter` but uses the Canvas editing environment instead of the sandbox.
   - If `conv` is not injected, creates its own `ConversationClient` instance.
