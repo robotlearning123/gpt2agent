@@ -30,6 +30,10 @@ _DEFAULTS: dict[str, Any] = {
     # the LAN/WAN. Set host explicitly (and GPT2AGENT_ALLOW_REMOTE=1) to opt in.
     "server": {"host": "127.0.0.1", "port": 9000},
     "models": {"chat": "gpt-5-6"},
+    # Phase-1 browser transport (gpt2agent/browser.py): drives chatgpt.com in
+    # a real Chrome via Playwright while the sentinel challenge blocks the
+    # conversation endpoint. Off unless [browser] enabled = true.
+    "browser": {"enabled": False, "headed": True, "timeout_s": 180},
 }
 
 # Hosts that keep the unauthenticated HTTP transport reachable only from the
@@ -131,6 +135,7 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         prompt: str,
         model: str = chat_model,
         temporary: bool = True,
+        browser: bool = False,
         manual: bool = False,
     ) -> str:
         """Chat with any ChatGPT model on your account.
@@ -144,12 +149,34 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
         Set `manual=True` to get a paste-into-chatgpt.com handoff JSON instead
         of calling the backend (zero network calls).
+
+        Set `browser=True` to drive chatgpt.com in a real Chrome via the
+        experimental browser transport (requires `[browser] enabled = true`
+        in config.toml plus `pip install "gpt2agent[browser]"`). `manual=True`
+        wins over `browser=True` — the explicit handoff beats engine choice.
         """
         if manual:
             return json.dumps(
                 build_handoff("chat", prompt, model=model, temporary=temporary),
                 indent=2,
             )
+        if browser:
+            bcfg = cfg.get("browser", {})
+            if not bcfg.get("enabled"):
+                raise RuntimeError(
+                    "chat(browser=True) requires [browser] enabled = true in "
+                    'config.toml (and the optional extra: pip install '
+                    '"gpt2agent[browser]")'
+                )
+            from gpt2agent.browser import BrowserTransport
+
+            profile = bcfg.get("profile_dir")
+            transport = BrowserTransport(
+                profile_dir=Path(profile).expanduser() if profile else None,
+                headed=bool(bcfg.get("headed", True)),
+                timeout_s=bcfg.get("timeout_s", 180),
+            )
+            return await transport.chat(prompt, model=model, temporary=temporary)
         text = await conv.complete(
             model, [{"role": "user", "content": prompt}], temporary=temporary
         )
