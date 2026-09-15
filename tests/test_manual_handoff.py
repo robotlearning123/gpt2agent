@@ -146,7 +146,12 @@ def _assert_handoff(raw: Any, *, tool: str, prompt: str, url: str,
     assert h["temporary_hint"] is temporary_hint
     assert isinstance(h["steps"], list) and len(h["steps"]) > 0
     assert all(isinstance(s, str) and s for s in h["steps"])
-    assert h["readback"] == READBACK
+    if temporary_hint:
+        # Temporary chats are never saved, so readback is a browser-copy note
+        # (v0.0.14 release roundtrip finding), not the list/fetch pair.
+        assert "note" in h["readback"]
+    else:
+        assert h["readback"] == READBACK
     return h
 
 

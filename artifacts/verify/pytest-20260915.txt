@@ -2,21 +2,6 @@
 ........................................................................ [ 37%]
 .............sss........................................................ [ 56%]
 ........................................................................ [ 75%]
-F.....................................ss.s.............................. [ 94%]
+......................................ss.s.............................. [ 94%]
 ................sss                                                      [100%]
-=================================== FAILURES ===================================
-_____________ test_release_verifier_accepts_live_tree_without_tag ______________
-
-    def test_release_verifier_accepts_live_tree_without_tag() -> None:
-        result = _verify(PROJECT_ROOT)
-    
->       assert result.returncode == 0, result.stderr
-E       AssertionError: ERROR: .claude-plugin/plugin.json version '0.0.13' does not match pyproject.toml '0.0.14'
-E         
-E       assert 1 == 0
-E        +  where 1 = CompletedProcess(args=['/home/robot/miniconda3/bin/python', '/home/robot/workspace/47-chatgpt2agent/.worktrees/gpt2age...ode=1, stdout='', stderr="ERROR: .claude-plugin/plugin.json version '0.0.13' does not match pyproject.toml '0.0.14'\n").returncode
-
-tests/test_release_metadata.py:225: AssertionError
-=========================== short test summary info ============================
-FAILED tests/test_release_metadata.py::test_release_verifier_accepts_live_tree_without_tag
-1 failed, 369 passed, 9 skipped in 7.36s
+370 passed, 9 skipped in 7.55s
