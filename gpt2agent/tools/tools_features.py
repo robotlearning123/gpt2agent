@@ -18,7 +18,7 @@ def register(mcp, client: BackendClient, conv=None) -> None:
         prompt: str,
         model: str = "gpt-5-6",
         manual: bool = False,
-    ) -> dict:
+    ) -> dict | str:
         """Execute code via ChatGPT's code interpreter.
 
         Sends a prompt that triggers code execution. The server runs the code
@@ -27,6 +27,8 @@ def register(mcp, client: BackendClient, conv=None) -> None:
         Args:
             prompt: The code or instruction to execute (e.g. "Run this Python code: ...").
             model: ChatGPT model to use. Defaults to gpt-5-6.
+            manual: When True, return the paste-into-chatgpt.com handoff JSON
+                   string instead of calling the backend.
 
         Returns:
             Dict with: conversation_id, text (assistant explanation),
@@ -55,7 +57,7 @@ def register(mcp, client: BackendClient, conv=None) -> None:
         prompt: str,
         model: str = "gpt-5-6",
         manual: bool = False,
-    ) -> dict:
+    ) -> dict | str:
         """Execute code via ChatGPT's Canvas feature.
 
         Creates a Canvas document with live code execution. Similar to
@@ -64,6 +66,8 @@ def register(mcp, client: BackendClient, conv=None) -> None:
         Args:
             prompt: The code or instruction (e.g. "Create a React component that...").
             model: ChatGPT model to use. Defaults to gpt-5-6.
+            manual: When True, return the paste-into-chatgpt.com handoff JSON
+                   string instead of calling the backend.
 
         Returns:
             Dict with: conversation_id, text, tool_calls, tool_responses.

@@ -16,7 +16,7 @@ def register(mcp, client: BackendClient, conv=None) -> None:
         prompt: str,
         model: str = "gpt-5-6",
         manual: bool = False,
-    ) -> dict:
+    ) -> dict | str:
         """Generate an image using ChatGPT's built-in image generation.
 
         The image is created asynchronously. This tool waits until it's ready
@@ -26,6 +26,8 @@ def register(mcp, client: BackendClient, conv=None) -> None:
             prompt: Description of the image to generate.
             model: ChatGPT model to use (must have image_gen_tool_enabled).
                    Defaults to gpt-5-6.
+            manual: When True, return the paste-into-chatgpt.com handoff JSON
+                   string instead of calling the backend.
 
         Returns:
             Dict with: conversation_id, assets (list with asset_pointer, file_id,

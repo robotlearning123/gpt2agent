@@ -25,6 +25,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
   - `prompt` (str, required) -- the user message to send.
   - `model` (str, default: value from `config.toml` `[models].chat`, fallback `"gpt-5-6"`) -- model slug. Run `list_models` to see all available slugs.
   - `temporary` (bool, default: `True`) -- when `True`, sets `history_and_training_disabled=True` which prevents the conversation from being saved and **blocks tool-based features** (image gen, code interpreter, canvas, memory persistence). Set `False` to enable those features.
+  - `manual` (bool, default: `False`) -- when `True`, make zero network calls and return a JSON handoff (`status: manual_handoff`) with the exact prompt to paste into chatgpt.com, the target URL, and readback steps via `list_conversations`/`get_conversation`. Fallback while the upstream Sentinel challenge blocks `/backend-api/conversation`.
 - **Returns**: `str` -- the assistant's reply text.
 - **When to use**: General Q&A, text generation, translation, summarization. Default choice for single-turn queries.
 - **Example**:
@@ -45,6 +46,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Purpose**: ChatGPT Agent Mode -- autonomous browsing, code execution, and tool use with 262K context window.
 - **Parameters**:
   - `prompt` (str, required) -- the task description.
+  - `manual` (bool, default: `False`) -- when `True`, make zero network calls and return a JSON handoff (`status: manual_handoff`) with the exact prompt to paste into chatgpt.com, the target URL, and readback steps via `list_conversations`/`get_conversation`. Fallback while the upstream Sentinel challenge blocks `/backend-api/conversation`.
 - **Returns**: `str` -- the agent's response text.
 - **When to use**: Multi-step tasks requiring browsing, code execution, or tool orchestration. Literature gathering, document workflows, browser automation.
 - **Example**:
@@ -66,6 +68,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Parameters**:
   - `query` (str, required) -- the research question or topic.
   - `auto_confirm` (bool, default: `True`) -- when `True`, prepends an imperative prefix so the model starts immediately without asking "Do you want me to start?".
+  - `manual` (bool, default: `False`) -- when `True`, make zero network calls and return a JSON handoff (`status: manual_handoff`) with the exact prompt to paste into chatgpt.com, the target URL, and readback steps via `list_conversations`/`get_conversation`. Fallback while the upstream Sentinel challenge blocks `/backend-api/conversation`.
 - **Returns**: `str` -- the research report text, followed by a `---\n**Sources:**` section with markdown links to cited URLs.
 - **When to use**: Current events, literature review, market research, any question needing web-augmented multi-source synthesis.
 - **Example**:
@@ -88,6 +91,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Parameters**:
   - `query` (str, required) -- the research question.
   - `auto_confirm` (bool, default: `True`) -- same behavior as `deep_research`.
+  - `manual` (bool, default: `False`) -- when `True`, make zero network calls and return a JSON handoff (`status: manual_handoff`) with the exact prompt to paste into chatgpt.com, the target URL, and readback steps via `list_conversations`/`get_conversation`. Fallback while the upstream Sentinel challenge blocks `/backend-api/conversation`.
 - **Returns**: `str` -- the long-form report. Sources section appended if citations are available. May include a connector-unavailable warning if the DR connector fails.
 - **When to use**: Big strategic questions (>5 sub-questions), topics expecting 50+ sources, questions needing 10+ KB reports.
 - **Example**:
@@ -115,6 +119,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Parameters**:
   - `gizmo_id` (str, required) -- pass the `short_url` returned by `list_custom_gpts` (format: `g-*`). Call `list_custom_gpts` first to enumerate them.
   - `prompt` (str, required) -- the user message.
+  - `manual` (bool, default: `False`) -- when `True`, make zero network calls and return a JSON handoff (`status: manual_handoff`) with the exact prompt to paste into chatgpt.com, the target URL, and readback steps via `list_conversations`/`get_conversation`. Fallback while the upstream Sentinel challenge blocks `/backend-api/conversation`.
 - **Returns**: `str` -- the Custom GPT's response text.
 - **When to use**: When you need a specialized GPT's persona, knowledge base, or tool access.
 - **Example**:
@@ -140,6 +145,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Parameters**:
   - `prompt` (str, required) -- description of the image to generate.
   - `model` (str, default: `"gpt-5-6"`) -- model to use (must have `image_gen_tool_enabled`).
+  - `manual` (bool, default: `False`) -- when `True`, make zero network calls and return a JSON handoff (`status: manual_handoff`) with the exact prompt to paste into chatgpt.com, the target URL, and readback steps via `list_conversations`/`get_conversation`. Fallback while the upstream Sentinel challenge blocks `/backend-api/conversation`.
 - **Returns**: `dict` with keys:
   - `conversation_id` (str)
   - `assets` (list) -- each asset contains: `asset_pointer`, `file_id`, `width`, `height`, `size_bytes`, `download_url`, `file_name`, `mime_type`
@@ -202,6 +208,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Parameters**:
   - `prompt` (str, required) -- the code or instruction to execute (e.g., `"Run this Python code: ..."`).
   - `model` (str, default: `"gpt-5-6"`) -- model to use.
+  - `manual` (bool, default: `False`) -- when `True`, make zero network calls and return a JSON handoff (`status: manual_handoff`) with the exact prompt to paste into chatgpt.com, the target URL, and readback steps via `list_conversations`/`get_conversation`. Fallback while the upstream Sentinel challenge blocks `/backend-api/conversation`.
 - **Returns**: `dict` with keys:
   - `conversation_id` (str)
   - `text` (str) -- assistant's explanation of the output
@@ -232,6 +239,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Parameters**:
   - `prompt` (str, required) -- the code or instruction (e.g., `"Create a React component that..."`).
   - `model` (str, default: `"gpt-5-6"`) -- model to use.
+  - `manual` (bool, default: `False`) -- when `True`, make zero network calls and return a JSON handoff (`status: manual_handoff`) with the exact prompt to paste into chatgpt.com, the target URL, and readback steps via `list_conversations`/`get_conversation`. Fallback while the upstream Sentinel challenge blocks `/backend-api/conversation`.
 - **Returns**: `dict` with keys: `conversation_id`, `text`, `tool_calls`, `tool_responses`.
 - **When to use**: Create and test interactive documents, React components, HTML pages, code with live preview.
 - **Example**:
@@ -478,6 +486,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Purpose**: Add an entry to ChatGPT memories via model-initiated write.
 - **Parameters**:
   - `content` (str, required) -- the text to remember verbatim.
+  - `manual` (bool, default: `False`) -- when `True`, make zero network calls and return a JSON handoff (`status: manual_handoff`) with the exact prompt to paste into chatgpt.com, the target URL, and readback steps via `list_conversations`/`get_conversation`. Fallback while the upstream Sentinel challenge blocks `/backend-api/conversation`.
 - **Returns**: `str` -- the assistant's reply (usually confirms what was stored).
 - **When to use**: Persist a fact, preference, or context for future ChatGPT conversations.
 - **Example**:
