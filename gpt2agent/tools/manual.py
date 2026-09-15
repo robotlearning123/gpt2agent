@@ -46,10 +46,25 @@ def build_handoff(
     if temporary:
         steps.append("Start a temporary chat (hourglass icon) so it is not saved.")
     steps.append("Paste the prompt text from this payload and send it.")
-    steps.append(
-        "When the reply finishes, run list_conversations to find the new "
-        "conversation, then get_conversation to read the result back."
-    )
+    if temporary:
+        # Temporary chats are never saved to history, so list_conversations
+        # cannot find them — the only way to keep the reply is to copy it from
+        # the browser (found during the v0.0.14 release roundtrip).
+        steps.append(
+            "Temporary chats do not appear in list_conversations — copy the "
+            "reply text directly from the browser, or re-run with "
+            "temporary=False if you need tool readback."
+        )
+        readback = {
+            "note": "temporary chats are not saved to history; copy the reply "
+            "from the browser, or use temporary=False for tool readback",
+        }
+    else:
+        steps.append(
+            "When the reply finishes, run list_conversations to find the new "
+            "conversation, then get_conversation to read the result back."
+        )
+        readback = dict(_READBACK)
     steps = [f"{i}. {s}" for i, s in enumerate(steps, 1)]
 
     handoff = {
@@ -60,7 +75,7 @@ def build_handoff(
         "model_hint": model,
         "temporary_hint": temporary,
         "steps": steps,
-        "readback": dict(_READBACK),
+        "readback": readback,
     }
     handoff.update(extra)
     return handoff

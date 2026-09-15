@@ -1,0 +1,32 @@
+gpt2agent doctor 0.0.14 — probing read-only surfaces
+
+tool                      result     detail
+list_models               OK         22 models
+account_status            OK         chatgptpro plan, US
+list_conversations        OK         5 recent conversations
+get_conversation          OK         newest conversation readable (143 nodes)
+list_custom_gpts          OK         5 custom GPTs
+custom_instructions_get   OK         enabled=True
+memory_list               OK         69 memories
+memory_search             OK         searchable over 69 memories
+list_tasks                OK         50 tasks
+list_codex_envs           OK         6 environments
+list_codex_tasks          OK         1 tasks
+list_apps                 OK         92 apps/connectors
+sentinel (chat-requirements) BLOCKED    turnstile required, solver returns no token — changed upstream
+chat                      BLOCKED    upstream challenge — see the sentinel row above
+agent                     BLOCKED    upstream challenge — see the sentinel row above
+gpt_chat                  BLOCKED    upstream challenge — see the sentinel row above
+deep_research             BLOCKED    upstream challenge — see the sentinel row above
+deep_research_heavy       BLOCKED    upstream challenge — see the sentinel row above
+generate_image            BLOCKED    upstream challenge — see the sentinel row above
+code_interpreter          BLOCKED    upstream challenge — see the sentinel row above
+canvas_execute            BLOCKED    upstream challenge — see the sentinel row above
+memory_create_via_chat    BLOCKED    upstream challenge — see the sentinel row above
+custom_instructions_set   UNVERIFIED plain POST, bypasses the sentinel gate — not probed (would overwrite your instructions)
+codex_task_create         UNVERIFIED plain POST, bypasses the sentinel gate — not probed (would spend quota)
+get_file_info             UNVERIFIED needs a file_id — not probed
+get_file_download_url     UNVERIFIED needs a file_id — not probed
+
+blocked tools need ChatGPT's sentinel challenge, which changed upstream — not a token or configuration problem. Read-only tools still work.
+gpt2agent doctor: 12 OK, 0 failed, 10 blocked upstream, 4 unverified
