@@ -36,18 +36,40 @@ def register(mcp, client: BackendClient) -> None:
                     "status table."
                 ) from exc
             raise
-        return [
-            {
-                "id": a.get("id"),
-                "type": _classify(a.get("id") or ""),
-                "enabled": a.get("enabled"),
-                # Check key presence, not truthiness: `is_connected: False` (a
-                # disconnected app) must report False, not fall through to
-                # `connected` or None.
-                "connected": (
-                    a["is_connected"] if "is_connected" in a else a.get("connected")
-                ),
-            }
-            for a in (data.get("apps") or [])
-            if isinstance(a, dict)
-        ]
+        entries = data.get("apps") or []
+        out = []
+        for a in entries:
+            if isinstance(a, dict):
+                out.append(
+                    {
+                        "id": a.get("id"),
+                        "type": _classify(a.get("id") or ""),
+                        "enabled": a.get("enabled"),
+                        # Check key presence, not truthiness: `is_connected:
+                        # False` (a disconnected app) must report False, not
+                        # fall through to `connected` or None.
+                        "connected": (
+                            a["is_connected"] if "is_connected" in a
+                            else a.get("connected")
+                        ),
+                    }
+                )
+            elif isinstance(a, str) and a:
+                # Upstream moved `apps` to bare ID strings (2026-09-15
+                # agent-journey finding): 98 connector_*/asdk_app_* ids with
+                # no metadata envelope. enabled/connected are unknown.
+                out.append(
+                    {"id": a, "type": _classify(a), "enabled": None,
+                     "connected": None}
+                )
+        if entries and not out:
+            # Shape drifted again into something we recognize neither as a
+            # dict nor an id string — fail closed with a named error instead
+            # of a silent empty "success".
+            raise UpstreamEndpointError(
+                f"list_apps is broken upstream: /backend-api/apps/list "
+                f"returned {len(entries)} apps in an unrecognized shape "
+                f"(first entry: {type(entries[0]).__name__}). This is not a "
+                "problem with your token or configuration."
+            )
+        return out

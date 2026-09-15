@@ -283,15 +283,29 @@ def test_apps_classify() -> None:
     assert apps._classify("") == "unknown"
 
 
-def test_list_apps_filters_nondict_and_connected_fallback() -> None:
+def test_list_apps_dict_and_string_shapes_and_fallback() -> None:
     client = FakeClient(routes={"/backend-api/apps/list": {"apps": [
         {"id": "connector_a", "enabled": True, "is_connected": True},
         {"id": "asdk_app_b", "connected": False},
-        "not-a-dict"]}})
+        "connector_c",  # upstream moved to bare id strings (2026-09-15)
+    ]}})
     out = _run(_reg(apps, client).tools["list_apps"])
-    assert len(out) == 2  # string filtered out
+    assert len(out) == 3
     assert out[0]["type"] == "official_connector"
     assert out[1]["connected"] is False  # `connected` fallback used
+    # string entry: classified, unknown flags explicit (not silently dropped)
+    assert out[2] == {"id": "connector_c", "type": "official_connector",
+                      "enabled": None, "connected": None}
+
+
+def test_list_apps_unrecognized_shape_fails_closed() -> None:
+    # If upstream drifts to yet another entry shape, a non-empty list must
+    # never come back as a silent empty "success" (journey finding class).
+    client = FakeClient(routes={"/backend-api/apps/list": {"apps": [["opaque"]]}})
+    from gpt2agent.backend import UpstreamEndpointError
+    import pytest as _pytest
+    with _pytest.raises(UpstreamEndpointError, match="unrecognized shape"):
+        _run(_reg(apps, client).tools["list_apps"])
 
 
 def test_list_codex_envs_repo_count_and_envelope() -> None:

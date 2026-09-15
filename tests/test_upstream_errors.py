@@ -283,5 +283,11 @@ def test_list_apps_success_path_unchanged() -> None:
     apps.register(mcp, client)
 
     out = asyncio.run(mcp.tools["list_apps"]())
-    assert [a["id"] for a in out] == ["connector_openai_codex_tasks", "asdk_app_1"]
+    # Bare-id strings are kept as classified entries (upstream moved to that
+    # shape 2026-09-15); unknown flags come back as explicit None.
+    assert [a["id"] for a in out] == [
+        "connector_openai_codex_tasks", "asdk_app_1", "not-a-dict",
+    ]
     assert out[1]["connected"] is False  # explicit False survives
+    assert out[2] == {"id": "not-a-dict", "type": "unknown",
+                      "enabled": None, "connected": None}
