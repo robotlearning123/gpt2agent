@@ -30,6 +30,10 @@ SEL_MODEL_OPTION = '[role="menuitem"], [role="option"]'
 SEL_STREAMING = 'button[data-testid="stop-button"], .result-streaming'
 SEL_ASSISTANT = '[data-message-author-role="assistant"]'
 SEL_LOGGED_OUT = 'button[data-testid="login-button"], a[href*="auth/login"]'
+SEL_MODES_BUTTON = 'button[data-testid="composer-plus-btn"], button[aria-label*="Tools"]'
+SEL_MODE_AGENT = '[role="menuitem"]:has-text("Agent"), [role="option"]:has-text("Agent mode")'
+SEL_MODE_DEEP_RESEARCH = '[role="menuitem"]:has-text("Deep research"), [role="option"]:has-text("Deep research")'
+SEL_MODE_IMAGES = '[role="menuitem"]:has-text("Image"), [role="option"]:has-text("Create image")'
 # === end selectors ===
 
 _CHATGPT_URL = "https://chatgpt.com/"
@@ -58,6 +62,13 @@ def _load_playwright() -> Any:
     return async_playwright
 
 
+_MODE_OPTS = {
+    "agent": ("SEL_MODE_AGENT", SEL_MODE_AGENT),
+    "research": ("SEL_MODE_DEEP_RESEARCH", SEL_MODE_DEEP_RESEARCH),
+    "images": ("SEL_MODE_IMAGES", SEL_MODE_IMAGES),
+}
+
+
 def _drift(name: str, action: str) -> BrowserDriftError:
     return BrowserDriftError(
         f"{name} did not match while trying to {action} — the chatgpt.com "
@@ -84,8 +95,24 @@ class BrowserTransport:
         prompt: str,
         model: str | None = None,
         temporary: bool = True,
+        mode: str | None = None,
+        url: str | None = None,
+        effort: str | None = None,
     ) -> str:
-        """Run one chatgpt.com chat turn and return the assistant reply text."""
+        """Run one chatgpt.com chat turn and return the assistant reply text.
+
+        ``mode`` enables a composer mode ("agent", "research", "images")
+        before typing — fail-closed via the constants block. ``url``
+        overrides the chatgpt.com root (e.g. a Custom-GPT /g/ page).
+        ``effort`` is a BEST-EFFORT reasoning-effort pick through the model
+        picker: a missing picker or unmatched option logs a warning and
+        proceeds, never raises.
+        """
+        if mode is not None and mode not in _MODE_OPTS:
+            raise ValueError(
+                f"unknown browser mode {mode!r} — expected one of "
+                f"{sorted(_MODE_OPTS)}"
+            )
         async_playwright = _load_playwright()
         async with async_playwright() as pw:
             ctx = await pw.chromium.launch_persistent_context(
@@ -95,14 +122,18 @@ class BrowserTransport:
             )
             try:
                 page = await ctx.new_page()
-                await page.goto(_CHATGPT_URL)
+                await page.goto(url or _CHATGPT_URL)
                 await self._await_composer(page)
                 if temporary:
                     await self._click_required(
                         page, SEL_TEMPORARY, "SEL_TEMPORARY", "start a temporary chat"
                     )
+                if mode:
+                    await self._pick_mode(page, mode)
                 if model:
                     await self._pick_model(page, model)
+                if effort:
+                    await self._pick_effort(page, effort)
                 try:
                     await page.locator(SEL_PROMPT).press_sequentially(prompt)
                 except TimeoutError as exc:
@@ -161,6 +192,37 @@ class BrowserTransport:
             await page.locator(const).first.click()
         except TimeoutError as exc:
             raise _drift(name, action) from exc
+
+    async def _pick_mode(self, page: Any, mode: str) -> None:
+        """Enable a composer mode via the tools menu — fail-closed on a miss."""
+        name, const = _MODE_OPTS[mode]
+        await self._click_required(
+            page, SEL_MODES_BUTTON, "SEL_MODES_BUTTON",
+            "open the composer tools menu",
+        )
+        await self._click_required(page, const, name, f"enable {mode} mode")
+
+    async def _pick_effort(self, page: Any, effort: str) -> None:
+        """Best-effort reasoning-effort pick through the model picker: a
+        missing picker OR unmatched option only warns and proceeds (unlike
+        _pick_model, where an option miss is fail-closed drift)."""
+        btn = page.locator(SEL_MODEL_BUTTON).first
+        if await btn.count() == 0:
+            _log.warning(
+                "effort picker not present; sending without switching "
+                "(wanted %r)",
+                effort,
+            )
+            return
+        await btn.click()
+        opt = page.locator(SEL_MODEL_OPTION).filter(has_text=effort)
+        if await opt.count() == 0:
+            _log.warning(
+                "no effort option matching %r; proceeding with the default",
+                effort,
+            )
+            return
+        await opt.first.click()
 
     async def _pick_model(self, page: Any, model: str) -> None:
         """Best-effort model switch: a missing picker is NOT an error."""
