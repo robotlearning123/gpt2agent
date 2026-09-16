@@ -109,7 +109,8 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
     from gpt2agent.backend import BackendClient
     from gpt2agent.sse import ConversationClient
-    from gpt2agent.tools.manual import build_handoff
+    from gpt2agent.tools._browser import browser_transport
+    from gpt2agent.tools.manual import build_handoff, gpt_chat_url
 
     _backend = BackendClient()
     conv = ConversationClient(_backend)
@@ -161,21 +162,7 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
                 indent=2,
             )
         if browser:
-            bcfg = cfg.get("browser", {})
-            if not bcfg.get("enabled"):
-                raise RuntimeError(
-                    "chat(browser=True) requires [browser] enabled = true in "
-                    'config.toml (and the optional extra: pip install '
-                    '"gpt2agent[browser]")'
-                )
-            from gpt2agent.browser import BrowserTransport
-
-            profile = bcfg.get("profile_dir")
-            transport = BrowserTransport(
-                profile_dir=Path(profile).expanduser() if profile else None,
-                headed=bool(bcfg.get("headed", True)),
-                timeout_s=bcfg.get("timeout_s", 180),
-            )
+            transport = browser_transport(cfg.get("browser", {}), "chat")
             return await transport.chat(prompt, model=model, temporary=temporary)
         text = await conv.complete(
             model, [{"role": "user", "content": prompt}], temporary=temporary
@@ -183,7 +170,9 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         return text or "(no response)"
 
     @mcp.tool()
-    async def agent(prompt: str, manual: bool = False) -> str:
+    async def agent(
+        prompt: str, browser: bool = False, manual: bool = False
+    ) -> str:
         """ChatGPT Agent Mode — 262K context with autonomous browsing, code
         execution, and tool use. Best for multi-step tasks (literature gathering,
         document workflows, browser automation). SSE-only (no REST endpoint).
@@ -193,6 +182,11 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
         Set `manual=True` to get a paste-into-chatgpt.com handoff JSON instead
         of calling the backend (zero network calls).
+
+        Set `browser=True` to drive chatgpt.com in a real Chrome via the
+        experimental browser transport (requires `[browser] enabled = true`
+        in config.toml plus `pip install "gpt2agent[browser]"`). `manual=True`
+        wins over `browser=True` — the explicit handoff beats engine choice.
         """
         if manual:
             return json.dumps(
@@ -202,6 +196,9 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
                 ),
                 indent=2,
             )
+        if browser:
+            transport = browser_transport(cfg.get("browser", {}), "agent")
+            return await transport.chat(prompt, temporary=False, mode="agent")
         text = await conv.complete(
             agent_model,
             [{"role": "user", "content": prompt}],
@@ -212,7 +209,8 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
     @mcp.tool()
     async def deep_research(
-        query: str, auto_confirm: bool = True, manual: bool = False
+        query: str, auto_confirm: bool = True, browser: bool = False,
+        manual: bool = False,
     ) -> str:
         """Search the web and synthesize a detailed report with citations.
 
@@ -224,6 +222,12 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
         Set `manual=True` to get a paste-into-chatgpt.com handoff JSON instead
         of calling the backend (zero network calls).
+
+        Set `browser=True` to drive chatgpt.com in a real Chrome via the
+        experimental browser transport (requires `[browser] enabled = true`
+        in config.toml plus `pip install "gpt2agent[browser]"`). `manual=True`
+        wins over `browser=True` — the explicit handoff beats engine choice.
+        The browser path returns the report text without a Sources section.
         """
         q = _DR_IMPERATIVE_PREFIX + query if auto_confirm else query
         if manual:
@@ -234,6 +238,10 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
                 ),
                 indent=2,
             )
+        if browser:
+            transport = browser_transport(
+                cfg.get("browser", {}), "deep_research")
+            return await transport.chat(q, temporary=False, mode="research")
         final_text = ""
         tool_calls: list[str] = []
         refs: list = []
@@ -269,7 +277,8 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
     @mcp.tool()
     async def deep_research_heavy(
-        query: str, auto_confirm: bool = True, manual: bool = False
+        query: str, auto_confirm: bool = True, browser: bool = False,
+        manual: bool = False,
     ) -> str:
         """Long-form Deep Research using gpt-6-pro (5–30 min, uses monthly DR quota — check /backend-api/conversation/init for remaining). For short web-augmented answers use `deep_research` instead.
 
@@ -283,6 +292,12 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
         Set `manual=True` to get a paste-into-chatgpt.com handoff JSON instead
         of calling the backend (zero network calls).
+
+        Set `browser=True` to drive chatgpt.com in a real Chrome via the
+        experimental browser transport (requires `[browser] enabled = true`
+        in config.toml plus `pip install "gpt2agent[browser]"`). `manual=True`
+        wins over `browser=True` — the explicit handoff beats engine choice.
+        The browser path returns the report text without a Sources section.
         """
         q = _DR_IMPERATIVE_PREFIX + query if auto_confirm else query
         if manual:
@@ -293,6 +308,14 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
                 ),
                 indent=2,
             )
+        if browser:
+            transport = browser_transport(
+                cfg.get("browser", {}), "deep_research_heavy")
+            # The browser effort picker wants effort LABELS ("Pro"), not the
+            # REST model slug from [models].heavy_dr — passing the slug was a
+            # silent best-effort no-op (grok finding, 2026-09-16).
+            return await transport.chat(
+                q, temporary=False, mode="research", effort="Pro")
         final_text = ""
         refs: list = []
         connector_failed = False
@@ -344,7 +367,10 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         return final_text or "(no response)"
 
     @mcp.tool()
-    async def gpt_chat(gizmo_id: str, prompt: str, manual: bool = False) -> str:
+    async def gpt_chat(
+        gizmo_id: str, prompt: str, browser: bool = False,
+        manual: bool = False,
+    ) -> str:
         """Chat through one of your private Custom GPTs.
 
         `gizmo_id`: pass the `short_url` returned by `list_custom_gpts` (call it
@@ -357,6 +383,12 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
         Set `manual=True` to get a paste-into-chatgpt.com handoff JSON instead
         of calling the backend (zero network calls).
+
+        Set `browser=True` to drive chatgpt.com in a real Chrome via the
+        experimental browser transport (requires `[browser] enabled = true`
+        in config.toml plus `pip install "gpt2agent[browser]"`). `manual=True`
+        wins over `browser=True` — the explicit handoff beats engine choice.
+        The browser path navigates to the GPT's /g/ page directly.
         """
         if manual:
             return json.dumps(
@@ -366,6 +398,10 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
                 ),
                 indent=2,
             )
+        if browser:
+            transport = browser_transport(cfg.get("browser", {}), "gpt_chat")
+            return await transport.chat(
+                prompt, temporary=False, url=gpt_chat_url(gizmo_id))
         text = await conv.complete(
             chat_model,
             [{"role": "user", "content": prompt}],
@@ -375,7 +411,9 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         return text or "(no response)"
 
     @mcp.tool()
-    async def memory_create_via_chat(content: str, manual: bool = False) -> str:
+    async def memory_create_via_chat(
+        content: str, browser: bool = False, manual: bool = False
+    ) -> str:
         """Add an entry to your ChatGPT memories.
 
         Workaround for `POST /backend-api/memories` returning 405 — ChatGPT only
@@ -385,6 +423,11 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
         Set `manual=True` to get a paste-into-chatgpt.com handoff JSON instead
         of calling the backend (zero network calls).
+
+        Set `browser=True` to drive chatgpt.com in a real Chrome via the
+        experimental browser transport (requires `[browser] enabled = true`
+        in config.toml plus `pip install "gpt2agent[browser]"`). `manual=True`
+        wins over `browser=True` — the explicit handoff beats engine choice.
         """
         prompt = _MEMORY_PROMPT_PREFIX + content
         if manual:
@@ -395,6 +438,10 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
                 ),
                 indent=2,
             )
+        if browser:
+            transport = browser_transport(
+                cfg.get("browser", {}), "memory_create_via_chat")
+            return await transport.chat(prompt, temporary=False)
         text = await conv.complete(
             chat_model, [{"role": "user", "content": prompt}], temporary=False
         )
@@ -403,7 +450,7 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
     try:
         from gpt2agent.tools import register_all
 
-        register_all(mcp, _backend, conv)
+        register_all(mcp, _backend, conv, cfg)
     except Exception:
         # P0 #4 fix — log the traceback (was bare warning, hid the cause)
         logging.getLogger(__name__).exception(
