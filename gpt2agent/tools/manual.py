@@ -19,6 +19,12 @@ _MODE_LABELS = {
 }
 
 
+def gpt_chat_url(gizmo_id: str) -> str:
+    """Custom-GPT chat URL; accepts both 'g/<slug>' and bare '<slug>'."""
+    slug = str(gizmo_id).removeprefix("g/")
+    return f"{CHATGPT_URL}g/{slug}"
+
+
 def build_handoff(
     tool: str,
     prompt: str,
@@ -30,8 +36,7 @@ def build_handoff(
     """Assemble the manual-handoff payload for a conversation-class tool."""
     extra = dict(extra or {})
     if tool == "gpt_chat":
-        slug = str(extra.get("gizmo_id", "")).removeprefix("g/")
-        url = f"{CHATGPT_URL}g/{slug}"
+        url = gpt_chat_url(extra.get("gizmo_id", ""))
     else:
         url = CHATGPT_URL
 

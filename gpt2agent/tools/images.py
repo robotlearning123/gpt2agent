@@ -5,16 +5,18 @@ import json
 
 from gpt2agent.backend import BackendClient
 from gpt2agent.tools._backend import async_get
+from gpt2agent.tools._browser import browser_transport
 from gpt2agent.tools._ids import validate_path_id
 from gpt2agent.tools.manual import build_handoff
 
 
-def register(mcp, client: BackendClient, conv=None) -> None:
+def register(mcp, client: BackendClient, conv=None, cfg=None) -> None:
 
     @mcp.tool()
     async def generate_image(
         prompt: str,
         model: str = "gpt-5-6",
+        browser: bool = False,
         manual: bool = False,
     ) -> dict | str:
         """Generate an image using ChatGPT's built-in image generation.
@@ -26,6 +28,8 @@ def register(mcp, client: BackendClient, conv=None) -> None:
             prompt: Description of the image to generate.
             model: ChatGPT model to use (must have image_gen_tool_enabled).
                    Defaults to gpt-5-6.
+            browser: When True, drive chatgpt.com in a real Chrome via the
+                   experimental browser transport instead of the backend.
             manual: When True, return the paste-into-chatgpt.com handoff JSON
                    string instead of calling the backend.
 
@@ -35,6 +39,13 @@ def register(mcp, client: BackendClient, conv=None) -> None:
 
         Set `manual=True` to get a paste-into-chatgpt.com handoff JSON instead
         of calling the backend (zero network calls).
+
+        Set `browser=True` to drive chatgpt.com in a real Chrome via the
+        experimental browser transport (requires `[browser] enabled = true`
+        in config.toml plus `pip install "gpt2agent[browser]"`). `manual=True`
+        wins over `browser=True` — the explicit handoff beats engine choice.
+        The browser path returns the chat reply text only; asset download
+        URLs are a follow-up.
         """
         if manual:
             return json.dumps(
@@ -44,6 +55,11 @@ def register(mcp, client: BackendClient, conv=None) -> None:
                 ),
                 indent=2,
             )
+        if browser:
+            transport = browser_transport(
+                (cfg or {}).get("browser", {}), "generate_image")
+            return await transport.chat(
+                prompt, model=model, temporary=False, mode="images")
         if conv is None:
             from gpt2agent.sse import ConversationClient
             _conv = ConversationClient(client)
