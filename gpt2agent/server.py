@@ -14,7 +14,9 @@ try:
 except ImportError:
     import tomli as tomllib  # type: ignore
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
+
+from gpt2agent import __version__
 
 # ── config ──────────────────────────────────────────────────────────────────
 
@@ -103,8 +105,7 @@ def _dr_incomplete_note(timed_out: bool) -> str:
     return note + ". Retry, or use get_conversation to check for a fuller report."
 
 
-def build_server(cfg: dict[str, Any]) -> FastMCP:
-    srv = cfg["server"]
+def build_server(cfg: dict[str, Any]) -> MCPServer:
     models = cfg["models"]
 
     from gpt2agent.backend import BackendClient
@@ -114,10 +115,11 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
     _backend = BackendClient()
     conv = ConversationClient(_backend)
 
-    mcp = FastMCP(
+    # MCPServer takes a version FastMCP had no slot for; without it clients see
+    # an empty string in serverInfo.
+    mcp = MCPServer(
         "gpt2agent",
-        host=str(srv.get("host", "127.0.0.1")),
-        port=int(srv.get("port", 9000)),
+        version=__version__,
         log_level="WARNING",
     )
 
@@ -417,7 +419,6 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
 
 def main() -> None:
-    from gpt2agent import __version__
 
     parser = argparse.ArgumentParser(
         prog="gpt2agent",
@@ -565,7 +566,7 @@ def main() -> None:
                 flush=True,
             )
         print(f"gpt2agent  http://{host}:{port}/mcp  [{', '.join(tools)}]", flush=True)
-        mcp.run(transport="streamable-http")
+        mcp.run(transport="streamable-http", host=host, port=port)
 
 
 if __name__ == "__main__":
