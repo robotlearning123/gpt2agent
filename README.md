@@ -34,7 +34,7 @@ re-logging in will not fix it.
 | 🚫 Blocked upstream (sentinel challenge) | `chat`, `agent`, `gpt_chat`, `deep_research`, `deep_research_heavy`, `generate_image`, `code_interpreter`, `canvas_execute`, `memory_create_via_chat` |
 | ❓ Unverified | `custom_instructions_set`, `codex_task_create` — plain REST writes that bypass the sentinel gate; not probed, because probing them means writing to your account. `get_file_info`, `get_file_download_url` — need a `file_id` there is no read-only way to discover. |
 
-> Browser transport (`chat(..., browser=True)` via `pip install "gpt2agent[browser]"` + `[browser] enabled = true`): **experimental, `chat` only** — it drives chatgpt.com in a real Chrome and bypasses the blocked REST path.
+> Browser transport (`chat(..., browser=True)` via `pip install "gpt2agent[browser]"` + `[browser] enabled = true`): **experimental, all conversation tools** — it drives chatgpt.com in a real Chrome and bypasses the blocked REST path.
 
 The blocked tools raise `gpt2agent.backend.UpstreamChallengeError` (a
 `RuntimeError` subclass, so existing handlers keep working) with a message that
