@@ -77,6 +77,12 @@ CANVAS_PREFIX = "Use Canvas to: "
 _SKIP_LIVE = os.environ.get("SKIP_LIVE", "1") == "1"
 
 
+class FakePWTimeout(Exception):
+    """Playwright >=1.55's TimeoutError is NOT the builtin — it subclasses
+    playwright Error -> Exception. Fakes raise THIS so fail-closed paths are
+    proven against the real exception hierarchy (grok finding 2026-09-16)."""
+
+
 def _browser_mod():
     return importlib.import_module("gpt2agent.browser")
 
@@ -471,8 +477,10 @@ def test_gpt_chat_browser_url_slug_forms(monkeypatch, gizmo) -> None:
         "https://chatgpt.com/g/abc")
 
 
-def test_deep_research_heavy_effort_uses_models_cfg(monkeypatch) -> None:
-    """effort = models.heavy_dr when configured ('Pro' only as the fallback)."""
+def test_deep_research_heavy_effort_is_label_not_slug(monkeypatch) -> None:
+    """effort is the picker LABEL 'Pro' — the [models].heavy_dr slug is for
+    the REST model, not the browser effort picker (grok finding: passing the
+    slug was a silent best-effort no-op)."""
     conv = _Conv()
     made = _stub_browser_module(monkeypatch)
     tools = _build_tools(
@@ -484,7 +492,7 @@ def test_deep_research_heavy_effort_uses_models_cfg(monkeypatch) -> None:
 
     call = made["instances"][0].calls[0]
     assert call["mode"] == "research"
-    assert call["effort"] == "gpt-6-pro"
+    assert call["effort"] == "Pro"
 
 
 @pytest.mark.parametrize(

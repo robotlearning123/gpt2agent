@@ -311,9 +311,11 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         if browser:
             transport = browser_transport(
                 cfg.get("browser", {}), "deep_research_heavy")
+            # The browser effort picker wants effort LABELS ("Pro"), not the
+            # REST model slug from [models].heavy_dr — passing the slug was a
+            # silent best-effort no-op (grok finding, 2026-09-16).
             return await transport.chat(
-                q, temporary=False, mode="research",
-                effort=heavy_dr_model or "Pro")
+                q, temporary=False, mode="research", effort="Pro")
         final_text = ""
         refs: list = []
         connector_failed = False

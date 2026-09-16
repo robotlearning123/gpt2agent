@@ -69,6 +69,21 @@ _MODE_OPTS = {
 }
 
 
+def _pw_timeout_errors() -> tuple[type[BaseException], ...]:
+    """Playwright >=1.55 raises its OWN TimeoutError
+    (playwright._impl._errors.TimeoutError -> Error -> Exception) which is
+    NOT a subclass of the builtin — `except TimeoutError` never catches it.
+    Return both classes so fail-closed paths fire in production; the test
+    fakes expose their PW-style class through playwright.async_api too."""
+    errs: list[type[BaseException]] = [TimeoutError]
+    try:  # pragma: no cover - exercised via fakes in tests
+        from playwright.async_api import TimeoutError as PWTimeout
+        errs.append(PWTimeout)
+    except Exception:
+        pass
+    return tuple(errs)
+
+
 def _drift(name: str, action: str) -> BrowserDriftError:
     return BrowserDriftError(
         f"{name} did not match while trying to {action} — the chatgpt.com "
@@ -89,6 +104,7 @@ class BrowserTransport:
         self.profile_dir = profile_dir if profile_dir is not None else _DEFAULT_PROFILE_DIR
         self.headed = headed
         self.timeout_s = timeout_s
+        self._timeout_errors: tuple[type[BaseException], ...] = (TimeoutError,)
 
     async def chat(
         self,
@@ -114,6 +130,7 @@ class BrowserTransport:
                 f"{sorted(_MODE_OPTS)}"
             )
         async_playwright = _load_playwright()
+        self._timeout_errors = _pw_timeout_errors()
         async with async_playwright() as pw:
             ctx = await pw.chromium.launch_persistent_context(
                 str(self.profile_dir),
@@ -136,7 +153,7 @@ class BrowserTransport:
                     await self._pick_effort(page, effort)
                 try:
                     await page.locator(SEL_PROMPT).press_sequentially(prompt)
-                except TimeoutError as exc:
+                except self._timeout_errors as exc:
                     raise _drift("SEL_PROMPT", "type the prompt") from exc
                 await self._click_required(
                     page, SEL_SEND, "SEL_SEND", "send the prompt"
@@ -159,7 +176,7 @@ class BrowserTransport:
         try:
             await composer.wait_for(state="visible", timeout=self.timeout_s * 1000)
             return
-        except TimeoutError:
+        except self._timeout_errors:
             pass
         if await page.locator(SEL_LOGGED_OUT).count() > 0:
             await self._await_login(page)
@@ -181,7 +198,7 @@ class BrowserTransport:
         try:
             await composer.wait_for(state="visible", timeout=self.timeout_s * 1000)
             return
-        except TimeoutError:
+        except self._timeout_errors:
             pass
         raise _drift("SEL_PROMPT", "find the chat composer after login")
 
@@ -189,8 +206,10 @@ class BrowserTransport:
         self, page: Any, const: str, name: str, action: str
     ) -> None:
         try:
-            await page.locator(const).first.click()
-        except TimeoutError as exc:
+            await page.locator(const).first.click(
+                timeout=self.timeout_s * 1000
+            )
+        except self._timeout_errors as exc:
             raise _drift(name, action) from exc
 
     async def _pick_mode(self, page: Any, mode: str) -> None:
@@ -214,15 +233,35 @@ class BrowserTransport:
                 effort,
             )
             return
-        await btn.click()
-        opt = page.locator(SEL_MODEL_OPTION).filter(has_text=effort)
-        if await opt.count() == 0:
+        try:
+            await btn.click(timeout=self.timeout_s * 1000)
+            opt = page.locator(SEL_MODEL_OPTION).filter(has_text=effort)
+            if await opt.count() == 0:
+                _log.warning(
+                    "no effort option matching %r; proceeding with the default",
+                    effort,
+                )
+                await self._dismiss_menu(page)
+                return
+            await opt.first.click(timeout=self.timeout_s * 1000)
+        except self._timeout_errors:
+            # effort is best-effort by spec: never abort the conversation
             _log.warning(
-                "no effort option matching %r; proceeding with the default",
+                "effort picker not actionable (wanted %r); proceeding "
+                "with the default",
                 effort,
             )
+            await self._dismiss_menu(page)
+
+    async def _dismiss_menu(self, page: Any) -> None:
+        """Best-effort dropdown dismissal so typing cannot hit an open menu."""
+        kb = getattr(page, "keyboard", None)
+        if kb is None:
             return
-        await opt.first.click()
+        try:
+            await kb.press("Escape")
+        except self._timeout_errors:
+            pass
 
     async def _pick_model(self, page: Any, model: str) -> None:
         """Best-effort model switch: a missing picker is NOT an error."""

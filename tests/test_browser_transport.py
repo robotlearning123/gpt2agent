@@ -45,6 +45,12 @@ _CHATGPT_URL = "https://chatgpt.com/"
 _SKIP_LIVE = os.environ.get("SKIP_LIVE", "1") == "1"
 
 
+class FakePWTimeout(Exception):
+    """Playwright >=1.55's TimeoutError is NOT the builtin — it subclasses
+    playwright Error -> Exception. Fakes raise THIS so fail-closed paths are
+    proven against the real exception hierarchy (grok finding 2026-09-16)."""
+
+
 def _browser_mod():
     return importlib.import_module("gpt2agent.browser")
 
@@ -61,12 +67,14 @@ class _FakeLocator:
     via try/except around wait_for/click both hit the fail-closed path."""
 
     def __init__(self, page: "_FakePage", selector: str, count: int = 0,
-                 text: str = "", match: str | None = None) -> None:
+                 text: str = "", match: str | None = None,
+                 click_raises: bool = False) -> None:
         self._page = page
         self.selector = selector
         self._count = count
         self._text = text
         self._match = match
+        self._click_raises = click_raises
         self.click_calls = 0
         self.wait_for_calls = 0
         self.filter_has_text: list[Any] = []
@@ -87,6 +95,7 @@ class _FakeLocator:
             self._page, self.selector,
             count=1 if want is not None and want == self._match else 0,
             text=self._text,
+            click_raises=self._click_raises,
         )
 
     async def count(self) -> int:
@@ -95,24 +104,34 @@ class _FakeLocator:
     async def wait_for(self, *args: Any, **kwargs: Any) -> None:
         self.wait_for_calls += 1
         if self._count == 0:
-            raise TimeoutError(f"no element for {self.selector}")
+            raise FakePWTimeout(f"no element for {self.selector}")
 
     async def click(self, *args: Any, **kwargs: Any) -> None:
         self.click_calls += 1
         self._page.clicks.append(self.selector)
+        if self._click_raises:
+            raise FakePWTimeout(f"not actionable: {self.selector}")
         if self._count == 0:
-            raise TimeoutError(f"no element for {self.selector}")
+            raise FakePWTimeout(f"no element for {self.selector}")
 
     async def press_sequentially(self, text: str, *args: Any, **kwargs: Any) -> None:
         self.press_args.append(text)
         self._page.sequenced.append((self.selector, text))
         if self._count == 0:
-            raise TimeoutError(f"no element for {self.selector}")
+            raise FakePWTimeout(f"no element for {self.selector}")
 
     async def inner_text(self, *args: Any, **kwargs: Any) -> str:
         if self._count == 0:
-            raise TimeoutError(f"no element for {self.selector}")
+            raise FakePWTimeout(f"no element for {self.selector}")
         return self._text
+
+
+class _FakeKeyboard:
+    def __init__(self) -> None:
+        self.presses: list[str] = []
+
+    async def press(self, key: str, *args: Any, **kwargs: Any) -> None:
+        self.presses.append(key)
 
 
 class _FakePage:
@@ -120,6 +139,7 @@ class _FakePage:
     'match' is the has_text value for which .filter() returns a match (count 1)."""
 
     def __init__(self, spec: dict[str, dict[str, Any]]) -> None:
+        self.keyboard = _FakeKeyboard()
         self._spec = spec
         self.locator_calls: list[str] = []
         self.locators: dict[str, list[_FakeLocator]] = {}
@@ -135,6 +155,7 @@ class _FakePage:
             count=cfg.get("count", 0),
             text=cfg.get("text", ""),
             match=cfg.get("match"),
+            click_raises=cfg.get("click_raises", False),
         )
         self.locators.setdefault(selector, []).append(loc)
         return loc
@@ -182,7 +203,7 @@ def _install_fake_playwright(monkeypatch, page: _FakePage) -> dict[str, Any]:
     pkg = types.ModuleType("playwright")
     api = types.ModuleType("playwright.async_api")
     api.async_playwright = lambda: _FakeACM()
-    api.TimeoutError = TimeoutError  # builtin, like real playwright >=1.49
+    api.TimeoutError = FakePWTimeout  # PW >=1.55: NOT the builtin
     api.Error = Exception
     pkg.async_api = api
     monkeypatch.setitem(sys.modules, "playwright", pkg)
@@ -653,3 +674,38 @@ def test_browser_chat_live_smoke(monkeypatch) -> None:
     out = asyncio.run(mcp._tool_manager._tools["chat"].fn(
         "Reply with exactly: BROWSER OK", browser=True))
     assert "BROWSER OK" in out
+
+
+def test_effort_click_timeout_warns_and_proceeds(monkeypatch, caplog) -> None:
+    """grok BLOCKING finding 2 (2026-09-16): a present-but-not-actionable
+    effort picker must NEVER abort the conversation — best-effort by spec."""
+    b = _browser_mod()
+    spec = _full_spec(b)
+    spec[b.SEL_MODEL_BUTTON] = {"count": 1}
+    spec[b.SEL_MODEL_OPTION] = {"count": 1, "match": "Pro",
+                                "click_raises": True}
+    page = _FakePage(spec)
+    _install_fake_playwright(monkeypatch, page)
+    with caplog.at_level("WARNING", logger="gpt2agent.browser"):
+        out = asyncio.run(
+            b.BrowserTransport().chat("hi", temporary=False, effort="Pro"))
+    assert out == "ASSISTANT REPLY"
+    assert "not actionable" in caplog.text
+    assert "Escape" in page.keyboard.presses
+
+
+def test_effort_option_miss_dismisses_menu(monkeypatch, caplog) -> None:
+    """grok finding 3 (2026-09-16): an unmatched effort option must dismiss
+    the open dropdown (Escape) before typing, never leave the menu up."""
+    b = _browser_mod()
+    spec = _full_spec(b)
+    spec[b.SEL_MODEL_BUTTON] = {"count": 1}
+    spec[b.SEL_MODEL_OPTION] = {"count": 0}  # no matching option
+    page = _FakePage(spec)
+    _install_fake_playwright(monkeypatch, page)
+    with caplog.at_level("WARNING", logger="gpt2agent.browser"):
+        out = asyncio.run(
+            b.BrowserTransport().chat("hi", temporary=False, effort="Pro"))
+    assert out == "ASSISTANT REPLY"
+    assert "no effort option matching" in caplog.text
+    assert "Escape" in page.keyboard.presses
