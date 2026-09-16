@@ -709,3 +709,20 @@ def test_effort_option_miss_dismisses_menu(monkeypatch, caplog) -> None:
     assert out == "ASSISTANT REPLY"
     assert "no effort option matching" in caplog.text
     assert "Escape" in page.keyboard.presses
+
+
+def test_model_picker_not_actionable_warns_and_proceeds(monkeypatch, caplog) -> None:
+    """grok round-2 residual: a present-but-not-actionable MODEL picker must
+    warn and proceed (best-effort), while an option MISS stays fail-closed."""
+    b = _browser_mod()
+    spec = _full_spec(b)
+    spec[b.SEL_MODEL_BUTTON] = {"count": 1, "click_raises": True}
+    spec[b.SEL_MODEL_OPTION] = {"count": 1, "match": "gpt-x"}
+    page = _FakePage(spec)
+    _install_fake_playwright(monkeypatch, page)
+    with caplog.at_level("WARNING", logger="gpt2agent.browser"):
+        out = asyncio.run(
+            b.BrowserTransport().chat("hi", model="gpt-x", temporary=False))
+    assert out == "ASSISTANT REPLY"
+    assert "model picker not actionable" in caplog.text
+    assert "Escape" in page.keyboard.presses

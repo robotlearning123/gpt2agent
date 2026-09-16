@@ -273,11 +273,24 @@ class BrowserTransport:
                 model,
             )
             return
-        await btn.click()
-        opt = page.locator(SEL_MODEL_OPTION).filter(has_text=model)
-        if await opt.count() == 0:
-            raise _drift("SEL_MODEL_OPTION", f"choose model {model!r}")
-        await opt.first.click()
+        try:
+            await btn.click(timeout=self.timeout_s * 1000)
+            opt = page.locator(SEL_MODEL_OPTION).filter(has_text=model)
+            if await opt.count() == 0:
+                raise _drift("SEL_MODEL_OPTION", f"choose model {model!r}")
+            await opt.first.click(timeout=self.timeout_s * 1000)
+        except self._timeout_errors:
+            # Best-effort like the missing-picker path: a picker that is
+            # present but not actionable must not abort the conversation
+            # (grok round-2 residual, wrapped for consistency). An option
+            # MISS stays fail-closed via _drift, which is a RuntimeError and
+            # therefore not caught by this timeout-tuple handler.
+            _log.warning(
+                "model picker not actionable (wanted %r); sending with the "
+                "current model",
+                model,
+            )
+            await self._dismiss_menu(page)
 
     async def _await_reply_done(self, page: Any) -> None:
         """Two-phase wait (grok review finding, 2026-09-15): right after send
