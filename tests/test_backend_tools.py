@@ -1,15 +1,20 @@
 """Integration test: BackendClient.account_status() against live chatgpt.com.
 
-Skipped automatically when ~/.codex/auth.json is absent.
+Skipped by default (SKIP_LIVE=1) or when ~/.codex/auth.json is absent.
+Run live: SKIP_LIVE=0 pytest tests/test_backend_tools.py
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
+_SKIP_LIVE = os.environ.get("SKIP_LIVE", "1") == "1"
 
+
+@pytest.mark.skipif(_SKIP_LIVE, reason="SKIP_LIVE=1 — set SKIP_LIVE=0 to run live")
 @pytest.mark.skipif(
     not (Path.home() / ".codex" / "auth.json").exists(),
     reason="~/.codex/auth.json not present",
