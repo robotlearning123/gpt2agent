@@ -26,7 +26,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "mcp>=1.27,<2",
+    "mcp>=2.2,<3",
     "uvicorn>=0.30.0",
     "tomli>=2.0.0; python_version < '3.11'",
     "curl_cffi>=0.11.0",
