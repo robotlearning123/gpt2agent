@@ -542,6 +542,8 @@ class ConversationClient:
         # Opt-in: an explicit env var, or the owner-intentional ENABLED marker
         # beside the bridge (unit-test sandboxes have neither -> stay offline
         # on the legacy gate path).
+        if _os.environ.get("GPT2AGENT_SENTINEL_BRIDGE_OFF"):
+            return None  # test isolation: force the offline legacy path
         if not (_os.environ.get("GPT2AGENT_SENTINEL_BRIDGE")
                 or (sb._bridge_dir() / "ENABLED").exists()):
             return None
