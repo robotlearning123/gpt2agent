@@ -345,10 +345,10 @@ def test_unknown_mode_raises_value_error(monkeypatch) -> None:
 
 
 def test_effort_picker_absent_warns_and_proceeds(monkeypatch, caplog) -> None:
-    """effort set but SEL_MODEL_BUTTON missing → WARNING, no exception."""
+    """effort set but SEL_MODEL_CHIP missing → WARNING, no exception."""
     b = _browser_mod()
     spec = _spec15(b)
-    spec[b.SEL_MODEL_BUTTON] = {"count": 0}
+    spec[b.SEL_MODEL_CHIP] = {"count": 0}
     page = _FakePage(spec)
     _install_fake_playwright(monkeypatch, page)
 
@@ -367,7 +367,7 @@ def test_effort_option_miss_warns_and_proceeds(monkeypatch, caplog) -> None:
     unlike the model picker, the effort pick is best-effort on a miss."""
     b = _browser_mod()
     spec = _spec15(b)
-    spec[b.SEL_MODEL_BUTTON] = {"count": 1}
+    spec[b.SEL_MODEL_CHIP] = {"count": 1}
     spec[b.SEL_MODEL_OPTION] = {"count": 1, "match": "__never__"}
     page = _FakePage(spec)
     _install_fake_playwright(monkeypatch, page)
@@ -377,7 +377,7 @@ def test_effort_option_miss_warns_and_proceeds(monkeypatch, caplog) -> None:
             b.BrowserTransport().chat("hi", temporary=False, effort="Pro"))
 
     assert out == "ASSISTANT REPLY"
-    assert b.SEL_MODEL_BUTTON in page.clicks  # picker was attempted
+    assert b.SEL_MODEL_CHIP in page.clicks  # picker was attempted
     filters = [f for loc in page.locators.get(b.SEL_MODEL_OPTION, [])
                for f in loc.filter_has_text]
     assert "Pro" in filters
@@ -402,7 +402,7 @@ def test_mode_and_effort_combined(monkeypatch) -> None:
     a model-picker effort attempt, all in one chat call."""
     b = _browser_mod()
     spec = _spec15(b)
-    spec[b.SEL_MODEL_BUTTON] = {"count": 1}
+    spec[b.SEL_MODEL_CHIP] = {"count": 1}
     spec[b.SEL_MODEL_OPTION] = {"count": 1, "match": "Pro"}
     page = _FakePage(spec)
     _install_fake_playwright(monkeypatch, page)
@@ -413,7 +413,7 @@ def test_mode_and_effort_combined(monkeypatch) -> None:
     assert out == "ASSISTANT REPLY"
     assert b.SEL_MODES_BUTTON in page.clicks
     assert b.SEL_MODE_DEEP_RESEARCH in page.clicks
-    assert b.SEL_MODEL_BUTTON in page.clicks
+    assert b.SEL_MODEL_CHIP in page.clicks
     assert b.SEL_MODEL_OPTION in page.clicks
     filters = [f for loc in page.locators.get(b.SEL_MODEL_OPTION, [])
                for f in loc.filter_has_text]

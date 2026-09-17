@@ -1,0 +1,8 @@
+MODEL_ITEMS=4
+MODEL: 6Pro | state: -
+MODEL: Latest | state: true
+MODEL: GPT-5.6 Sol | state: false
+MODEL: GPT-5.5Leaving on October 14 | state: false
+TARGET: 6Pro
+REPLY: BROWSER GPT6PRO OK
+ORACLE: PASS

@@ -33,7 +33,7 @@ _SEL_NAMES = (
     "SEL_PROMPT",
     "SEL_SEND",
     "SEL_TEMPORARY",
-    "SEL_MODEL_BUTTON",
+    "SEL_MODEL_CHIP",
     "SEL_MODEL_OPTION",
     "SEL_STREAMING",
     "SEL_ASSISTANT",
@@ -217,7 +217,7 @@ def _full_spec(b) -> dict[str, dict[str, Any]]:
         b.SEL_PROMPT: {"count": 1},
         b.SEL_SEND: {"count": 1},
         b.SEL_TEMPORARY: {"count": 1},
-        b.SEL_MODEL_BUTTON: {"count": 0},
+        b.SEL_MODEL_CHIP: {"count": 0},
         b.SEL_MODEL_OPTION: {"count": 0},
         b.SEL_STREAMING: {"count": 0},
         b.SEL_ASSISTANT: {"count": 1, "text": "ASSISTANT REPLY"},
@@ -468,26 +468,26 @@ def test_temporary_false_never_clicks_toggle(monkeypatch) -> None:
 def test_model_picker_absent_is_not_an_error(monkeypatch) -> None:
     b = _browser_mod()
     spec = _full_spec(b)
-    spec[b.SEL_MODEL_BUTTON] = {"count": 0}
+    spec[b.SEL_MODEL_CHIP] = {"count": 0}
     page = _FakePage(spec)
     _install_fake_playwright(monkeypatch, page)
     out = asyncio.run(b.BrowserTransport().chat("hi", model="gpt-x",
                                                 temporary=False))
     assert out == "ASSISTANT REPLY"
-    assert b.SEL_MODEL_BUTTON not in page.clicks
+    assert b.SEL_MODEL_CHIP not in page.clicks
 
 
 def test_model_picker_matching_option_clicked(monkeypatch) -> None:
     b = _browser_mod()
     spec = _full_spec(b)
-    spec[b.SEL_MODEL_BUTTON] = {"count": 1}
+    spec[b.SEL_MODEL_CHIP] = {"count": 1}
     spec[b.SEL_MODEL_OPTION] = {"count": 1, "match": "gpt-x"}
     page = _FakePage(spec)
     _install_fake_playwright(monkeypatch, page)
     out = asyncio.run(b.BrowserTransport().chat("hi", model="gpt-x",
                                                 temporary=False))
     assert out == "ASSISTANT REPLY"
-    assert b.SEL_MODEL_BUTTON in page.clicks
+    assert b.SEL_MODEL_CHIP in page.clicks
     assert b.SEL_MODEL_OPTION in page.clicks
     filters = [f for loc in page.locators.get(b.SEL_MODEL_OPTION, [])
                for f in loc.filter_has_text]
@@ -497,7 +497,7 @@ def test_model_picker_matching_option_clicked(monkeypatch) -> None:
 def test_model_option_miss_fails_closed(monkeypatch) -> None:
     b = _browser_mod()
     spec = _full_spec(b)
-    spec[b.SEL_MODEL_BUTTON] = {"count": 1}
+    spec[b.SEL_MODEL_CHIP] = {"count": 1}
     spec[b.SEL_MODEL_OPTION] = {"count": 1, "match": "__never_matches__"}
     page = _FakePage(spec)
     _install_fake_playwright(monkeypatch, page)
@@ -681,7 +681,7 @@ def test_effort_click_timeout_warns_and_proceeds(monkeypatch, caplog) -> None:
     effort picker must NEVER abort the conversation — best-effort by spec."""
     b = _browser_mod()
     spec = _full_spec(b)
-    spec[b.SEL_MODEL_BUTTON] = {"count": 1}
+    spec[b.SEL_MODEL_CHIP] = {"count": 1}
     spec[b.SEL_MODEL_OPTION] = {"count": 1, "match": "Pro",
                                 "click_raises": True}
     page = _FakePage(spec)
@@ -699,7 +699,7 @@ def test_effort_option_miss_dismisses_menu(monkeypatch, caplog) -> None:
     the open dropdown (Escape) before typing, never leave the menu up."""
     b = _browser_mod()
     spec = _full_spec(b)
-    spec[b.SEL_MODEL_BUTTON] = {"count": 1}
+    spec[b.SEL_MODEL_CHIP] = {"count": 1}
     spec[b.SEL_MODEL_OPTION] = {"count": 0}  # no matching option
     page = _FakePage(spec)
     _install_fake_playwright(monkeypatch, page)
@@ -716,7 +716,7 @@ def test_model_picker_not_actionable_warns_and_proceeds(monkeypatch, caplog) -> 
     warn and proceed (best-effort), while an option MISS stays fail-closed."""
     b = _browser_mod()
     spec = _full_spec(b)
-    spec[b.SEL_MODEL_BUTTON] = {"count": 1, "click_raises": True}
+    spec[b.SEL_MODEL_CHIP] = {"count": 1, "click_raises": True}
     spec[b.SEL_MODEL_OPTION] = {"count": 1, "match": "gpt-x"}
     page = _FakePage(spec)
     _install_fake_playwright(monkeypatch, page)

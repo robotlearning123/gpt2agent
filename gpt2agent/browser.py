@@ -25,7 +25,11 @@ _log = logging.getLogger(__name__)
 SEL_PROMPT = "#prompt-textarea"
 SEL_SEND = 'button[data-testid="send-button"]'
 SEL_TEMPORARY = 'button[aria-label*="Temporary"], button[data-testid*="temporary"]'
-SEL_MODEL_BUTTON = 'button[data-testid="model-switcher-dropdown-button"]'
+# 2026-09-16 UI: the old model-switcher-dropdown-button testid is gone;
+# the model picker is now a CHIP right of the composer (text like
+# "6 Pro", aria-haspopup menu). Old testid kept first in case it returns.
+SEL_MODEL_CHIP = ('button[data-testid="model-switcher-dropdown-button"], '
+                  'form button[aria-haspopup="menu"]')
 SEL_MODEL_OPTION = '[role="menuitem"], [role="option"]'
 SEL_STREAMING = 'button[data-testid="stop-button"], .result-streaming'
 SEL_ASSISTANT = '[data-message-author-role="assistant"]'
@@ -136,6 +140,11 @@ class BrowserTransport:
                 str(self.profile_dir),
                 channel="chrome",
                 headless=not self.headed,
+                # Playwright defaults to --password-store=basic, whose key
+                # cannot decrypt cookies written by the desktop Chrome that
+                # did the one-time login (measured 2026-09-16: sessions
+                # vanished on every relaunch until this was dropped).
+                ignore_default_args=["--password-store=basic"],
             )
             try:
                 page = await ctx.new_page()
@@ -225,7 +234,7 @@ class BrowserTransport:
         """Best-effort reasoning-effort pick through the model picker: a
         missing picker OR unmatched option only warns and proceeds (unlike
         _pick_model, where an option miss is fail-closed drift)."""
-        btn = page.locator(SEL_MODEL_BUTTON).first
+        btn = page.locator(SEL_MODEL_CHIP).first
         if await btn.count() == 0:
             _log.warning(
                 "effort picker not present; sending without switching "
@@ -265,7 +274,7 @@ class BrowserTransport:
 
     async def _pick_model(self, page: Any, model: str) -> None:
         """Best-effort model switch: a missing picker is NOT an error."""
-        btn = page.locator(SEL_MODEL_BUTTON).first
+        btn = page.locator(SEL_MODEL_CHIP).first
         if await btn.count() == 0:
             _log.warning(
                 "model picker not present; sending without switching "
