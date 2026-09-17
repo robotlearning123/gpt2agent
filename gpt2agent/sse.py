@@ -15,6 +15,7 @@ from curl_cffi.requests import AsyncSession
 
 from gpt2agent._log_redact import redact_error as _redact_error
 from gpt2agent.backend import BackendClient, _BASE
+from gpt2agent.citations import apply_inline_citations
 from gpt2agent.sentinel import SentinelGate  # noqa: F401  (used in stream)
 
 _log = logging.getLogger(__name__)
@@ -538,8 +539,12 @@ class ConversationClient:
         except Exception:
             return None
         import os as _os
-        if not _os.environ.get("GPT2AGENT_SENTINEL_BRIDGE"):
-            return None  # explicit opt-in only: unit tests must stay offline
+        # Opt-in: an explicit env var, or the owner-intentional ENABLED marker
+        # beside the bridge (unit-test sandboxes have neither -> stay offline
+        # on the legacy gate path).
+        if not (_os.environ.get("GPT2AGENT_SENTINEL_BRIDGE")
+                or (sb._bridge_dir() / "ENABLED").exists()):
+            return None
         if not (sb._bridge_dir() / "wrapper" / "reverse" / "vm.py").exists():
             return None
 
@@ -1234,14 +1239,20 @@ class ConversationClient:
             headers = dict(self._backend._session.headers)
             headers["Accept"] = "text/event-stream"
             headers["Content-Type"] = "application/json"
-            sentinel = await SentinelGate(self._backend).get_tokens()
-            headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
-                "chat-requirements"
-            ]
-            if sentinel.get("proof"):
-                headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
-            if sentinel.get("turnstile"):
-                headers["Openai-Sentinel-Turnstile-Token"] = sentinel["turnstile"]
+            bridge = await self._bridge_headers()
+            if bridge is not None:
+                headers.update(bridge[0])
+            else:
+                sentinel = await SentinelGate(self._backend).get_tokens()
+                headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
+                    "chat-requirements"
+                ]
+                if sentinel.get("proof"):
+                    headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
+                if sentinel.get("turnstile"):
+                    headers[
+                        "Openai-Sentinel-Turnstile-Token"
+                    ] = sentinel["turnstile"]
 
             payload = _build_dr_payload(
                 current_query,
@@ -1361,12 +1372,15 @@ class ConversationClient:
                             )
 
                             if status == "finished_successfully":
+                                _refs_done = meta.get(
+                                    "content_references", []
+                                )
                                 yield {
                                     "type": "done",
-                                    "text": new,
-                                    "content_references": meta.get(
-                                        "content_references", []
+                                    "text": apply_inline_citations(
+                                        new, _refs_done
                                     ),
+                                    "content_references": _refs_done,
                                     "search_result_groups": meta.get(
                                         "search_result_groups", []
                                     ),

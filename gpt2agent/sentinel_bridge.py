@@ -35,7 +35,7 @@ IP_LATLNG = "39.04,-77.49"
 
 
 def _bridge_dir() -> Path:
-    return Path(os.environ.get("GPT2AGENT_SENTINEL_BRIDGE", "/tmp/cgpt-rev"))
+    return Path(os.environ.get("GPT2AGENT_SENTINEL_BRIDGE", str(Path.home() / ".gpt2agent" / "sentinel-bridge")))
 
 
 def _load(name: str):
