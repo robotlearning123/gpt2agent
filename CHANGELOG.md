@@ -6,6 +6,37 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.0.15] - 2026-09-17
+
+### Added
+
+- **Sentinel bridge — REST conversations RESTORED.** While the legacy
+  turnstile solver stays broken upstream, an owner-supplied bridge
+  directory (default `~/.gpt2agent/sentinel-bridge`, opt-in via
+  `GPT2AGENT_SENTINEL_BRIDGE` env or an `ENABLED` marker file;
+  `GPT2AGENT_SENTINEL_BRIDGE_OFF` forces the legacy path) mints the full
+  sentinel header set (fingerprint-config `p` + PoW + bytecode-VM turnstile)
+  in one consistent session. Live-proven: `chat(model="gpt-6-pro")` and
+  light Deep Research return 200 SSE on `/backend-api/conversation`.
+  The bridge directory is NOT part of this distribution.
+- `gpt2agent/citations.py`: Deep Research replies now render inline
+  `[N](url)` citation anchors — raw internal `citeturn…` markers
+  (private-use-unicode wrapped) are rewritten using the stream's
+  `content_references` mapping; leftovers stripped. Fixes the
+  long-standing citation-anchor bug.
+- Browser transport on ALL conversation tools (PR #55) and the new-UI
+  model-chip selector + `--password-store` session fix (PR #56), both
+  from 2026-09-16.
+- Simulated agent-user journey gate `scripts/agent-user-journey.*` and
+  the `list_apps` bare-id shape fix (PR #53).
+
+### Changed
+
+- Unit tests stay offline regardless of a host-side ENABLED bridge marker
+  (`tests/conftest.py`).
+- `docs/account-safety.md`: anti-ban design (single profile, pacing,
+  budgets, challenge backoff).
+
 ### Changed
 
 - Repository rename rolled back same day (2026-09-15): the repo is

@@ -15,6 +15,7 @@ from curl_cffi.requests import AsyncSession
 
 from gpt2agent._log_redact import redact_error as _redact_error
 from gpt2agent.backend import BackendClient, _BASE
+from gpt2agent.citations import apply_inline_citations
 from gpt2agent.sentinel import SentinelGate  # noqa: F401  (used in stream)
 
 _log = logging.getLogger(__name__)
@@ -528,6 +529,49 @@ class ConversationClient:
     def __init__(self, backend: BackendClient) -> None:
         self._backend = backend
 
+    async def _bridge_headers(self):
+        """Sentinel-bridge path: when the owner-supplied bridge directory
+        exists (see gpt2agent/sentinel_bridge.py), mint the full sentinel
+        header set in one consistent session. Returns (headers, cookies)
+        or None when no bridge is installed (legacy gate path applies)."""
+        try:
+            from gpt2agent import sentinel_bridge as sb
+        except Exception:
+            return None
+        import os as _os
+        # Opt-in: an explicit env var, or the owner-intentional ENABLED marker
+        # beside the bridge (unit-test sandboxes have neither -> stay offline
+        # on the legacy gate path).
+        if _os.environ.get("GPT2AGENT_SENTINEL_BRIDGE_OFF"):
+            return None  # test isolation: force the offline legacy path
+        if not (_os.environ.get("GPT2AGENT_SENTINEL_BRIDGE")
+                or (sb._bridge_dir() / "ENABLED").exists()):
+            return None
+        if not (sb._bridge_dir() / "wrapper" / "reverse" / "vm.py").exists():
+            return None
+
+        def _mint():
+            from curl_cffi import requests as _cr
+            sess = _cr.Session(impersonate="chrome133a")
+            sb.seed_session(sess, sb.new_device_id())
+            did = sess.cookies.get("oai-did") or sb.new_device_id()
+            from gpt2agent.backend import _load_token as _blt
+            token = _blt()
+            hdrs = sb.SentinelBridge().mint(sess, token, did)
+            cookies = dict(sess.cookies)
+            sess.close()
+            return hdrs, cookies
+
+        import asyncio
+        try:
+            hdrs, cookies = await asyncio.to_thread(_mint)
+        except Exception as exc:  # noqa: BLE001 - fall back to legacy gate
+            _log.warning("sentinel bridge mint failed (%s); legacy path",
+                         type(exc).__name__)
+            return None
+        self._bridge_cookies = cookies
+        return hdrs, cookies
+
     async def stream(
         self,
         model: str,
@@ -545,20 +589,30 @@ class ConversationClient:
         headers["Accept"] = "text/event-stream"
         headers["Content-Type"] = "application/json"
 
-        sentinel = await SentinelGate(self._backend).get_tokens()
-        headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
-            "chat-requirements"
-        ]
-        if sentinel.get("proof"):
-            headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
-        if sentinel.get("turnstile"):
-            headers["Openai-Sentinel-Turnstile-Token"] = sentinel["turnstile"]
+        bridge = await self._bridge_headers()
+        if bridge is not None:
+            headers.update(bridge[0])
+        else:
+            sentinel = await SentinelGate(self._backend).get_tokens()
+            headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
+                "chat-requirements"
+            ]
+            if sentinel.get("proof"):
+                headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
+            if sentinel.get("turnstile"):
+                headers["Openai-Sentinel-Turnstile-Token"] = sentinel[
+                    "turnstile"
+                ]
 
         payload = _build_payload(model, messages, gizmo_id=gizmo_id, temporary=temporary)
         if tools:
             payload["tools"] = tools
 
         async with AsyncSession(impersonate="chrome131", verify=True) as s:
+            _bc = getattr(self, "_bridge_cookies", None)
+            if _bc:
+                for _k, _v in _bc.items():
+                    s.cookies.set(_k, _v)
             resp = await s.post(
                 _CONV_URL,
                 headers=headers,
@@ -817,14 +871,20 @@ class ConversationClient:
         headers["Accept"] = "text/event-stream"
         headers["Content-Type"] = "application/json"
 
-        sentinel = await SentinelGate(self._backend).get_tokens()
-        headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
-            "chat-requirements"
-        ]
-        if sentinel.get("proof"):
-            headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
-        if sentinel.get("turnstile"):
-            headers["Openai-Sentinel-Turnstile-Token"] = sentinel["turnstile"]
+        bridge = await self._bridge_headers()
+        if bridge is not None:
+            headers.update(bridge[0])
+        else:
+            sentinel = await SentinelGate(self._backend).get_tokens()
+            headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
+                "chat-requirements"
+            ]
+            if sentinel.get("proof"):
+                headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
+            if sentinel.get("turnstile"):
+                headers["Openai-Sentinel-Turnstile-Token"] = sentinel[
+                    "turnstile"
+                ]
 
         payload = _build_payload(
             model, [{"role": "user", "content": prompt}], temporary=False
@@ -834,6 +894,10 @@ class ConversationClient:
         processing_text = ""
 
         async with AsyncSession(impersonate="chrome131", verify=True) as s:
+            _bc = getattr(self, "_bridge_cookies", None)
+            if _bc:
+                for _k, _v in _bc.items():
+                    s.cookies.set(_k, _v)
             resp = await s.post(
                 _CONV_URL, headers=headers, json=payload, timeout=300, stream=True,
             )
@@ -990,14 +1054,20 @@ class ConversationClient:
         headers["Accept"] = "text/event-stream"
         headers["Content-Type"] = "application/json"
 
-        sentinel = await SentinelGate(self._backend).get_tokens()
-        headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
-            "chat-requirements"
-        ]
-        if sentinel.get("proof"):
-            headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
-        if sentinel.get("turnstile"):
-            headers["Openai-Sentinel-Turnstile-Token"] = sentinel["turnstile"]
+        bridge = await self._bridge_headers()
+        if bridge is not None:
+            headers.update(bridge[0])
+        else:
+            sentinel = await SentinelGate(self._backend).get_tokens()
+            headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
+                "chat-requirements"
+            ]
+            if sentinel.get("proof"):
+                headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
+            if sentinel.get("turnstile"):
+                headers["Openai-Sentinel-Turnstile-Token"] = sentinel[
+                    "turnstile"
+                ]
 
         payload = _build_payload(
             model, [{"role": "user", "content": prompt}], temporary=temporary
@@ -1012,6 +1082,10 @@ class ConversationClient:
         message_completed = False
 
         async with AsyncSession(impersonate="chrome131", verify=True) as s:
+            _bc = getattr(self, "_bridge_cookies", None)
+            if _bc:
+                for _k, _v in _bc.items():
+                    s.cookies.set(_k, _v)
             resp = await s.post(
                 _CONV_URL, headers=headers, json=payload, timeout=300, stream=True,
             )
@@ -1167,14 +1241,20 @@ class ConversationClient:
             headers = dict(self._backend._session.headers)
             headers["Accept"] = "text/event-stream"
             headers["Content-Type"] = "application/json"
-            sentinel = await SentinelGate(self._backend).get_tokens()
-            headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
-                "chat-requirements"
-            ]
-            if sentinel.get("proof"):
-                headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
-            if sentinel.get("turnstile"):
-                headers["Openai-Sentinel-Turnstile-Token"] = sentinel["turnstile"]
+            bridge = await self._bridge_headers()
+            if bridge is not None:
+                headers.update(bridge[0])
+            else:
+                sentinel = await SentinelGate(self._backend).get_tokens()
+                headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
+                    "chat-requirements"
+                ]
+                if sentinel.get("proof"):
+                    headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
+                if sentinel.get("turnstile"):
+                    headers[
+                        "Openai-Sentinel-Turnstile-Token"
+                    ] = sentinel["turnstile"]
 
             payload = _build_dr_payload(
                 current_query,
@@ -1183,6 +1263,10 @@ class ConversationClient:
             )
 
             async with AsyncSession(impersonate="chrome131", verify=True) as s:
+                _bc = getattr(self, "_bridge_cookies", None)
+                if _bc:
+                    for _k, _v in _bc.items():
+                        s.cookies.set(_k, _v)
                 resp = await s.post(
                     _CONV_URL,
                     headers=headers,
@@ -1290,12 +1374,15 @@ class ConversationClient:
                             )
 
                             if status == "finished_successfully":
+                                _refs_done = meta.get(
+                                    "content_references", []
+                                )
                                 yield {
                                     "type": "done",
-                                    "text": new,
-                                    "content_references": meta.get(
-                                        "content_references", []
+                                    "text": apply_inline_citations(
+                                        new, _refs_done
                                     ),
+                                    "content_references": _refs_done,
                                     "search_result_groups": meta.get(
                                         "search_result_groups", []
                                     ),
@@ -1451,14 +1538,20 @@ class ConversationClient:
         headers["Accept"] = "text/event-stream"
         headers["Content-Type"] = "application/json"
 
-        sentinel = await SentinelGate(self._backend).get_tokens()
-        headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
-            "chat-requirements"
-        ]
-        if sentinel.get("proof"):
-            headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
-        if sentinel.get("turnstile"):
-            headers["Openai-Sentinel-Turnstile-Token"] = sentinel["turnstile"]
+        bridge = await self._bridge_headers()
+        if bridge is not None:
+            headers.update(bridge[0])
+        else:
+            sentinel = await SentinelGate(self._backend).get_tokens()
+            headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
+                "chat-requirements"
+            ]
+            if sentinel.get("proof"):
+                headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
+            if sentinel.get("turnstile"):
+                headers["Openai-Sentinel-Turnstile-Token"] = sentinel[
+                    "turnstile"
+                ]
 
         payload = _build_heavy_dr_payload(query, model=model)
 
@@ -1658,6 +1751,10 @@ class ConversationClient:
                 return
 
         async with AsyncSession(impersonate="chrome131", verify=True) as s:
+            _bc = getattr(self, "_bridge_cookies", None)
+            if _bc:
+                for _k, _v in _bc.items():
+                    s.cookies.set(_k, _v)
             resp = await s.post(
                 _F_CONV_URL,
                 headers=headers,
