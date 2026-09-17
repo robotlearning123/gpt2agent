@@ -563,14 +563,18 @@ class ConversationClient:
             return hdrs, cookies
 
         import asyncio
-        try:
-            hdrs, cookies = await asyncio.to_thread(_mint)
-        except Exception as exc:  # noqa: BLE001 - fall back to legacy gate
-            _log.warning("sentinel bridge mint failed (%s); legacy path",
-                         type(exc).__name__)
-            return None
-        self._bridge_cookies = cookies
-        return hdrs, cookies
+        # Transient failures (CF seeding stalls, DNS blips) are common;
+        # retry the mint a few times before degrading to the legacy gate.
+        for _attempt in range(3):
+            try:
+                hdrs, cookies = await asyncio.to_thread(_mint)
+                self._bridge_cookies = cookies
+                return hdrs, cookies
+            except Exception as exc:  # noqa: BLE001 - retry, then legacy
+                _log.warning("sentinel bridge mint attempt %d failed (%s)",
+                             _attempt + 1, type(exc).__name__)
+                await asyncio.sleep(4 + 6 * _attempt)
+        return None
 
     async def stream(
         self,
