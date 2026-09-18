@@ -594,17 +594,20 @@ def test_bridge_headers_enabled_marker_mints(monkeypatch, tmp_path) -> None:
     minted: dict[str, Any] = {}
 
     class _FakeBridge:
-        def mint(self, session, bearer, device_id):
+        def mint(self, bearer, *, model="auto"):
             minted["bearer"] = bearer
-            minted["device_id"] = device_id
-            return {"openai-sentinel-turnstile-token": "ts-1"}
+            minted["model"] = model
+            return {
+                "headers": {"openai-sentinel-turnstile-token": "ts-1"},
+                "cookies": {"__cf_bm": "ck"},
+            }
 
     monkeypatch.setattr(sb, "SentinelBridge", _FakeBridge)
 
     conv = ConversationClient(object())
-    result = asyncio.run(conv._bridge_headers())
+    result = asyncio.run(conv._bridge_headers("gpt-5-6"))
     assert result is not None
     headers, cookies = result
     assert headers["openai-sentinel-turnstile-token"] == "ts-1"
-    assert minted == {"bearer": "tok-test", "device_id": "did-test"}
+    assert minted == {"bearer": "tok-test", "model": "gpt-5-6"}
     assert conv._bridge_cookies == cookies

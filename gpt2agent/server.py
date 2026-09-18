@@ -29,11 +29,25 @@ _DEFAULTS: dict[str, Any] = {
     # full ChatGPT account, so binding all interfaces would expose the account to
     # the LAN/WAN. Set host explicitly (and GPT2AGENT_ALLOW_REMOTE=1) to opt in.
     "server": {"host": "127.0.0.1", "port": 9000},
-    "models": {"chat": "gpt-5-6"},
+    "models": {
+        "chat": "gpt-5-6",
+        # Optional slug to retry with when the requested model hits the
+        # account usage cap (UsageLimitError). None = surface the error.
+        "fallback": None,
+    },
     # Phase-1 browser transport (gpt2agent/browser.py): drives chatgpt.com in
     # a real Chrome via Playwright while the sentinel challenge blocks the
     # conversation endpoint. Off unless [browser] enabled = true.
     "browser": {"enabled": False, "headed": True, "timeout_s": 180},
+    # Website-simulation identity (gpt2agent/sim.py): the shared session
+    # fingerprint used for sentinel mint → conversation POST. All optional;
+    # sensible browser-like defaults apply.
+    "sentinel": {
+        "timezone": None,     # IANA name, e.g. "America/New_York"
+        "locale": None,       # e.g. "en-US"
+        "impersonate": None,  # curl_cffi profile, e.g. "chrome136"
+        "screen": None,       # "WxH", e.g. "1920x1080"
+    },
 }
 
 # Hosts that keep the unauthenticated HTTP transport reachable only from the
@@ -107,11 +121,19 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
     srv = cfg["server"]
     models = cfg["models"]
 
-    from gpt2agent.backend import BackendClient
+    from gpt2agent.backend import (
+        BackendClient,
+        UpstreamChallengeError,
+        UsageLimitError,
+    )
     from gpt2agent.sse import ConversationClient
+    from gpt2agent.sim import get_profile
     from gpt2agent.tools._browser import browser_transport
     from gpt2agent.tools.manual import build_handoff, gpt_chat_url
 
+    # Configure the shared simulation profile before any client reads it —
+    # get_profile() is a singleton; first caller wins.
+    get_profile(cfg)
     _backend = BackendClient()
     conv = ConversationClient(_backend)
 
@@ -130,6 +152,15 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         "Begin the deep research immediately without asking for confirmation. "
         "Do not ask clarifying questions; proceed with the best interpretation. "
     )
+
+    async def _chat_via_browser(prompt: str, **kw) -> str:
+        """Browser-lane fallback when the direct path is challenge-blocked."""
+        transport = browser_transport(cfg.get("browser", {}), "chat")
+        out = await transport.chat(prompt, **kw)
+        return (
+            "**Note** — direct backend was challenge-blocked; answered via "
+            "the browser lane.\n\n" + (out or "(no response)")
+        )
 
     @mcp.tool()
     async def chat(
@@ -164,9 +195,30 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         if browser:
             transport = browser_transport(cfg.get("browser", {}), "chat")
             return await transport.chat(prompt, model=model, temporary=temporary)
-        text = await conv.complete(
-            model, [{"role": "user", "content": prompt}], temporary=temporary
-        )
+        try:
+            text = await conv.complete(
+                model, [{"role": "user", "content": prompt}], temporary=temporary
+            )
+        except UpstreamChallengeError:
+            if cfg.get("browser", {}).get("enabled"):
+                return await _chat_via_browser(
+                    prompt, model=model, temporary=temporary
+                )
+            raise
+        except UsageLimitError:
+            fallback = models.get("fallback")
+            if not fallback or fallback == model:
+                raise
+            text = await conv.complete(
+                fallback,
+                [{"role": "user", "content": prompt}],
+                temporary=temporary,
+            )
+            return (
+                f"**Note** — `{model}` is usage-capped on this account; "
+                f"answered with configured fallback `{fallback}`.\n\n"
+                + (text or "(no response)")
+            )
         return text or "(no response)"
 
     @mcp.tool()
@@ -199,12 +251,24 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         if browser:
             transport = browser_transport(cfg.get("browser", {}), "agent")
             return await transport.chat(prompt, temporary=False, mode="agent")
-        text = await conv.complete(
-            agent_model,
-            [{"role": "user", "content": prompt}],
-            temporary=False,
-            poll_async=True,  # agent mode runs async — poll the conversation
-        )
+        try:
+            text = await conv.complete(
+                agent_model,
+                [{"role": "user", "content": prompt}],
+                temporary=False,
+                poll_async=True,  # agent mode runs async — poll the conversation
+            )
+        except UpstreamChallengeError:
+            if cfg.get("browser", {}).get("enabled"):
+                transport = browser_transport(cfg.get("browser", {}), "agent")
+                out = await transport.chat(
+                    prompt, temporary=False, mode="agent"
+                )
+                return (
+                    "**Note** — direct backend was challenge-blocked; answered "
+                    "via the browser lane.\n\n" + (out or "(no response)")
+                )
+            raise
         return text or "(no response)"
 
     @mcp.tool()
@@ -248,14 +312,26 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         truncated = False
         timed_out = False
 
-        async for event in conv.deep_research(q):
-            if event["type"] == "tool":
-                tool_calls.append(event["call"])
-            elif event["type"] == "done":
-                final_text = event["text"]
-                refs = event.get("content_references", [])
-                truncated = bool(event.get("terminated_abnormally"))
-                timed_out = bool(event.get("timeout"))
+        try:
+            async for event in conv.deep_research(q):
+                if event["type"] == "tool":
+                    tool_calls.append(event["call"])
+                elif event["type"] == "done":
+                    final_text = event["text"]
+                    refs = event.get("content_references", [])
+                    truncated = bool(event.get("terminated_abnormally"))
+                    timed_out = bool(event.get("timeout"))
+        except UpstreamChallengeError:
+            if cfg.get("browser", {}).get("enabled"):
+                transport = browser_transport(
+                    cfg.get("browser", {}), "deep_research")
+                out = await transport.chat(q, temporary=False, mode="research")
+                return (
+                    "**Note** — direct backend was challenge-blocked; answered "
+                    "via the browser lane (no Sources section).\n\n"
+                    + (out or "(no response)")
+                )
+            raise
 
         # Append a brief sources section if citations were returned
         if refs:

@@ -191,6 +191,39 @@ async def _p_list_apps(client: BackendClient, ctx: dict[str, Any]) -> str:
     return f"{len((data or {}).get('apps') or [])} apps/connectors"
 
 
+async def _p_limits(client: BackendClient, ctx: dict[str, Any]) -> str:
+    """Account usage caps from ``/backend-api/conversation/init`` (POST).
+
+    Not strictly read-only, but it is the same bookkeeping call the web app
+    issues on page load — it sends no message and spends no quota. Stored on
+    ctx so the report can distinguish "sentinel blocked" from "quota exhausted".
+    """
+    data = await asyncio.to_thread(
+        client.post,
+        "/backend-api/conversation/init",
+        json={"conversation_mode_kind": "primary_assistant"},
+    ) or {}
+    ctx["limits_init"] = data
+    parts: list[str] = []
+    for lim in data.get("model_limits") or []:
+        if isinstance(lim, dict) and lim.get("model_slug"):
+            parts.append(f"model {lim['model_slug']} resets {lim.get('resets_after')}")
+    for lim in data.get("limits_progress") or []:
+        if isinstance(lim, dict) and lim.get("feature_name"):
+            parts.append(
+                f"{lim['feature_name']} remaining={lim.get('remaining')}"
+                + (f" resets {lim['reset_after']}" if lim.get("reset_after") else "")
+            )
+    for feat in data.get("blocked_features") or []:
+        if isinstance(feat, dict) and feat.get("name"):
+            parts.append(f"feature {feat['name']} blocked")
+    default = data.get("default_model_slug")
+    intended = data.get("intended_default_model_slug")
+    if intended and default and default != intended:
+        parts.append(f"default model downgraded {intended}→{default}")
+    return "; ".join(parts) if parts else "no caps reported"
+
+
 # (tool name, probe) in report order.
 _PROBES: list[tuple[str, Callable[[BackendClient, dict[str, Any]], Awaitable[str]]]] = [
     ("list_models", _p_list_models),
@@ -205,6 +238,7 @@ _PROBES: list[tuple[str, Callable[[BackendClient, dict[str, Any]], Awaitable[str
     ("list_codex_envs", _p_list_codex_envs),
     ("list_codex_tasks", _p_list_codex_tasks),
     ("list_apps", _p_list_apps),
+    ("account_limits", _p_limits),
 ]
 
 
@@ -237,6 +271,40 @@ async def _classify_gate(client: BackendClient) -> tuple[str, str]:
     if tokens.get("turnstile"):
         return _OK, "turnstile solved"
     return _OK, "no turnstile required"
+
+
+async def _classify_bridge() -> tuple[str, str] | None:
+    """Probe the sentinel-bridge lane — a real mint (no message is sent).
+
+    Returns None when the bridge isn't installed/enabled, so the row is only
+    added when the owner opted in.
+    """
+    import os
+
+    try:
+        from gpt2agent import sentinel_bridge as sb
+    except Exception:
+        return None
+    if os.environ.get("GPT2AGENT_SENTINEL_BRIDGE_OFF"):
+        return None
+    if not (
+        os.environ.get("GPT2AGENT_SENTINEL_BRIDGE")
+        or (sb._bridge_dir() / "ENABLED").exists()
+    ):
+        return None
+    if not (sb._bridge_dir() / "wrapper" / "reverse" / "vm.py").exists():
+        return _FAIL, "bridge enabled but wrapper/reverse/vm.py missing"
+
+    def _mint() -> None:
+        from gpt2agent.backend import _load_token
+
+        sb.SentinelBridge().mint(_load_token())
+
+    try:
+        await asyncio.to_thread(_mint)
+    except Exception as exc:
+        return _FAIL, _short(f"mint failed: {type(exc).__name__}: {exc}")
+    return _OK, "mint succeeded (requirements + PoW + turnstile + conduit)"
 
 
 # ── classification from code, not from probing ───────────────────────────────
@@ -294,12 +362,20 @@ async def collect(client: BackendClient) -> list[Row]:
         rows.append(Row(tool, _OK, detail))
 
     gate_result, gate_detail = await _classify_gate(client)
-    rows.append(Row("sentinel (chat-requirements)", gate_result, gate_detail))
+    rows.append(Row("sentinel (legacy gate)", gate_result, gate_detail))
+
+    # The bridge is the lane that actually carries conversation traffic when
+    # enabled — gate tools inherit ITS status, not the legacy solver's.
+    bridge = await _classify_bridge()
+    effective_result, effective_detail = gate_result, gate_detail
+    if bridge is not None:
+        rows.append(Row("sentinel (bridge)", bridge[0], bridge[1]))
+        effective_result, effective_detail = bridge
     for tool in _GATE_TOOLS:
-        # Not an independent measurement: these all share the one gate probe
+        # Not an independent measurement: these all share the gate probes
         # above, and exercising any of them would send a real message.
-        detail = _GATE_DETAIL.get(gate_result, gate_detail)
-        rows.append(Row(tool, gate_result, detail))
+        detail = _GATE_DETAIL.get(effective_result, effective_detail)
+        rows.append(Row(tool, effective_result, detail))
 
     rows.extend(Row(tool, _UNVERIFIED, detail) for tool, detail in _UNVERIFIED_TOOLS)
     return rows

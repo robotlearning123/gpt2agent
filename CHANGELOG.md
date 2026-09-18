@@ -6,6 +6,56 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.0.17] - 2026-09-19
+
+### Added
+
+- **Unified simulation profile** (`gpt2agent/sim.py`): one persistent browser
+  identity shared by the seed GET, sentinel requirements, conduit prepare,
+  and the conversation POST — same curl_cffi impersonation (chrome136), UA,
+  `oai-device-id`/`oai-session-id` (persisted in `~/.gpt2agent/sim-state.json`),
+  real `data-build` client version scraped from the homepage, and geo-consistent
+  timezone/`timezone_offset_min`/locale/IP lat-lng. Configurable via the new
+  `[sentinel]` section (`timezone`, `locale`, `impersonate`, `screen`,
+  `dark_mode`, `ip_latlng`).
+- **Frontend conversation path**: bridged requests now run
+  `POST /backend-api/f/conversation/prepare` → `conduit_token` →
+  `POST /backend-api/f/conversation` with `x-conduit-token` +
+  `oai-echo-logs`, matching what the real web app sends. The chat stream
+  parser understands the v1 delta encoding (`{"p","o","v"}` patch ops,
+  batch patches, `server_ste_metadata`, `message_stream_complete`).
+- **Model-downgrade detection**: `server_ste_metadata.model_slug` is captured
+  per stream; `chat` appends a note when the resolved slug differs from the
+  requested one — silent fallbacks are no longer invisible.
+- **Usage-cap reporting**: new `UsageLimitError` (a `RuntimeError` subclass)
+  is raised for `usage_limit` SSE frames and by a fail-open
+  `conversation/init` pre-flight that reports the capped model plus its
+  `resets_after` time. Optional `[models] fallback` slug retries chat on a
+  capped model. `deep_research` (light) now has the same quota guard heavy DR
+  already had, including the reset timestamp.
+- **Doctor**: new `account_limits` row (`model_limits`, `limits_progress`,
+  `blocked_features`, intended-vs-actual default model) and a `sentinel
+  (bridge)` probe row; the chat-family rows now inherit the *bridge* lane's
+  status when the bridge is enabled instead of the dead legacy solver's.
+- **Browser fallback on challenge block**: `chat`/`agent`/`deep_research`
+  automatically retry through the browser transport when the direct path
+  raises `UpstreamChallengeError` and `[browser] enabled = true`.
+
+### Fixed
+
+- **Duplicate `oai-*` headers**: header merge is now case-insensitive — the
+  bridge's `oai-device-id`/`oai-client-version` previously coexisted with the
+  backend session's differently-cased copies and curl_cffi sent both joined
+  by a comma on every bridged request.
+- **Cross-fingerprint mint**: the sentinel mint previously ran chrome133a +
+  Chrome-140/Windows UA while the conversation POST went out chrome131 +
+  Chrome-131/macOS UA with a different device-id — a contradiction Cloudflare
+  cross-checks. Mint and POST now share the profile identity, and the mint
+  session is kept warm (reused across requests) instead of re-seeding a fresh
+  browser per message.
+- The user's own message echo inside v1-delta envelopes is no longer emitted
+  into the reply text.
+
 ## [0.0.16] - 2026-09-18
 
 ### Fixed

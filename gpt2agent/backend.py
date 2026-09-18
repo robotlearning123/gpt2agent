@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import threading
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -15,8 +14,8 @@ from gpt2agent._log_redact import redact_error
 
 
 _BASE = "https://chatgpt.com"
-_CLIENT_VERSION = "prod-be885abbfcfe7b1f511e88b3003d9ee44757fbad"
 _CLIENT_BUILD = "5955942"
+_SEC_CH_UA = '"Chromium";v="136", "Not=A?Brand";v="24", "Google Chrome";v="136"'
 
 
 class TokenNotFoundError(RuntimeError):
@@ -52,6 +51,60 @@ class UpstreamEndpointError(RuntimeError):
     where a GET used to be served) — retrying or re-authenticating cannot help,
     so the tool is broken until gpt2agent is updated to match the new surface.
     """
+
+
+class UsageLimitError(RuntimeError):
+    """The account hit a model/feature usage cap upstream.
+
+    Raised from the ``usage_limit`` SSE error frame and by the
+    ``conversation/init`` pre-flight when the requested model sits in
+    ``model_limits``. ``resets_after`` carries the ISO timestamp the cap lifts
+    when known, so callers can present a real wait time instead of a bare
+    "hit your limit".
+    """
+
+    def __init__(self, message: str, *, resets_after: str | None = None) -> None:
+        super().__init__(message)
+        self.resets_after = resets_after
+
+
+def limits_from_init(init: dict | None, *, model: str | None = None,
+                     feature: str | None = None) -> dict:
+    """Extract quota state from a ``/backend-api/conversation/init`` response.
+
+    Returns ``{"model_resets_after": str|None, "feature_remaining": int|None,
+    "feature_resets_after": str|None, "default_model_slug": str|None}``.
+    """
+    out: dict = {
+        "model_resets_after": None,
+        "feature_remaining": None,
+        "feature_resets_after": None,
+        "default_model_slug": (init or {}).get("default_model_slug"),
+    }
+    if not init:
+        return out
+    if model:
+        for lim in init.get("model_limits") or []:
+            if isinstance(lim, dict) and lim.get("model_slug") == model:
+                out["model_resets_after"] = lim.get("resets_after")
+                break
+    if feature:
+        for lim in init.get("limits_progress") or []:
+            if isinstance(lim, dict) and lim.get("feature_name") == feature:
+                raw = lim.get("remaining")
+                if raw is not None:
+                    try:
+                        out["feature_remaining"] = int(raw)
+                    except (TypeError, ValueError):
+                        pass
+                out["feature_resets_after"] = lim.get("reset_after")
+                break
+        for feat in init.get("blocked_features") or []:
+            if isinstance(feat, dict) and feat.get("name") == feature:
+                out["feature_resets_after"] = (
+                    out["feature_resets_after"] or feat.get("resets_after")
+                )
+    return out
 
 
 def _load_token_with_source() -> tuple[str, Path | None]:
@@ -119,13 +172,6 @@ def _load_token() -> str:
     return _load_token_with_source()[0]
 
 
-_CHROME_131_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/131.0.0.0 Safari/537.36"
-)
-
-
 class BackendClient:
     def __init__(self) -> None:
         token, source = _load_token_with_source()
@@ -137,20 +183,31 @@ class BackendClient:
         self._token_lock = threading.Lock()
         # Keep TLS fingerprint + User-Agent aligned across backend / sentinel /
         # conversation streams. Cloudflare's bot manager cross-checks them and
-        # will 403 mixed fingerprints.
-        self._session = requests.Session(impersonate="chrome131", verify=True)
+        # will 403 mixed fingerprints. v0.0.17: identity comes from the shared
+        # SimProfile — persistent device/session ids and one impersonation for
+        # the whole process instead of per-client random uuids + chrome131.
+        from gpt2agent.sim import get_profile
+
+        self._profile = get_profile()
+        self._session = requests.Session(
+            impersonate=self._profile.impersonate, verify=True
+        )
         self._session.headers.update(
             {
-                "User-Agent": _CHROME_131_UA,
+                "User-Agent": self._profile.ua,
                 "Authorization": f"Bearer {token}",
-                "OAI-Device-Id": str(uuid.uuid4()),
-                "OAI-Session-Id": str(uuid.uuid4()),
-                "OAI-Language": "en-US",
-                "OAI-Client-Version": _CLIENT_VERSION,
+                "OAI-Device-Id": self._profile.device_id,
+                "OAI-Session-Id": self._profile.session_id,
+                "OAI-Language": self._profile.locale,
+                "OAI-Client-Version": self._profile.cached_client_version,
                 "OAI-Client-Build-Number": _CLIENT_BUILD,
                 "Origin": _BASE,
                 "Referer": _BASE + "/",
                 "Accept": "*/*",
+                "Accept-Language": self._profile.accept_language,
+                "sec-ch-ua": _SEC_CH_UA,
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
             }
         )
 
