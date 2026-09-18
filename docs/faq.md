@@ -51,4 +51,4 @@ redacts token/secret values from error output.
 
 Sora video, Operator/CUA, and voice sessions — those endpoints aren't reverse-engineered
 yet. Everything else (chat, agent mode, deep research, image gen, code interpreter,
-canvas, memory, custom instructions, Codex tasks) is exposed via the 25 MCP tools.
+canvas, memory, custom instructions, Codex tasks) is exposed via the 30 MCP tools.

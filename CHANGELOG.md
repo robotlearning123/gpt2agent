@@ -44,6 +44,14 @@ versioning: [SemVer](https://semver.org/).
   light-vs-heavy DR counters split out, plus this host's shared rate-limit
   budget and active cooldowns. Reads the same `conversation/init`
   bookkeeping call the web app issues on page load — no quota consumed.
+- **Shared task queue** (`gpt2agent/taskqueue.py`, new `queue_submit` /
+  `queue_status` / `queue_result` / `queue_cancel` MCP tools): file-backed
+  queue in `~/.gpt2agent/tasks/` so a fleet of agents serializes work
+  through whichever gpt2agent server is running — flock-guarded claims
+  (no double execution), atomic writes, stale-claim rescue. A task that
+  hits `UsageLimitError` is parked `waiting` until the upstream
+  `resets_after` and fires itself — queue a heavy DR overnight and it
+  runs when the cap lifts. `GPT2AGENT_QUEUE_OFF=1` disables the worker.
 
 ### Fixed
 

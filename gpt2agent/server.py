@@ -584,6 +584,180 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         report = await asyncio.to_thread(build_usage_report, _backend)
         return json.dumps(report, indent=2)
 
+    # ── shared task queue ─────────────────────────────────────────────
+    # File-backed (~/.gpt2agent/tasks/*.json) so every agent/process on this
+    # host sees one queue. Whichever gpt2agent server is running drains it
+    # serially under the shared rate limiter; UsageLimitError parks the task
+    # until the upstream reset instead of dropping it.
+    _worker_task = None
+
+    async def _execute_task(task: dict) -> dict:
+        kind = task.get("kind")
+        p = task.get("payload") or {}
+        if kind == "chat":
+            text = await conv.complete(
+                p.get("model") or chat_model,
+                [{"role": "user", "content": p["prompt"]}],
+                temporary=bool(p.get("temporary", False)),
+                connectors=p.get("connectors") or None,
+                github_repos=p.get("github_repos") or None,
+            )
+            return {"text": text}
+        if kind in ("deep_research", "deep_research_heavy"):
+            gen = (
+                conv.deep_research(p["query"], connectors=p.get("connectors"))
+                if kind == "deep_research"
+                else conv.deep_research_heavy(
+                    p["query"],
+                    model=p.get("model"),
+                    connectors=p.get("connectors"),
+                )
+            )
+            done: dict = {}
+            async for evt in gen:
+                if evt.get("type") == "done":
+                    done = evt
+            return done or {"text": "", "warning": "stream ended without done"}
+        raise RuntimeError(f"unknown task kind {kind!r}")
+
+    async def _queue_worker() -> None:
+        import asyncio as _aio
+        import time as _t
+
+        from gpt2agent.ratelimit import LocalRateLimitError
+        from gpt2agent.taskqueue import get_queue
+
+        queue = get_queue()
+        while True:
+            task = None
+            try:
+                queue.requeue_stale()
+                task = queue.claim_next()
+            except Exception:  # noqa: BLE001 - a corrupt file must not kill the worker
+                logging.getLogger(__name__).exception("queue claim failed")
+            if task is None:
+                await _aio.sleep(10)
+                continue
+            try:
+                result = await _execute_task(task)
+                queue.complete(task["id"], result)
+            except UsageLimitError as exc:
+                # Park until the upstream reset — the job fires itself later.
+                queue.wait_until(task["id"], exc.resets_after, str(exc))
+            except LocalRateLimitError as exc:
+                # Local shared budget exhausted — retry shortly.
+                queue.wait_until(task["id"], _t.time() + 120, str(exc))
+            except Exception as exc:  # noqa: BLE001
+                queue.fail(task["id"], f"{type(exc).__name__}: {exc}")
+
+    def _ensure_worker() -> None:
+        import asyncio as _aio
+
+        nonlocal _worker_task
+        if _worker_task is None or _worker_task.done():
+            _worker_task = _aio.get_running_loop().create_task(_queue_worker())
+
+    @mcp.tool()
+    async def queue_submit(
+        kind: str,
+        prompt: str,
+        model: str = "",
+        temporary: bool = False,
+        connectors: list[str] | None = None,
+        github_repos: list[str] | None = None,
+    ) -> str:
+        """Enqueue work on this host's shared gpt2agent task queue instead of
+        running it inline. For agent fleets sharing one ChatGPT account: the
+        queue serializes requests under the shared rate limiter, and a task
+        that hits an upstream quota cap is parked until `resets_after` and
+        fires itself — you don't have to babysit the wait.
+
+        `kind`: "chat" | "deep_research" | "deep_research_heavy".
+        `prompt`: the chat prompt or research query.
+        `model`: optional override (chat model slug; heavy-DR orchestrator).
+        `temporary`: chat only — disables history/training.
+        `connectors`/`github_repos`: forwarded to the underlying tool.
+
+        Returns the task id — poll with `queue_status`, fetch with
+        `queue_result`, abort with `queue_cancel`.
+        """
+        from gpt2agent.taskqueue import get_queue
+
+        if kind not in ("chat", "deep_research", "deep_research_heavy"):
+            return json.dumps(
+                {"error": f"unknown kind {kind!r}",
+                 "kinds": ["chat", "deep_research", "deep_research_heavy"]}
+            )
+        payload: dict[str, Any] = {"prompt": prompt, "temporary": temporary}
+        if model:
+            payload["model"] = model
+        if connectors:
+            payload["connectors"] = connectors
+        if github_repos:
+            payload["github_repos"] = github_repos
+        if kind.startswith("deep_research"):
+            payload["query"] = payload.pop("prompt")
+        queue = get_queue()
+        task = queue.submit(kind, payload)
+        resp = {"task_id": task["id"], "status": task["status"]}
+        if queue.enabled:
+            _ensure_worker()
+        else:
+            resp["note"] = "queue worker disabled (GPT2AGENT_QUEUE_OFF)"
+        return json.dumps(resp)
+
+    @mcp.tool()
+    async def queue_status(task_id: str = "") -> str:
+        """Show one task (`task_id`) or the whole queue when omitted.
+
+        Statuses: queued | claimed | waiting (parked until an upstream reset —
+        `not_before` carries the epoch) | done | failed | cancelled.
+        JSON output.
+        """
+        import time as _t
+
+        from gpt2agent.taskqueue import get_queue
+
+        queue = get_queue()
+        if task_id:
+            t = queue.get(task_id)
+            return json.dumps(t or {"error": f"no such task {task_id!r}"}, indent=2)
+        tasks = queue.list()
+        slim = [
+            {
+                "id": t["id"], "kind": t["kind"], "status": t["status"],
+                "attempts": t.get("attempts", 0),
+                "not_before": t.get("not_before"),
+                "error": t.get("error"),
+            }
+            for t in tasks
+        ]
+        return json.dumps({"now": _t.time(), "tasks": slim}, indent=2)
+
+    @mcp.tool()
+    async def queue_result(task_id: str) -> str:
+        """Fetch a finished task's result (`status == "done"`).
+
+        Returns the task record JSON; `result.text` holds the reply/report.
+        Not done yet → returns the record with its current status.
+        """
+        from gpt2agent.taskqueue import get_queue
+
+        t = get_queue().get(task_id)
+        return json.dumps(t or {"error": f"no such task {task_id!r}"}, indent=2)
+
+    @mcp.tool()
+    async def queue_cancel(task_id: str) -> str:
+        """Cancel a queued/waiting task. Already-terminal or running tasks
+        return their record unchanged."""
+        from gpt2agent.taskqueue import get_queue
+
+        t = get_queue().cancel(task_id)
+        return json.dumps(
+            t or {"error": f"no such task {task_id!r} or already terminal"},
+            indent=2,
+        )
+
     try:
         from gpt2agent.tools import register_all
 
