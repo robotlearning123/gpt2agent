@@ -1125,3 +1125,87 @@ def test_bundled_runner_discards_long_clarification_before_short_final(
     report = (out_dir / "report.md").read_text(encoding="utf-8")
     assert final in report
     assert question not in report
+
+
+def _v1_assistant_envelope(msg_id: str = "msg-a1") -> str:
+    return "data: " + json.dumps(
+        {
+            "v": {
+                "message": {
+                    "id": msg_id,
+                    "author": {"role": "assistant"},
+                    "content": {"content_type": "text", "parts": [""]},
+                }
+            }
+        }
+    )
+
+
+def test_batch_patch_without_p_key_emits_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """f/conversation batch patches may omit the top-level `p` key entirely
+    (observed live 2026-09-18 on account B) — those frames must not be
+    silently dropped."""
+    lines = [
+        'data: "v1"',
+        _v1_assistant_envelope(),
+        "data: " + json.dumps(
+            {
+                "o": "patch",
+                "v": [
+                    {"p": "/message/content/parts/0", "o": "append", "v": "ACCT-B OK"},
+                    {"p": "/message/status", "o": "replace", "v": "finished_successfully"},
+                    {"p": "/message/end_turn", "o": "replace", "v": True},
+                ],
+            }
+        ),
+        'data: {"type":"message_stream_complete"}',
+        "data: [DONE]",
+    ]
+    _patch_sse_frames(monkeypatch, lines)
+    client = sse_mod.ConversationClient(_Backend())  # type: ignore[arg-type]
+
+    result = asyncio.run(
+        client.complete("gpt-5-6", [{"role": "user", "content": "hi"}])
+    )
+
+    assert "ACCT-B OK" in result
+
+
+def test_account_sharing_degrade_banner_surfaces_in_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A conversation_detail_metadata banner_info (e.g. OpenAI's
+    account_sharing_degrade 'Suspicious activity detected') must reach the
+    caller — a flagged account degrading to mini models must not be silent."""
+    lines = [
+        'data: "v1"',
+        _v1_assistant_envelope(),
+        "data: " + json.dumps(
+            {"p": "/message/content/parts/0", "o": "append", "v": "hi"}
+        ),
+        "data: " + json.dumps(
+            {
+                "type": "conversation_detail_metadata",
+                "banner_info": {
+                    "name": "account_sharing_degrade",
+                    "title": "Suspicious activity detected",
+                    "resets_after": "2026-09-19T21:41:52+00:00",
+                },
+            }
+        ),
+        'data: {"type":"message_stream_complete"}',
+        "data: [DONE]",
+    ]
+    _patch_sse_frames(monkeypatch, lines)
+    client = sse_mod.ConversationClient(_Backend())  # type: ignore[arg-type]
+
+    result = asyncio.run(
+        client.complete("gpt-5-6", [{"role": "user", "content": "hi"}])
+    )
+
+    assert "hi" in result
+    assert "Account note" in result
+    assert "Suspicious activity detected" in result
+    assert "2026-09-19T21:41:52" in result

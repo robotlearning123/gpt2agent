@@ -919,6 +919,7 @@ class ConversationClient:
             last_text = ""
             _conversation_id: str | None = None
             _resolved_model: str | None = None
+            _banner: dict | None = None
             _last_patch_path: str | None = None
             done_received = False
             message_completed = False
@@ -980,12 +981,20 @@ class ConversationClient:
                 continuations of the last patched path.
                 """
                 nonlocal _resolved_model, _last_patch_path, last_text
-                nonlocal message_completed
+                nonlocal message_completed, _banner
                 t = obj.get("type")
                 if t == "server_ste_metadata":
                     slug = (obj.get("metadata") or {}).get("model_slug")
                     if slug:
                         _resolved_model = slug
+                    return
+                if t == "conversation_detail_metadata":
+                    # Account-safety banners (e.g. account_sharing_degrade =
+                    # "Suspicious activity detected") — surface to the caller
+                    # via the sentinel so a flagged account is never silent.
+                    banner = obj.get("banner_info")
+                    if isinstance(banner, dict) and banner.get("name"):
+                        _banner = banner
                     return
                 if t in (
                     "message_marker",
@@ -1014,8 +1023,8 @@ class ConversationClient:
                     _last_patch_path = None
                     return
 
-                # Batch patch
-                if p == "" and o == "patch" and isinstance(v, list):
+                # Batch patch — `p` may be "" or absent entirely
+                if o == "patch" and isinstance(v, list) and p in (None, ""):
                     for sub in v:
                         if isinstance(sub, dict):
                             _handle_frame(sub)
@@ -1106,11 +1115,12 @@ class ConversationClient:
                 raise _IncompleteStreamError(_conversation_id)
 
             # Emit sentinels for complete(): conversation id + resolved model
-            if _conversation_id or _resolved_model:
+            if _conversation_id or _resolved_model or _banner:
                 yield {
                     "_conversation_id": _conversation_id,
                     "_resolved_model": _resolved_model,
                     "_requested_model": model,
+                    "_banner": _banner,
                 }
 
     async def complete(
@@ -1127,6 +1137,7 @@ class ConversationClient:
         chunks: list[str] = []
         conv_id: str | None = None
         resolved_model: str | None = None
+        banner: dict | None = None
         try:
             async for event in self.stream(
                 model, messages, gizmo_id=gizmo_id, temporary=temporary,
@@ -1137,6 +1148,8 @@ class ConversationClient:
                         conv_id = event["_conversation_id"]
                     if event.get("_resolved_model"):
                         resolved_model = event["_resolved_model"]
+                    if event.get("_banner"):
+                        banner = event["_banner"]
                     continue  # never let a non-str sentinel reach "".join(chunks)
                 chunks.append(event)
         except _IncompleteStreamError as exc:
@@ -1157,6 +1170,17 @@ class ConversationClient:
                 f"server resolved `{resolved_model}` (usage cap or upstream "
                 "routing). Retry later, pick a model explicitly, or use "
                 "browser=True."
+            )
+
+        # Account-safety banner (e.g. account_sharing_degrade — OpenAI flagged
+        # the account for suspicious/sharing activity and is degrading models).
+        if banner:
+            note = banner.get("title") or banner.get("name")
+            rst = banner.get("resets_after")
+            text += (
+                f"\n\n---\n**Account note** — {note}"
+                + (f" (resets {rst})." if rst else ".")
+                + " Slow down and prefer browser=True until it clears."
             )
 
         # Agent mode: the stream ends immediately with async_status and the real

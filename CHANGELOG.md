@@ -6,6 +6,26 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.0.19] - 2026-09-19
+
+### Fixed
+
+- **Dropped assistant text on f/conversation**: v1 delta-encoding batch
+  patch frames may omit the top-level `p` key entirely (`{"o":"patch",
+  "v":[...]}` — observed live on the second account). The parser required
+  `p == ""`, so those frames were discarded and `complete()` returned an
+  empty reply even though the model answered. Batch patches now accept
+  `p` absent or empty.
+
+### Added
+
+- **Account-safety banner surfacing**: `conversation_detail_metadata`
+  `banner_info` frames (e.g. `account_sharing_degrade` — "Suspicious
+  activity detected") are captured and appended to the reply as an
+  **Account note** with the reset time. A flagged/degraded account is
+  never silent.
+
+
 ## [0.0.18] - 2026-09-19
 
 ### Added
