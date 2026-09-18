@@ -41,6 +41,12 @@ HOME="$ISOHOME" CODEX_HOME="$ISOHOME/.codex" "$VENV/bin/gpt2agent" install --cli
 check "C2 install --client claude-code (isolated HOME)" $? "$(grep -c gpt2agent "$ISOHOME/.claude.json" 2>/dev/null || echo 0) refs in .claude.json"
 
 echo "═══ D. live doctor with real token (read-only) ═══"
+# Owner hosts may have the opt-in sentinel bridge (ENABLED marker). Its Python
+# deps are not part of the gpt2agent wheel — install them into the emulation
+# venv so the mint path is exercised like on the real owner env.
+if [ -f "$HOME/.gpt2agent/sentinel-bridge/ENABLED" ]; then
+  "$VENV/bin/pip" install --quiet colorama esprima > /dev/null 2>&1 || true
+fi
 # Documented contract (doctor.py): exit 0 only when nothing failed AND nothing
 # blocked; under the upstream blockade exit 1 is EXPECTED with "0 failed".
 "$VENV/bin/gpt2agent" doctor > "$OUT/doctor-live.log" 2>&1
