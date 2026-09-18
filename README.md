@@ -48,7 +48,7 @@ touch ~/.gpt2agent/sentinel-bridge/ENABLED
 ```
 
 The bridge directory must contain `wrapper/reverse/vm.py` (bytecode-VM turnstile
-solver). It is NOT part of this distribution — see
+solver). Dependencies: `pip install esprima pillow colorama` (bridge internals). It is NOT part of this distribution — see
 [docs/dev/specs/sentinel-vm.md](./docs/dev/specs/sentinel-vm.md) for the
 from-scratch interpreter spec that will eventually replace the bridge.
 
@@ -205,9 +205,9 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 
 | Tool | What it does | Status |
 |---|---|---|
-| `generate_image` | Generate images via ChatGPT's built-in DALL-E. Returns download URLs + metadata | ✅ **live-verified** |
-| `code_interpreter` | Run Python in ChatGPT's sandbox. Returns output + charts/images | ✅ **live-verified** |
-| `canvas_execute` | Execute code via ChatGPT's Canvas feature (live editing) | ✅ **live-verified** |
+| `generate_image` | Generate images via ChatGPT's built-in DALL-E. Returns download URLs + metadata (uses `temporary=False` internally) | ✅ **live-verified** |
+| `code_interpreter` | Run Python in ChatGPT's sandbox. Returns output + charts/images (uses `temporary=False` internally) | ✅ **live-verified** |
+| `canvas_execute` | Execute code via ChatGPT's Canvas feature (uses `temporary=False` internally) | ✅ **live-verified** |
 | `get_file_info` | Metadata for any ChatGPT file | ✅ |
 | `get_file_download_url` | Temporary download URL (~1h expiry) | ✅ |
 
@@ -217,7 +217,7 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 |---|---|---|
 | `account_status` | Plan, country, groups, feature count, subscription expiry | ✅ |
 | `list_models` | All models (slug, max_tokens, reasoning_type, capabilities, thinking_efforts) | ✅ (21 models) |
-| `list_conversations` | Recent conversations (titles: emails/phones redacted); supports `offset` + `limit` | ✅ |
+| `list_conversations` | Recent conversations (titles: emails/phones redacted); `limit` parameter | ✅ |
 | `get_conversation` | Full message history (multimodal, code, images, DR widget-state reports) | ✅ |
 | `list_tasks` | Scheduled / completed ChatGPT tasks | ✅ |
 | `list_apps` | Connected apps + connectors (bare-id shape with type classification) | ✅ (98) |
@@ -228,7 +228,7 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 | Tool | What it does | Status |
 |---|---|---|
 | `memory_list` | List all ChatGPT memories | ✅ (69) |
-| `memory_search` | Keyword filter over memories (`q` parameter) | ✅ |
+| `memory_search` | Keyword filter over memories (`query` parameter) | ✅ |
 | `memory_create_via_chat` | Add a memory (model-initiated workaround — POST `/memories` is 405) | ⚠ model-dependent |
 | `custom_instructions_get` | Read your current `about_user` / `about_model` | ✅ |
 | `custom_instructions_set` | Update them (read-modify-write) | ❓ unverified |
@@ -276,7 +276,9 @@ $CODEX_HOME/auth.json (default ~/.codex/auth.json) ← auto-refreshed by Codex
 
 ### Citations
 
-Deep Research replies now include **inline `[N](url)` citation anchors**.
+Deep Research replies include **inline `[N](url)` citation anchors** when the
+model performs web searches (knowledge-only answers have no citations; numbering
+may repeat for multiple URLs).
 The `gpt2agent/citations.py` module rewrites raw `citeturn…` markers
 (private-use unicode) from the stream's `content_references` mapping into
 clickable markdown links, with a Sources section appended.

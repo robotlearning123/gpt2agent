@@ -15,7 +15,7 @@ account inside any MCP client.
 | Run code | `code_interpreter` | ChatGPT sandbox; returns output + charts |
 | Canvas doc | `canvas_execute` | live editing environment |
 | List models | `list_models` | 21 models with capabilities + thinking efforts |
-| Read memories | `memory_list` / `memory_search(q=...)` | |
+| Read memories | `memory_list` / `memory_search(query=...)` | |
 | Account info | `account_status` | plan, expiry, groups |
 | Codex tasks | `list_codex_envs` / `list_codex_tasks` / `codex_task_create` | |
 
@@ -76,19 +76,19 @@ deep_research_heavy(query="...", auto_confirm=True)
 
 ### Generate an image
 ```
-generate_image(prompt="A red square on white background", temporary=False)
-# temporary=False REQUIRED for image generation
+generate_image(prompt="A red square on white background")
+# temporary=False is handled internally
 ```
 
 ### Run code
 ```
-code_interpreter(prompt="Run: print(sum(range(100)))", temporary=False)
+code_interpreter(prompt="Run: print(sum(range(100)))")
 # Returns conversation_id + text + tool_responses + multimodal_assets
 ```
 
 ### Create a canvas document
 ```
-canvas_execute(prompt="Create a React component that...", temporary=False)
+canvas_execute(prompt="Create a React component that...")
 ```
 
 ### Agent mode (autonomous)
