@@ -6,6 +6,27 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.0.16] - 2026-09-18
+
+### Fixed
+
+- **Citation numbering**: each URL in a Deep Research reply now gets its own
+  sequential [N] anchor (previously all URLs in a multi-URL marker rendered
+  as [1]). Found by independent devin2 live tester.
+
+### Changed
+
+- **Full documentation rewrite** (README.md, CLAUDE.md, agent-usage SKILL.md):
+  status updated for v0.0.15 reality (sentinel bridge, browser transport,
+  manual handoff), per-tool live verification status, architecture diagram,
+  model selection guide, transport modes, account safety rules, troubleshooting
+  table. Six documentation errors corrected (list_conversations offset param,
+  memory_search param name, temporary on internal tools, bridge dependencies,
+  citation caveat, code_interpreter sandbox note).
+- **Agent-usage skill** (gpt2agent/skills/gpt2agent/SKILL.md): 142-line guide
+  with quick reference table for all 25 tools, model selection guide, 10
+  recipes, account safety rules, and troubleshooting.
+
 ## [0.0.15] - 2026-09-17
 
 ### Added
