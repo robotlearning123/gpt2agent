@@ -9,6 +9,8 @@ and the account-tier features below — inside Claude Code, Codex, Cursor, Winds
 Zed, and any MCP client.
 
 [![PyPI version](https://img.shields.io/pypi/v/gpt2agent)](https://pypi.org/project/gpt2agent/)
+[![Downloads](https://static.pepy.tech/badge/gpt2agent)](https://pepy.tech/projects/gpt2agent)
+[![Downloads/month](https://img.shields.io/pypi/dm/gpt2agent)](https://pypistats.org/packages/gpt2agent)
 [![CI](https://github.com/robotlearning123/gpt2agent/actions/workflows/ci.yml/badge.svg)](https://github.com/robotlearning123/gpt2agent/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://pypi.org/project/gpt2agent/)
