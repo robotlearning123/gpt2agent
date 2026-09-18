@@ -183,6 +183,8 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         model: str = chat_model,
         temporary: bool = True,
         browser: bool = False,
+        connectors: list[str] | None = None,
+        github_repos: list[str] | None = None,
         manual: bool = False,
     ) -> str:
         """Chat with any ChatGPT model on your account.
@@ -193,6 +195,14 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
         Set `temporary=False` to allow tool-based features (image gen, code
         interpreter, canvas). Temporary chats (default) cannot use these tools.
+
+        `connectors` activates connected apps for this message — pass connector
+        ids from `list_apps` (e.g. `connector_openai_pubmed`, or a connected
+        GitHub connector id). First-party `connector_openai_*` connectors work
+        out of the box; OAuth apps (GitHub, Gmail) must be connected at
+        chatgpt.com → Settings → Connectors first. `github_repos` mirrors the
+        frontend's per-message repo picker (`selected_github_repos`) when the
+        GitHub connector is enabled.
 
         Set `manual=True` to get a paste-into-chatgpt.com handoff JSON instead
         of calling the backend (zero network calls).
@@ -212,7 +222,11 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
             return await transport.chat(prompt, model=model, temporary=temporary)
         try:
             text = await conv.complete(
-                model, [{"role": "user", "content": prompt}], temporary=temporary
+                model,
+                [{"role": "user", "content": prompt}],
+                temporary=temporary,
+                connectors=connectors,
+                github_repos=github_repos,
             )
         except UpstreamChallengeError:
             if cfg.get("browser", {}).get("enabled"):
@@ -289,12 +303,16 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
     @mcp.tool()
     async def deep_research(
         query: str, auto_confirm: bool = True, browser: bool = False,
-        manual: bool = False,
+        connectors: list[str] | None = None, manual: bool = False,
     ) -> str:
         """Search the web and synthesize a detailed report with citations.
 
         Best for: current events, literature review, market research.
         Takes 30–120 seconds. Uses model='research' + system_hints=['research'].
+
+        `connectors` adds connected-app sources (e.g. `connector_openai_pubmed`
+        for literature). OAuth connectors (GitHub, Gmail) must be connected in
+        chatgpt.com → Settings → Connectors first; list ids via `list_apps`.
 
         When `auto_confirm` is True (default), an imperative prefix is prepended
         so the model proceeds without asking "Do you want me to start?".
@@ -328,7 +346,7 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         timed_out = False
 
         try:
-            async for event in conv.deep_research(q):
+            async for event in conv.deep_research(q, connectors=connectors):
                 if event["type"] == "tool":
                     tool_calls.append(event["call"])
                 elif event["type"] == "done":
@@ -369,7 +387,7 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
     @mcp.tool()
     async def deep_research_heavy(
         query: str, auto_confirm: bool = True, browser: bool = False,
-        manual: bool = False,
+        connectors: list[str] | None = None, manual: bool = False,
     ) -> str:
         """Long-form Deep Research using gpt-6-pro (5–30 min, uses monthly DR quota — check /backend-api/conversation/init for remaining). For short web-augmented answers use `deep_research` instead.
 
@@ -414,7 +432,9 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         truncated = False
         timed_out = False
 
-        async for event in conv.deep_research_heavy(q, model=heavy_dr_model):
+        async for event in conv.deep_research_heavy(
+            q, model=heavy_dr_model, connectors=connectors
+        ):
             etype = event.get("type")
             if etype == "done":
                 final_text = event["text"]

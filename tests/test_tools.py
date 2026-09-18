@@ -445,20 +445,22 @@ class _RecordConv:
         self.heavy_events: list[dict] = []
 
     async def complete(self, model, messages, *, temporary=True, gizmo_id=None,
-                       poll_async=False):
+                       poll_async=False, connectors=None, github_repos=None):
         self.complete_calls.append({"model": model, "messages": messages,
                                     "temporary": temporary, "gizmo_id": gizmo_id,
-                                    "poll_async": poll_async})
+                                    "poll_async": poll_async,
+                                    "connectors": connectors,
+                                    "github_repos": github_repos})
         return self.reply
 
-    def deep_research(self, q):
+    def deep_research(self, q, connectors=None):
         self._last_dr_query = q
         async def gen():
             for e in self.dr_events:
                 yield e
         return gen()
 
-    def deep_research_heavy(self, q, model=None):
+    def deep_research_heavy(self, q, model=None, connectors=None):
         self._last_heavy_query = q
         async def gen():
             for e in self.heavy_events:

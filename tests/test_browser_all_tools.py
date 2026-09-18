@@ -122,7 +122,7 @@ class _Conv:
         )
 
     async def complete(self, model, messages, *, temporary=True, gizmo_id=None,
-                       poll_async=False):
+                       poll_async=False, connectors=None, github_repos=None):
         self.complete_calls.append(
             {"model": model, "messages": messages, "temporary": temporary,
              "gizmo_id": gizmo_id, "poll_async": poll_async})

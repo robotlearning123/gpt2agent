@@ -29,6 +29,13 @@ versioning: [SemVer](https://semver.org/).
 - **Exponential 429 backoff**: consecutive 429s escalate the shared lane
   cooldown 60 s → 120 → 240 → 480 s cap, reset on the next success —
   a throttled account gets real breathing room.
+- **Connector support** (`chat`, `deep_research`, `deep_research_heavy`):
+  new `connectors` param injects `connector:<id>` system hints (the same
+  mechanism the frontend uses for connected-app sources), and `chat` gains
+  `github_repos` → per-message `selected_github_repos` metadata. First-party
+  `connector_openai_*` connectors (pubmed, pdf, spreadsheets…) work as-is;
+  OAuth apps like GitHub must be connected in chatgpt.com Settings first —
+  ids come from `list_apps`.
 
 ## [0.0.17] - 2026-09-19
 

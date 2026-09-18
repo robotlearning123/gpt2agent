@@ -378,6 +378,13 @@ def _is_connector_dispatch_text(text: str) -> bool:
     return text.startswith('{"path":') and "connector_openai_deep_research" in text
 
 
+def _connector_hint(connector_id: str) -> str:
+    """Normalize a connector id to the ``connector:<id>`` system-hint form
+    the frontend uses (e.g. ``connector:connector_openai_pubmed``)."""
+    c = connector_id.strip()
+    return c if c.startswith("connector:") else f"connector:{c}"
+
+
 def _build_payload(
     model: str,
     messages: list[dict],
@@ -385,6 +392,8 @@ def _build_payload(
     gizmo_id: str | None = None,
     temporary: bool = True,
     profile=None,
+    connectors: list[str] | None = None,
+    github_repos: list[str] | None = None,
 ) -> dict:
     """Conversation payload shaped like the real frontend's.
 
@@ -405,7 +414,10 @@ def _build_payload(
                 "create_time": round(time.time(), 3),
                 "content": {"content_type": "text", "parts": [m["content"]]},
                 "metadata": {
-                    "selected_github_repos": [],
+                    # Populated when the GitHub connector is enabled on the
+                    # account and repos are picked — mirrors the frontend's
+                    # per-message selection metadata.
+                    "selected_github_repos": github_repos or [],
                     "selected_all_github_repos": False,
                     "serialization_metadata": {"custom_symbol_offsets": []},
                 },
@@ -416,7 +428,7 @@ def _build_payload(
         "model": model,
         "conversation_mode": {"kind": "primary_assistant"},
         "enable_message_followups": True,
-        "system_hints": [],
+        "system_hints": [_connector_hint(c) for c in (connectors or [])],
         "supports_buffering": True,
         "supported_encodings": ["v1"],
         "client_contextual_info": prof.contextual_info(),
@@ -440,6 +452,7 @@ def _build_dr_payload(
     *,
     conversation_id: str | None = None,
     parent_message_id: str | None = None,
+    connectors: list[str] | None = None,
 ) -> dict:
     """Build payload for legacy Deep Research: model=research + system_hints=['research'].
 
@@ -456,7 +469,10 @@ def _build_dr_payload(
     handling in ``ConversationClient.deep_research``.
     """
     payload = _build_payload(DR_MODEL, [{"role": "user", "content": query}])
-    payload["system_hints"] = ["research"]
+    # "research" activates the DR backend; connected-app hints select sources.
+    payload["system_hints"] = ["research"] + [
+        _connector_hint(c) for c in (connectors or [])
+    ]
     payload["history_and_training_disabled"] = False
     if conversation_id:
         payload["conversation_id"] = conversation_id
@@ -521,7 +537,12 @@ def _looks_like_clarification(text: str) -> bool:
     return any(p in lower for p in _CLARIFICATION_HINTS)
 
 
-def _build_heavy_dr_payload(query: str, *, model: str | None = None) -> dict:
+def _build_heavy_dr_payload(
+    query: str,
+    *,
+    model: str | None = None,
+    connectors: list[str] | None = None,
+) -> dict:
     """Build payload for heavy Deep Research — the true Pro-tier 5–30 min DR path.
 
     Ground-truth reverse-engineered from chatgpt.com/deep-research browser traffic
@@ -558,7 +579,8 @@ def _build_heavy_dr_payload(query: str, *, model: str | None = None) -> dict:
                     "selected_sources": [],
                     "selected_github_repos": [],
                     "selected_all_github_repos": False,
-                    "system_hints": [HEAVY_DR_HINT],
+                    "system_hints": [HEAVY_DR_HINT]
+                    + [_connector_hint(c) for c in (connectors or [])],
                     "deep_research_version": "standard",
                     "venus_model_variant": "standard",
                     "serialization_metadata": {"custom_symbol_offsets": []},
@@ -573,7 +595,8 @@ def _build_heavy_dr_payload(query: str, *, model: str | None = None) -> dict:
         "timezone": prof.timezone,
         "conversation_mode": {"kind": "primary_assistant"},
         "enable_message_followups": True,
-        "system_hints": [HEAVY_DR_HINT],
+        "system_hints": [HEAVY_DR_HINT]
+        + [_connector_hint(c) for c in (connectors or [])],
         "thinking_effort": "extended",
         "supports_buffering": True,
         "supported_encodings": ["v1"],
@@ -794,13 +817,18 @@ class ConversationClient:
         *,
         gizmo_id: str | None = None,
         temporary: bool = True,
+        connectors: list[str] | None = None,
+        github_repos: list[str] | None = None,
     ) -> AsyncIterator[str | dict]:
         # Yields text chunks (str). As the final item it may yield a single
         # ``{"_conversation_id": ...}`` dict sentinel for ``complete()`` to detect
         # agent-mode async runs — callers that join chunks must skip non-str items.
         headers, conv_url = await self._request_setup(model)
 
-        payload = _build_payload(model, messages, gizmo_id=gizmo_id, temporary=temporary)
+        payload = _build_payload(
+            model, messages, gizmo_id=gizmo_id, temporary=temporary,
+            connectors=connectors, github_repos=github_repos,
+        )
         if tools:
             payload["tools"] = tools
 
@@ -1049,13 +1077,16 @@ class ConversationClient:
         gizmo_id: str | None = None,
         temporary: bool = True,
         poll_async: bool = False,
+        connectors: list[str] | None = None,
+        github_repos: list[str] | None = None,
     ) -> str:
         chunks: list[str] = []
         conv_id: str | None = None
         resolved_model: str | None = None
         try:
             async for event in self.stream(
-                model, messages, gizmo_id=gizmo_id, temporary=temporary
+                model, messages, gizmo_id=gizmo_id, temporary=temporary,
+                connectors=connectors, github_repos=github_repos,
             ):
                 if isinstance(event, dict):
                     if event.get("_conversation_id"):
@@ -1494,6 +1525,7 @@ class ConversationClient:
         query: str,
         *,
         max_clarification_rounds: int = 2,
+        connectors: list[str] | None = None,
     ) -> AsyncIterator[dict]:
         """Stream Deep Research events for *query*.
 
@@ -1543,6 +1575,7 @@ class ConversationClient:
                 current_query,
                 conversation_id=conversation_id,
                 parent_message_id=last_assistant_msg_id,
+                connectors=connectors,
             )
 
             async with AsyncSession(
@@ -1767,6 +1800,7 @@ class ConversationClient:
         query: str,
         *,
         model: str | None = None,
+        connectors: list[str] | None = None,
     ) -> AsyncIterator[dict]:
         """Stream true Pro-tier Deep Research events for *query*.
 
@@ -1835,7 +1869,9 @@ class ConversationClient:
                     "turnstile"
                 ]
 
-        payload = _build_heavy_dr_payload(query, model=model)
+        payload = _build_heavy_dr_payload(
+            query, model=model, connectors=connectors
+        )
 
         # --- Phase 1: SSE kickoff with JSON-patch delta parser ---
         # /f/conversation speaks "delta_encoding v1". The first assistant envelope

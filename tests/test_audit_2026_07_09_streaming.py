@@ -768,10 +768,10 @@ def _patch_runner_events(
         def __init__(self, _: object) -> None:
             pass
 
-        def deep_research(self, _: str):
+        def deep_research(self, _: str, **kw):
             return _events()
 
-        def deep_research_heavy(self, _: str):
+        def deep_research_heavy(self, _: str, **kw):
             return _events()
 
     monkeypatch.setattr(runner, "BackendClient", lambda: object())

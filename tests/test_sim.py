@@ -408,3 +408,41 @@ def test_persist_cookies_noop_without_session(tmp_path, monkeypatch) -> None:
     p.persist_cookies()  # must not raise or write a cookies key
     saved = json.loads((tmp_path / "sim-state.json").read_text())
     assert "cookies" not in saved
+
+
+# ── connector wiring ──────────────────────────────────────────────────────────
+
+
+def test_connectors_become_system_hints() -> None:
+    from gpt2agent.sse import _build_dr_payload, _build_heavy_dr_payload
+
+    pl = _build_payload(
+        "gpt-5-6",
+        [{"role": "user", "content": "hi"}],
+        connectors=["connector_openai_pubmed", "connector:connector_gmail"],
+    )
+    assert pl["system_hints"] == [
+        "connector:connector_openai_pubmed",
+        "connector:connector_gmail",
+    ]
+
+    dr = _build_dr_payload("q", connectors=["connector_openai_pubmed"])
+    assert dr["system_hints"] == ["research", "connector:connector_openai_pubmed"]
+
+    heavy = _build_heavy_dr_payload("q", connectors=["connector_openai_pubmed"])
+    assert heavy["system_hints"][0] == "connector:connector_openai_deep_research"
+    assert "connector:connector_openai_pubmed" in heavy["system_hints"]
+    assert "connector:connector_openai_pubmed" in (
+        heavy["messages"][0]["metadata"]["system_hints"]
+    )
+
+
+def test_github_repos_in_message_metadata() -> None:
+    pl = _build_payload(
+        "gpt-5-6",
+        [{"role": "user", "content": "hi"}],
+        github_repos=["robotlearning123/chatgpt2agent"],
+    )
+    md = pl["messages"][0]["metadata"]
+    assert md["selected_github_repos"] == ["robotlearning123/chatgpt2agent"]
+    assert md["selected_all_github_repos"] is False

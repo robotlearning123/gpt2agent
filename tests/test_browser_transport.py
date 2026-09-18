@@ -236,7 +236,7 @@ class _Conv:
         self.reply = "REST REPLY"
 
     async def complete(self, model, messages, *, temporary=True, gizmo_id=None,
-                       poll_async=False):
+                       poll_async=False, connectors=None, github_repos=None):
         self.complete_calls.append({"model": model, "messages": messages,
                                     "temporary": temporary})
         return self.reply
