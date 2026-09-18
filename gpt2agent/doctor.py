@@ -224,6 +224,37 @@ async def _p_limits(client: BackendClient, ctx: dict[str, Any]) -> str:
     return "; ".join(parts) if parts else "no caps reported"
 
 
+async def _p_rate_limit(client: BackendClient, ctx: dict[str, Any]) -> str:
+    """Local probe — reads the shared rate-limiter state file, no network.
+
+    Reports how much of the client-side budget is committed and which
+    upstream cooldowns are active across all gpt2agent processes on this
+    host.
+    """
+    import time as _time
+    from datetime import datetime as _dt
+
+    from gpt2agent.ratelimit import get_limiter
+
+    lim = get_limiter()
+    if not lim.enabled:
+        return "disabled (GPT2AGENT_RATELIMIT_OFF or [rate_limit] enabled=false)"
+    st = lim._locked_state()
+    now = _time.time()
+    in_window = [t for t in st["conv_requests"] if now - t < lim.window_s]
+    parts = [
+        f"{len(in_window)}/{lim.max_per_window} conversation posts in window",
+        f"min interval {lim.min_interval_s:.0f}s",
+    ]
+    for key, until in sorted(st["cooldowns"].items()):
+        ts = lim.cooldown_for(key)
+        if ts:
+            parts.append(
+                f"cooldown {key} until {_dt.fromtimestamp(ts).isoformat(timespec='seconds')}"
+            )
+    return "; ".join(parts)
+
+
 # (tool name, probe) in report order.
 _PROBES: list[tuple[str, Callable[[BackendClient, dict[str, Any]], Awaitable[str]]]] = [
     ("list_models", _p_list_models),
@@ -239,6 +270,7 @@ _PROBES: list[tuple[str, Callable[[BackendClient, dict[str, Any]], Awaitable[str
     ("list_codex_tasks", _p_list_codex_tasks),
     ("list_apps", _p_list_apps),
     ("account_limits", _p_limits),
+    ("rate_limit", _p_rate_limit),
 ]
 
 

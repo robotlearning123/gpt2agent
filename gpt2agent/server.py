@@ -48,6 +48,18 @@ _DEFAULTS: dict[str, Any] = {
         "impersonate": None,  # curl_cffi profile, e.g. "chrome136"
         "screen": None,       # "WxH", e.g. "1920x1080"
     },
+    # Shared client-side budget (gpt2agent/ratelimit.py): protects the
+    # account-level quotas when many agents share this account. State is
+    # file-backed (~/.gpt2agent/ratelimit-state.json) so separate gpt2agent
+    # processes share one budget. GPT2AGENT_RATELIMIT_OFF=1 disables.
+    "rate_limit": {
+        "enabled": True,
+        "min_interval_s": 15.0,      # min gap between conversation POSTs
+        "read_min_interval_s": 1.0,  # bookkeeping GET pacing
+        "max_per_window": 100,       # conversation POSTs per window
+        "window_s": 10800,           # sliding window (3h)
+        "max_wait_s": 300,           # queue up to this, then error
+    },
 }
 
 # Hosts that keep the unauthenticated HTTP transport reachable only from the
@@ -126,6 +138,7 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         UpstreamChallengeError,
         UsageLimitError,
     )
+    from gpt2agent.ratelimit import get_limiter
     from gpt2agent.sse import ConversationClient
     from gpt2agent.sim import get_profile
     from gpt2agent.tools._browser import browser_transport
@@ -134,6 +147,8 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
     # Configure the shared simulation profile before any client reads it —
     # get_profile() is a singleton; first caller wins.
     get_profile(cfg)
+    # Same for the shared rate limiter (file-backed, cross-process).
+    get_limiter(cfg)
     _backend = BackendClient()
     conv = ConversationClient(_backend)
 

@@ -359,7 +359,7 @@ def test_run_doctor_prints_the_table_and_returns_its_exit_code(
     assert text.splitlines()[0].startswith("gpt2agent doctor")
     assert "list_models" in text
     assert text.rstrip().splitlines()[-1] == (
-        "gpt2agent doctor: 23 OK, 0 failed, 0 blocked upstream, 4 unverified"
+        "gpt2agent doctor: 24 OK, 0 failed, 0 blocked upstream, 4 unverified"
     )
 
 

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import AsyncIterator
 from uuid import uuid4
@@ -21,6 +22,7 @@ from gpt2agent.backend import (
     limits_from_init,
 )
 from gpt2agent.citations import apply_inline_citations
+from gpt2agent.ratelimit import get_limiter
 from gpt2agent.sentinel import SentinelGate  # noqa: F401  (used in stream)
 from gpt2agent.sim import get_profile
 
@@ -686,6 +688,11 @@ class ConversationClient:
         info = limits_from_init(init, model=model)
         if not info["model_resets_after"]:
             return
+        # Publish the cap so sibling gpt2agent processes fail fast instead of
+        # burning a sentinel mint to rediscover it.
+        get_limiter().note_cooldown(
+            f"model:{model}", info["model_resets_after"]
+        )
         fb = info.get("default_model_slug")
         hint = (
             f" Server-side fallback is {fb!r} — pass model={fb!r} to keep working"
@@ -699,8 +706,16 @@ class ConversationClient:
         )
 
     async def _feature_remaining(self, feature: str) -> tuple[int | None, str | None]:
+        # A cooldown observed by any process on this host answers instantly.
+        until = get_limiter().cooldown_for(f"feature:{feature}")
+        if until:
+            return 0, datetime.fromtimestamp(until).isoformat()
         init = await self._limits()
         info = limits_from_init(init, feature=feature)
+        if info["feature_remaining"] is not None and info["feature_remaining"] <= 0:
+            get_limiter().note_cooldown(
+                f"feature:{feature}", info["feature_resets_after"]
+            )
         return info["feature_remaining"], info["feature_resets_after"]
 
     async def _request_setup(self, model: str):
@@ -713,6 +728,10 @@ class ConversationClient:
         ``/conversation`` endpoint.
         """
         self._backend._reload_token_if_stale()
+        # Shared client-side budget — one account, many agents. Runs before
+        # the sentinel mint so a queued request doesn't waste a single-use
+        # token, and before the init probe so a known cooldown fails fast.
+        await get_limiter().acquire_conversation(model)
         await self._check_model_cap(model)
         headers = dict(self._backend._session.headers)
         headers["Accept"] = "text/event-stream"
@@ -777,6 +796,9 @@ class ConversationClient:
                     "403 Forbidden — token may have expired"
                     + (f": {body}" if body else "")
                 )
+            if resp.status_code == 429:
+                # Shared cooldown — other processes pace themselves too.
+                get_limiter().note_429("conversation")
             if resp.status_code not in (200, 201):
                 body = _safe_body(resp)
                 raise RuntimeError(
@@ -949,6 +971,9 @@ class ConversationClient:
                         model=model,
                     )
                     reset = exc.resets_after or info["model_resets_after"]
+                    if reset:
+                        # Share the cap — sibling processes then fail fast.
+                        get_limiter().note_cooldown(f"model:{model}", reset)
                     hint = f" Resets at {reset}." if reset else ""
                     fb = info.get("default_model_slug")
                     if fb and fb != model:
@@ -1737,6 +1762,7 @@ class ConversationClient:
         # Re-read codex token before snapshotting headers — heavy DR runs
         # for 5–30 min and codex may refresh ~/.codex/auth.json mid-stream.
         self._backend._reload_token_if_stale()
+        await get_limiter().acquire_conversation(model or HEAVY_DR_MODEL)
         headers = dict(self._backend._session.headers)
         headers["Accept"] = "text/event-stream"
         headers["Content-Type"] = "application/json"

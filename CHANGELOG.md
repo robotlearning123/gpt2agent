@@ -37,6 +37,18 @@ versioning: [SemVer](https://semver.org/).
   `blocked_features`, intended-vs-actual default model) and a `sentinel
   (bridge)` probe row; the chat-family rows now inherit the *bridge* lane's
   status when the bridge is enabled instead of the dead legacy solver's.
+- **Shared rate limiter** (`gpt2agent/ratelimit.py`): client-side budget
+  enforced inside gpt2agent for fleets that share one account. File-backed
+  state (`~/.gpt2agent/ratelimit-state.json`, `flock`-guarded) makes it
+  cross-process: every conversation POST shares a sliding window
+  (`max_per_window`/`window_s`) and minimum interval, bookkeeping reads get
+  light pacing, and upstream `usage_limit`/429 responses record keyed
+  cooldowns (`model:<slug>`, `feature:<name>`) so sibling processes fail fast
+  with the real reset time instead of burning a sentinel mint. Configure via
+  `[rate_limit]` (`enabled`, `min_interval_s`, `read_min_interval_s`,
+  `max_per_window`, `window_s`, `max_wait_s`); `GPT2AGENT_RATELIMIT_OFF=1`
+  disables. New `LocalRateLimitError` when the wait would exceed `max_wait_s`.
+  Doctor gained a `rate_limit` row showing window usage and active cooldowns.
 - **Browser fallback on challenge block**: `chat`/`agent`/`deep_research`
   automatically retry through the browser transport when the direct path
   raises `UpstreamChallengeError` and `[browser] enabled = true`.

@@ -20,6 +20,8 @@ python -m gpt2agent run             # start MCP server (stdio)
 - `gpt2agent/browser.py` — Playwright Chrome transport (optional extra `gpt2agent[browser]`)
 - `gpt2agent/backend.py` — Sync HTTP client (`curl_cffi`), token management
 - `gpt2agent/tools/` — Tool modules (19 of 25; the 6 SSE tools live in server.py)
+- `gpt2agent/sim.py` — Shared website-simulation identity (persistent device/session IDs, impersonation, geo-consistent timezone/locale)
+- `gpt2agent/ratelimit.py` — Shared client-side budget: file-backed sliding window + upstream cooldown registry, cross-process for multi-agent fleets
 - `gpt2agent/sentinel.py` — Legacy POW + Turnstile gate (fallback path)
 
 ## Critical Invariants

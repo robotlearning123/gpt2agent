@@ -11,6 +11,7 @@ from typing import Any
 from curl_cffi import requests
 
 from gpt2agent._log_redact import redact_error
+from gpt2agent.ratelimit import get_limiter
 
 
 _BASE = "https://chatgpt.com"
@@ -251,6 +252,7 @@ class BackendClient:
         target_route: str | None = None,
     ) -> Any:
         self._reload_token_if_stale()
+        get_limiter().acquire_read()
         extra: dict[str, str] = {}
         if target_path is not None:
             extra["X-OpenAI-Target-Path"] = target_path
@@ -259,6 +261,8 @@ class BackendClient:
 
         r = self._session.get(_BASE + path, headers=extra, timeout=20)
 
+        if r.status_code == 429:
+            get_limiter().note_429("read")
         if r.status_code == 401:
             raise RuntimeError("401 Unauthorized — token expired, run `codex login`")
         if r.status_code == 403:
@@ -289,6 +293,7 @@ class BackendClient:
         target_route: str | None = None,
     ) -> Any:
         self._reload_token_if_stale()
+        get_limiter().acquire_read()
         extra: dict[str, str] = {"Content-Type": "application/json"}
         if target_path is not None:
             extra["X-OpenAI-Target-Path"] = target_path
@@ -297,6 +302,8 @@ class BackendClient:
 
         r = self._session.post(_BASE + path, headers=extra, json=json, timeout=30)
 
+        if r.status_code == 429:
+            get_limiter().note_429("read")
         if r.status_code == 401:
             raise RuntimeError("401 Unauthorized — token expired, run `codex login`")
         if r.status_code == 403:
