@@ -556,7 +556,7 @@ def _build_heavy_dr_payload(query: str, *, model: str | None = None) -> dict:
                 },
             }
         ],
-        "parent_message_id": str(uuid4()),
+        "parent_message_id": "client-created-root",
         "model": model or HEAVY_DR_MODEL,
         "client_prepare_state": "success",
         "timezone_offset_min": prof.timezone_offset_min,
