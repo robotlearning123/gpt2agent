@@ -13,8 +13,9 @@ python -m gpt2agent run             # start MCP server (stdio)
 ## Key Files
 
 - `gpt2agent/server.py` — MCP tool registration (25 tools), config loading
-- `gpt2agent/sse.py` — Async SSE client for `/backend-api/conversation` (chat, DR, agent, image gen, code interpreter, canvas); sentinel bridge integration; inline citation rendering
-- `gpt2agent/sentinel_bridge.py` — Owner-supplied bridge loader (fingerprint p + PoW + VM turnstile); opt-in via ENABLED marker or env
+- `gpt2agent/sse.py` — Async SSE client for `/backend-api/conversation` + `/f/conversation` (chat, DR, agent, image gen, code interpreter, canvas); sentinel bridge integration; v1 delta-encoding parser; usage-cap pre-flight; inline citation rendering
+- `gpt2agent/sim.py` — Shared simulation profile: one persistent browser identity (impersonation, UA, device/session ids, geo) for seed→mint→prepare→POST
+- `gpt2agent/sentinel_bridge.py` — Owner-supplied bridge loader (fingerprint p + PoW + VM turnstile + conduit); opt-in via ENABLED marker or env
 - `gpt2agent/citations.py` — DR inline citation rendering (citeturn markers → [N](url))
 - `gpt2agent/browser.py` — Playwright Chrome transport (optional extra `gpt2agent[browser]`)
 - `gpt2agent/backend.py` — Sync HTTP client (`curl_cffi`), token management

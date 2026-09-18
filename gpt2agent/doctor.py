@@ -404,7 +404,13 @@ def summarize(rows: list[Row]) -> str:
 
 def _blocked_note(rows: list[Row]) -> str | None:
     """Context line for a blocked gate — the table cell is too short to carry it."""
-    if not any(r.result == _BLOCKED for r in rows):
+    # The legacy-gate row being BLOCKED is informational only when the bridge
+    # lane covers the chat tools — the note exists to explain actually-blocked
+    # tools, not a disused solver.
+    if not any(
+        r.result == _BLOCKED and r.tool != "sentinel (legacy gate)"
+        for r in rows
+    ):
         return None
     return (
         "blocked tools need ChatGPT's sentinel challenge, which changed upstream — "
@@ -416,8 +422,21 @@ def exit_code(rows: list[Row]) -> int:
     """0 when everything doctor could check is healthy, 1 otherwise.
 
     UNVERIFIED rows are not failures — doctor never claimed to check them.
+    A BLOCKED legacy-gate row is informational when the bridge lane covers
+    the gate tools, so it does not fail the run either.
     """
-    return 0 if all(r.result not in (_FAIL, _BLOCKED) for r in rows) else 1
+    bridge_ok = any(
+        r.tool == "sentinel (bridge)" and r.result == _OK for r in rows
+    )
+
+    def _bad(row: Row) -> bool:
+        if row.result not in (_FAIL, _BLOCKED):
+            return False
+        if row.tool == "sentinel (legacy gate)" and bridge_ok:
+            return False
+        return True
+
+    return 0 if not any(_bad(r) for r in rows) else 1
 
 
 def run_doctor(stream=print) -> int:
