@@ -13,34 +13,49 @@ Zed, and any MCP client.
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://pypi.org/project/gpt2agent/)
 
-📖 **[Quickstart](./docs/quickstart.md)** · **[Client setup](./docs/clients.md)** · **[Troubleshooting](./docs/troubleshooting.md)** · **[FAQ](./docs/faq.md)** · **[Docs index](./docs/README.md)**
+📖 **[Quickstart](./docs/quickstart.md)** · **[Client setup](./docs/clients.md)** · **[Troubleshooting](./docs/troubleshooting.md)** · **[FAQ](./docs/faq.md)** · **[Docs index](./docs/README.md)** · **[Account safety](./docs/account-safety.md)**
 
 ---
 
-## Status — read-only tools work, conversation tools are blocked upstream
+## Status — REST conversations restored (v0.0.15, 2026-09-17)
 
-> Checked 2026-09-08 against a live account. Re-check your own account any time
+> Checked 2026-09-17 against a live account. Re-check your own account any time
 > with **`gpt2agent doctor`** (below).
 
-ChatGPT changed the Sentinel challenge that guards `/backend-api/conversation`.
-The proof-of-work stage still solves, but the Turnstile stage no longer completes,
-so **every tool that opens a conversation fails**. That is an upstream change at
-chatgpt.com — not a token, login, or configuration problem on your side, so
-re-logging in will not fix it.
+The Sentinel/Turnstile challenge that blocked conversation tools since 2026-09-08
+is now solved via a **sentinel bridge** (see below). **12 of 16 live-tested tools
+PASS**; 4 have documented limitations.
 
 | State | Tools |
 |---|---|
-| ✅ Working (probed) | `list_models`, `account_status`, `list_conversations`, `get_conversation`, `list_custom_gpts`, `custom_instructions_get`, `memory_list`, `memory_search`, `list_tasks`, `list_apps`, `list_codex_envs`, `list_codex_tasks` |
-| 🚫 Blocked upstream (sentinel challenge) | `chat`, `agent`, `gpt_chat`, `deep_research`, `deep_research_heavy`, `generate_image`, `code_interpreter`, `canvas_execute`, `memory_create_via_chat` |
-| ❓ Unverified | `custom_instructions_set`, `codex_task_create` — plain REST writes that bypass the sentinel gate; not probed, because probing them means writing to your account. `get_file_info`, `get_file_download_url` — need a `file_id` there is no read-only way to discover. |
+| ✅ **Working (live-verified 2026-09-17)** | `chat` (gpt-6-pro ✅, gpt-5-6 ✅), `agent` ✅, `deep_research` ✅ (inline citations), `code_interpreter` ✅, `canvas_execute` ✅, `generate_image` ✅, `list_models` (21), `account_status`, `list_conversations`, `get_conversation`, `list_custom_gpts` (5), `memory_list` (69), `memory_search`, `list_apps` (98), `list_codex_envs`, `list_codex_tasks`, `list_tasks`, `custom_instructions_get` |
+| ⚠ **Known limitations** | `chat(astra-wm)` — model returns empty for this slug; `gpt_chat` — 422 with `g-p-` prefix GPTs (public/store); `memory_create_via_chat` — model doesn't reliably invoke memory tool; `deep_research_heavy` — connector-dependent, may need Settings → Connectors → Deep Research enabled |
+| ❓ Unverified | `custom_instructions_set`, `codex_task_create` — plain REST writes; not probed (would write to your account) |
+| 🔇 **Fallback available** | All conversation tools support `manual=True` (zero-network handoff) and `browser=True` (real Chrome via `[browser]` extra) |
 
-> Browser transport (`chat(..., browser=True)` via `pip install "gpt2agent[browser]"` + `[browser] enabled = true`): **experimental, all conversation tools** — it drives chatgpt.com in a real Chrome and bypasses the blocked REST path.
+### The sentinel bridge
 
-The blocked tools raise `gpt2agent.backend.UpstreamChallengeError` (a
-`RuntimeError` subclass, so existing handlers keep working) with a message that
-says all three of those things. Everything else below is still documented as
-designed — the annotations mark what is currently blocked, they do not remove
-the feature.
+The upstream Sentinel challenge requires a bytecode-VM Turnstile token that the
+built-in solver cannot produce. The **bridge** loads a solver from an
+owner-supplied directory and mints the full header set in one consistent
+session. It has **retry with backoff** (3 attempts) for transient failures.
+
+**Setup** (one time):
+```bash
+# Place the bridge at ~/.gpt2agent/sentinel-bridge/ and create the marker:
+mkdir -p ~/.gpt2agent/sentinel-bridge
+touch ~/.gpt2agent/sentinel-bridge/ENABLED
+```
+
+The bridge directory must contain `wrapper/reverse/vm.py` (bytecode-VM turnstile
+solver). It is NOT part of this distribution — see
+[docs/dev/specs/sentinel-vm.md](./docs/dev/specs/sentinel-vm.md) for the
+from-scratch interpreter spec that will eventually replace the bridge.
+
+**Control**:
+- `GPT2AGENT_SENTINEL_BRIDGE=/path/to/bridge` — explicit bridge directory
+- `GPT2AGENT_SENTINEL_BRIDGE_OFF=1` — force the legacy gate path (offline/test)
+- The `ENABLED` marker file beside the bridge enables it persistently
 
 ### `gpt2agent doctor`
 
@@ -49,28 +64,7 @@ gpt2agent doctor
 ```
 
 Probes each read-only surface and prints a status table plus a one-line summary.
-It never sends a message, never creates a conversation, and never spends quota —
-read-only GETs plus one sentinel probe — and it says `UNVERIFIED` for the write
-tools rather than pretending it probed them. Exit code is 0 when everything it
-could check is healthy, non-zero otherwise (including a clean message and exit 2
-when no token is configured).
-
-```text
-$ gpt2agent doctor
-tool                      result     detail
-list_models               OK         22 models
-account_status            OK         chatgptpro plan, US
-memory_list               OK         67 memories
-list_apps                 OK         94 apps/connectors
-sentinel (chat-requirements) BLOCKED    turnstile required, solver returns no token — changed upstream
-chat                      BLOCKED    upstream challenge — see the sentinel row above
-custom_instructions_set   UNVERIFIED plain POST, bypasses the sentinel gate — not probed (would overwrite your instructions)
-
-blocked tools need ChatGPT's sentinel challenge, which changed upstream — not a token or configuration problem. Read-only tools still work.
-gpt2agent doctor: 12 OK, 0 failed, 10 blocked upstream, 4 unverified
-```
-
-*(abridged — the real table has one row per MCP tool, 26 in total)*
+It never sends a message, never creates a conversation, and never spends quota.
 
 ---
 
@@ -129,19 +123,23 @@ This bundles the MCP server registration + both skills in one step. You still ne
 the `gpt2agent` CLI on PATH (`pipx install gpt2agent`) — the plugin wires the server
 (`gpt2agent run --stdio`) and skills, not the Python package itself.
 
-### Per-client config
+### Browser transport (optional)
 
-The `install` subcommand writes the right thing for each:
+```bash
+pip install "gpt2agent[browser]"
+```
 
-| Client | File | Section |
-|---|---|---|
-| **Claude Code** | `~/.claude.json` | `mcpServers.gpt2agent` (stdio: `gpt2agent run --stdio`) |
-| **Codex CLI** | `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) | `[mcp_servers.gpt2agent]` |
+```toml
+# ~/.gpt2agent/config.toml
+[browser]
+enabled = true
+headed = true                # visible Chrome (recommended; Turnstile needs it)
+# profile_dir = "/custom/path"  # default: ~/.gpt2agent/chrome-profile
+# timeout_s = 180
+```
 
-Both are idempotent and back up the prior file as `<name>.bak-gpt2agent`.
-
-After running `install`, restart Claude Code so it re-spawns the subprocess.
-Codex picks up the new server on its next invocation automatically.
+First launch opens a visible Chrome window for a **one-time login** — after that,
+all 9 conversation tools work through the browser without any human steps.
 
 ### Manual config (if you'd rather not run install)
 
@@ -187,65 +185,61 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 
 ### Chat & reasoning
 
-> ⚠ **Blocked upstream** — every tool in this table opens a conversation and so
-> needs the Sentinel challenge, which changed upstream (see **Status** above).
-> They fail with `UpstreamChallengeError` until the challenge is handled again.
+| Tool | Parameters | What it does | Status |
+|---|---|---|---|
+| `chat` | `prompt`, `model`, `temporary`, `manual`, `browser` | Talk to any model on your account (`gpt-5-6` default, override via `model=`). Pass `gpt-6-pro` (410K), `gpt-6-astra-wm` (262K + working-memory), `o3-pro`, … | ✅ **live-verified** (gpt-6-pro, gpt-5-6) |
+| `agent` | `prompt`, `manual`, `browser` | **Agent Mode** — 262K context with autonomous browsing, code execution, tool use | ✅ **live-verified** |
+| `deep_research` | `query`, `auto_confirm`, `manual`, `browser` | Web-augmented research with **inline `[N](url)` citations** (~30–120 s) | ✅ **live-verified** (incl. citations) |
+| `deep_research_heavy` | `query`, `auto_confirm`, `manual`, `browser` | Long-form DR via `gpt-6-pro` + connector (5–30 min, monthly quota) | ⚠ connector-dependent |
+| `gpt_chat` | `gizmo_id`, `prompt`, `manual`, `browser` | Talk through one of your Custom GPTs — *experimental* (`g-` prefix verified; `g-p-` store GPTs return 422) | ⚠ partial |
 
-| Tool | What it does |
-|---|---|
-| `chat` | Talk to any model on your account (`gpt-5-6` default, override via `model=`). Pass `gpt-5-5-pro`, `o3-pro`, `gpt-5-6-thinking`, … |
-| `agent` | **Agent Mode** — 262K context with autonomous browsing, code execution, tool use |
-| `deep_research` | Web-augmented research with citations (~30–120 s). Auto-confirms by default |
-| `deep_research_heavy` | Long-form DR via `gpt-6-pro` + connector (5–30 min, monthly quota). Configurable via `[models].heavy_dr` |
-| `gpt_chat` | Talk through one of your private Custom GPTs (`g-p-*`) — *experimental* |
+### Transport modes (every conversation tool)
 
-### Image & file management
+| Mode | How | When |
+|---|---|---|
+| **REST** (default) | `chat("hi")` — direct backend call via sentinel bridge | Fastest; needs bridge set up |
+| **Browser** | `chat("hi", browser=True)` — drives a real Chrome | Most reliable; needs one-time login + `[browser]` extra |
+| **Manual** | `chat("hi", manual=True)` — returns a JSON handoff with the exact prompt, URL, and readback steps | Zero-network fallback; you paste into chatgpt.com yourself |
 
-| Tool | What it does |
-|---|---|
-| `generate_image` | Generate images via ChatGPT's built-in DALL-E. Returns download URLs + metadata — ⚠ *blocked upstream* |
-| `get_file_info` | Metadata for any ChatGPT file (images, uploads) |
-| `get_file_download_url` | Temporary download URL for a ChatGPT file (~1h expiry) |
+### Image & code execution
 
-### Code execution
-
-> ⚠ **Blocked upstream** — both tools go through the conversation endpoint (see
-> **Status** above).
-
-| Tool | What it does |
-|---|---|
-| `code_interpreter` | Run Python in ChatGPT's sandbox. Returns output + any generated charts/images |
-| `canvas_execute` | Execute code via ChatGPT's Canvas feature (live editing environment) |
+| Tool | What it does | Status |
+|---|---|---|
+| `generate_image` | Generate images via ChatGPT's built-in DALL-E. Returns download URLs + metadata | ✅ **live-verified** |
+| `code_interpreter` | Run Python in ChatGPT's sandbox. Returns output + charts/images | ✅ **live-verified** |
+| `canvas_execute` | Execute code via ChatGPT's Canvas feature (live editing) | ✅ **live-verified** |
+| `get_file_info` | Metadata for any ChatGPT file | ✅ |
+| `get_file_download_url` | Temporary download URL (~1h expiry) | ✅ |
 
 ### Account introspection
 
-| Tool | What it does |
-|---|---|
-| `account_status` | Plan, country, groups, feature count, subscription expiry |
-| `list_models` | All models on your account (slug, max_tokens, reasoning_type, capabilities, enabled_tools) |
-| `list_conversations` | Recent ChatGPT conversations (titles: emails/phones redacted) |
-| `get_conversation` | Full message history for a specific conversation (multimodal, code, images) |
-| `list_tasks` | Scheduled / completed ChatGPT tasks |
-| `list_apps` | Connected apps + connectors |
-| `list_custom_gpts` | Your private `g-p-*` GPTs |
+| Tool | What it does | Status |
+|---|---|---|
+| `account_status` | Plan, country, groups, feature count, subscription expiry | ✅ |
+| `list_models` | All models (slug, max_tokens, reasoning_type, capabilities, thinking_efforts) | ✅ (21 models) |
+| `list_conversations` | Recent conversations (titles: emails/phones redacted); supports `offset` + `limit` | ✅ |
+| `get_conversation` | Full message history (multimodal, code, images, DR widget-state reports) | ✅ |
+| `list_tasks` | Scheduled / completed ChatGPT tasks | ✅ |
+| `list_apps` | Connected apps + connectors (bare-id shape with type classification) | ✅ (98) |
+| `list_custom_gpts` | Your private GPTs (id, display_name, description, short_url) | ✅ (5) |
 
 ### Memory & instructions
 
-| Tool | What it does |
-|---|---|
-| `memory_list` | List all ChatGPT memory entries (emails/phones redacted) |
-| `memory_search` | Keyword filter over memories |
-| `memory_create_via_chat` | Add a memory (model-initiated workaround — POST `/memories` is 405) — ⚠ *blocked upstream: it needs a conversation* |
-| `custom_instructions_get` | Read your current `about_user` / `about_model` |
-| `custom_instructions_set` | Update them (read-modify-write, preserves unspecified fields) |
+| Tool | What it does | Status |
+|---|---|---|
+| `memory_list` | List all ChatGPT memories | ✅ (69) |
+| `memory_search` | Keyword filter over memories (`q` parameter) | ✅ |
+| `memory_create_via_chat` | Add a memory (model-initiated workaround — POST `/memories` is 405) | ⚠ model-dependent |
+| `custom_instructions_get` | Read your current `about_user` / `about_model` | ✅ |
+| `custom_instructions_set` | Update them (read-modify-write) | ❓ unverified |
 
 ### Codex (cloud agent)
 
-| Tool | What it does |
-|---|---|
-| `list_codex_envs` | Codex environments (label, repos, network policy) |
-| `list_codex_tasks` | Recent Codex tasks + status |
-| `codex_task_create` | Kick off a new Codex task (resolves env from `repo_label`) |
+| Tool | What it does | Status |
+|---|---|---|
+| `list_codex_envs` | Codex environments (label, repos, network policy) | ✅ |
+| `list_codex_tasks` | Recent Codex tasks + status | ✅ |
+| `codex_task_create` | Kick off a new Codex task (resolves env from `repo_label`) | ❓ unverified |
 
 ---
 
@@ -253,10 +247,9 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 
 Native Python implementation — no proxy. The server calls
 `/backend-api/conversation` (SSE) directly using `curl_cffi` for TLS
-impersonation. Vendored POW and Turnstile solvers handle the OpenAI Sentinel
-challenge (the Turnstile stage currently does not pass — see **Status** above).
-Token is reloaded from disk on each request, so codex's background
-refresh propagates transparently. See [NOTICES](./NOTICES.md) for attribution.
+impersonation. The **sentinel bridge** mints the full OpenAI Sentinel header
+set (fingerprint-config `p` + PoW + bytecode-VM Turnstile token) in one
+consistent session, with retry-with-backoff for transient failures.
 
 ```
 $CODEX_HOME/auth.json (default ~/.codex/auth.json) ← auto-refreshed by Codex
@@ -264,13 +257,29 @@ $CODEX_HOME/auth.json (default ~/.codex/auth.json) ← auto-refreshed by Codex
         |
    gpt2agent  (stdio MCP server, token reloaded on each call)
         |
-   curl_cffi  →  chatgpt.com /backend-api/{conversation,f/conversation,me,
-                                          models, memories, codex, gizmos, ...}
+   ┌────────────────────────────────────────────────┐
+   │ Transport selection (per tool call)             │
+   │                                                  │
+   │  REST (default)    Browser (browser=True)       │
+   │  ↓                    ↓                         │
+   │  sentinel_bridge     Playwright + Chrome        │
+   │  (fingerprint p +    (real page, one-time       │
+   │   PoW + VM token)     login, [browser] extra)   │
+   │  ↓                    ↓                         │
+   │  curl_cffi → chatgpt.com/backend-api/*          │
+   └────────────────────────────────────────────────┘
         |
    25 MCP tools  (chat, agent, DR ×2, GPT chat, image gen,
                   code interpreter, canvas, memory r/w,
                   instructions r/w, codex r/w, account introspect)
 ```
+
+### Citations
+
+Deep Research replies now include **inline `[N](url)` citation anchors**.
+The `gpt2agent/citations.py` module rewrites raw `citeturn…` markers
+(private-use unicode) from the stream's `content_references` mapping into
+clickable markdown links, with a Sources section appended.
 
 ---
 
@@ -288,27 +297,41 @@ port = 9000
 chat     = "gpt-5-6"        # default for chat tool
 agent    = "agent-mode"     # default for agent tool
 heavy_dr = "gpt-6-pro"      # override slug for deep_research_heavy
+
+[browser]
+enabled  = false             # opt-in; requires "gpt2agent[browser]" extra
+headed   = true              # visible Chrome (recommended for Turnstile)
+# profile_dir = "~/.gpt2agent/chrome-profile"
+# timeout_s   = 180
 ```
+
+---
+
+## Account safety
+
+See [docs/account-safety.md](./docs/account-safety.md) for the full design.
+Key rules:
+
+- **One browser profile, forever** — never copy cookies between contexts
+- **Human pacing** — min 20s between turns, burst cap, daily budget
+- **Challenge = backoff**, never brute force
+- **Temporary chats by default** (smaller account surface)
 
 ---
 
 ## Limitations
 
-- **Conversation tools are blocked upstream.** chatgpt.com changed its Sentinel
-  challenge; the proof-of-work stage still solves but the Turnstile stage does
-  not, so `chat`, `agent`, `gpt_chat`, both Deep Research tools,
-  `generate_image`, `code_interpreter`, `canvas_execute` and
-  `memory_create_via_chat` all fail with `UpstreamChallengeError`. This is not a
-  token or configuration problem, and re-logging in will not fix it. Read-only
-  tools are unaffected — run `gpt2agent doctor` for a live check.
-- **Deep Research quota:** limits and reset timing are account-reported and can
-  change. Run the bundled `deep-research/bin/quota.sh` before heavy work and run
-  heavy Deep Research serially.
+- **`gpt_chat`** with `g-p-` prefix GPTs (public/store) returns 422 — the
+  `conversation_origin` payload was reverse-engineered for `g-` prefix only.
+- **`chat(astra-wm)`** returns empty — the model may need special system hints
+  for working-memory mode.
+- **`memory_create_via_chat`** depends on the model choosing to invoke the
+  memory tool; it doesn't always do so from a plain-text prompt.
+- **`deep_research_heavy`** depends on the DR connector — check
+  chatgpt.com → Settings → Connectors → Deep Research is enabled.
+- **Deep Research quota:** limits and reset timing are account-reported.
 - **Account-tier features not yet supported:** Sora video, Operator/CUA, voice
-  sessions. These use HTTP endpoints that return 404 or haven't yet been
-  reverse-engineered out of the chatgpt.com web bundle.
-- **`gpt_chat`** is experimental — `gizmo_id` payload field verified against
-  web traffic but not load-tested across all g-p-* types.
+  sessions, Projects, Tasks (write), file upload.
 - Requires an active ChatGPT Plus or Pro subscription.
 
 ---
@@ -319,38 +342,18 @@ gpt2agent talks to ChatGPT's **private** backend the way the web app does. That
 has real consequences; please understand them before pointing it at your account.
 
 - **It impersonates the chatgpt.com web client.** It uses `curl_cffi` TLS
-  fingerprint impersonation and vendored Proof-of-Work + Cloudflare Turnstile
-  solvers to pass the OpenAI Sentinel challenge. This is **very likely against
-  the OpenAI Terms of Service**, and automated/abnormal traffic can get your
-  account **rate-limited, challenged, suspended, or banned**. Use an account you
-  can afford to lose, keep volume human-scale, and don't rely on it for anything
-  critical. This is a reverse-engineering / research tool, not an official API.
-- **The HTTP transport is UNAUTHENTICATED.** It proxies your *entire* account —
-  read all conversations, spend Deep Research quota, overwrite custom
-  instructions, launch Codex cloud tasks. Anyone who can reach the port controls
-  your account. Therefore:
-  - **Use stdio** (the default for `gpt2agent install`) for local clients like
-    Claude Code and Codex. It is not network-exposed.
-  - The server **binds `127.0.0.1` by default** and **refuses** to start the HTTP
-    transport on a non-loopback host unless you explicitly set
-    `GPT2AGENT_ALLOW_REMOTE=1`. Only do that behind your own auth proxy / firewall.
-- **Your token stays local.** It is read from `$CODEX_HOME/auth.json` (or
-  `~/.codex/auth.json` by default), with `~/.gpt2agent/token.json` as the manual
-  fallback. Codex manages its own auth file; gpt2agent creates or tightens the
-  manual fallback to mode `600` where POSIX supports it. The token is sent only
-  to `chatgpt.com`.
-  gpt2agent never transmits it anywhere else. Token/secret values are redacted
-  from error messages and logs (best-effort).
-- **PII redaction is limited.** Tools that return conversation/memory data mask
-  **emails, phone numbers, and common secret shapes** (JWTs, bearer tokens,
-  `sk-`-style API keys, GitHub tokens) from text — including `get_conversation`
-  message bodies — but names, addresses, IDs, and everything else are returned
-  verbatim. Don't treat the output as anonymized.
-- **`GPT2AGENT_RAW_DUMP`** (debug) writes raw, unredacted SSE/poll traffic —
-  including prompts, responses, and resume tokens — to the path you give it.
-  The file is created/tightened to mode `600` on POSIX systems, but its content
-  remains sensitive. Use an ignored name such as `gpt2agent-raw-dump.jsonl`,
-  then delete it after debugging.
+  fingerprint impersonation and a sentinel bridge to pass the OpenAI Sentinel
+  challenge. This is **very likely against the OpenAI Terms of Service**, and
+  automated/abnormal traffic can get your account **rate-limited, challenged,
+  suspended, or banned**. Use an account you can afford to lose, keep volume
+  human-scale, and don't rely on it for anything critical.
+- **The HTTP transport is UNAUTHENTICATED.** Use stdio (the default).
+- **Your token stays local.** Read from `$CODEX_HOME/auth.json` with
+  `~/.gpt2agent/token.json` as fallback. Sent only to `chatgpt.com`.
+- **PII redaction is limited.** Emails, phones, and secret shapes are masked;
+  everything else is returned verbatim.
+- **`GPT2AGENT_RAW_DUMP`** (debug) writes raw unredacted traffic to the given
+  path. Use mode-600 file names and delete after debugging.
 
 Found a security issue? See [SECURITY.md](./SECURITY.md).
 
@@ -362,91 +365,26 @@ Found a security issue? See [SECURITY.md](./SECURITY.md).
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-pytest
+pytest                              # 513+ tests, live tests auto-skip (SKIP_LIVE)
+python -m ruff check gpt2agent tests # lint
 ```
 
 ### Release
 
-Tagged releases are configured to publish to PyPI and create a GitHub Release
-with the matching CHANGELOG section:
+1. Prepare a release PR: bump version in 4 files (`pyproject.toml`,
+   `gpt2agent/__init__.py`, `.claude-plugin/plugin.json`, `server.json`) +
+   dated `CHANGELOG.md` entry.
+2. Verify: `python scripts/verify_release.py`
+3. After merge, tag the merge SHA and push: `git tag -a v$VERSION $SHA -m "gpt2agent $VERSION" && git push origin v$VERSION`
+4. CI publishes to PyPI (trusted publishing) + creates a GitHub Release.
+5. Full runbook: [docs/release-validation.md](./docs/release-validation.md)
 
-Prepare and merge a reviewed release PR that updates the same version in
-`pyproject.toml`, `gpt2agent/__init__.py`, `.claude-plugin/plugin.json`, and
-both version fields in `server.json`, plus a non-empty dated `CHANGELOG.md`
-section. Verify that candidate before merging:
+### Testing
 
-```bash
-python scripts/verify_release.py
-```
-
-Stable versions use `X.Y.Z`. Supported prereleases use `X.Y.Z-alphaN`,
-`X.Y.Z-betaN`, or `X.Y.Z-rcN` in tags, changelog headings, and project
-manifests. Python package metadata and PyPI use the corresponding canonical
-PEP 440 spelling (`X.Y.ZaN`, `X.Y.ZbN`, or `X.Y.ZrcN`).
-
-After the release PR is merged, read its exact merge SHA, prove that commit is
-on `origin/main`, check out that reviewed tree, then create and push only the
-intended annotated tag. This avoids silently including a later unrelated PR:
-
-```bash
-set -euo pipefail
-git fetch --no-tags origin main:refs/remotes/origin/main
-read -r -p "Merged release PR number: " PR_NUMBER
-RELEASE_SHA=$(gh pr view "$PR_NUMBER" --json mergeCommit,state \
-  --jq 'select(.state == "MERGED") | .mergeCommit.oid')
-test -n "$RELEASE_SHA"
-git merge-base --is-ancestor "$RELEASE_SHA" origin/main
-test -z "$(git status --porcelain)"
-git switch --detach "$RELEASE_SHA"
-trap 'git switch - >/dev/null || true' EXIT
-test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
-VERSION=$(python - <<'PY'
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib
-with open("pyproject.toml", "rb") as stream:
-    print(tomllib.load(stream)["project"]["version"])
-PY
-)
-TAG="v$VERSION"
-python scripts/verify_release.py --tag "$TAG"
-REMOTE_TAG_SHA="$(
-  git ls-remote --tags origin |
-    awk -v ref="refs/tags/$TAG" '$2 == ref { print $1 }'
-)"
-if [ -n "$REMOTE_TAG_SHA" ]; then
-  echo "Release tag already exists on origin: $TAG" >&2
-  exit 1
-fi
-git tag -a "$TAG" "$RELEASE_SHA" -m "gpt2agent $VERSION"
-git push origin "refs/tags/$TAG"
-trap - EXIT
-git switch -
-```
-
-The release workflow (`.github/workflows/release.yml`) verifies every version
-surface and the CHANGELOG, reads the remote annotated tag target independently
-of checkout's runner-local tag ref, binds it to the event SHA, and proves that
-commit is on `origin/main`. It then runs the test matrix, installs and tests the
-built wheel and sdist in clean environments, publishes to PyPI via OIDC trusted
-publishing, and posts a GitHub Release with that version's CHANGELOG body.
-
-If a publish or downstream release job fails, use GitHub Actions' **Re-run
-failed jobs** on that same workflow run so it reuses the original build
-artifact. Do not re-run the whole workflow after any file reaches PyPI: Python
-sdists are not guaranteed byte-reproducible, and the hash guard intentionally
-rejects different rebuilt bytes for an existing version.
-
-If the source gate itself exposes a workflow defect before anything is
-published, fix the workflow on `main` and prepare the next version. Never
-delete, move, or reuse the failed protected release tag: reruns still execute
-the workflow stored at that immutable tagged commit.
-
-> PyPI publishing requires a Trusted Publisher for this repository, workflow
-> `release.yml`, and environment `pypi`. Keep that environment restricted to
-> protected release tags; the installer fails closed if the published package
-> cannot be installed rather than substituting unreleased repository code.
+- **Offline**: `pytest` — 513+ unit/contract tests (zero network)
+- **Live verification matrix**: `scripts/agent-user-journey.sh <worktree>` — 15 cases
+- **Release emulation gate**: `scripts/release-emulation-test.sh <worktree>` — 11 checks
+- **Parameter contracts**: `tests/test_param_matrix.py` — 34 cases
 
 ---
 
@@ -458,6 +396,8 @@ the workflow stored at that immutable tagged commit.
 
 ## Acknowledgments
 
-- [lanqian528/chat2api](https://github.com/lanqian528/chat2api) — POW and Turnstile solver code (MIT)
+- [lanqian528/chat2api](https://github.com/lanqian528/chat2api) — POW solver (MIT)
+- Sentinel bridge technique studied from public reverse-engineering (2026); see
+  [docs/dev/specs/sentinel-vm.md](./docs/dev/specs/sentinel-vm.md) for the
+  from-scratch interpreter spec.
 - [basketikun/chatgpt2api](https://github.com/basketikun/chatgpt2api) — survey of ChatGPT backend API patterns
-- [7836246/cursor2api](https://github.com/7836246/cursor2api) — survey of Cursor API patterns
