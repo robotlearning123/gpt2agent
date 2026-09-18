@@ -381,6 +381,45 @@ python -m ruff check gpt2agent tests # lint
 4. CI publishes to PyPI (trusted publishing) + creates a GitHub Release.
 5. Full runbook: [docs/release-validation.md](./docs/release-validation.md)
 
+After the release PR is merged, read its exact merge SHA, prove that commit is
+on `origin/main`, check out that reviewed tree, then create and push only the
+intended annotated tag:
+
+```bash
+set -euo pipefail
+git fetch --no-tags origin main:refs/remotes/origin/main
+read -r -p "Merged release PR number: " PR_NUMBER
+RELEASE_SHA=$(gh pr view "$PR_NUMBER" --json mergeCommit,state   --jq 'select(.state == "MERGED") | .mergeCommit.oid')
+test -n "$RELEASE_SHA"
+git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+test -z "$(git status --porcelain)"
+git switch --detach "$RELEASE_SHA"
+trap 'git switch - >/dev/null || true' EXIT
+test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+TAG="v$VERSION"
+python scripts/verify_release.py --tag "$TAG"
+REMOTE_TAG_SHA="$(git ls-remote --tags origin | awk -v ref="refs/tags/$TAG" '$2 == ref { print $1 }')"
+if [ -n "$REMOTE_TAG_SHA" ]; then
+  echo "Release tag already exists on origin: $TAG" >&2
+  exit 1
+fi
+git tag -a "$TAG" "$RELEASE_SHA" -m "gpt2agent $VERSION"
+git push origin "refs/tags/$TAG"
+trap - EXIT
+git switch -
+```
+
+If a publish or downstream release job fails, use GitHub Actions' **Re-run
+failed jobs** on that same workflow run so it reuses the original build
+artifact. Do not re-run the whole workflow after any file reaches PyPI.
+
+If a publish or downstream release job fails, use GitHub Actions' **Re-run
+failed jobs** on that same workflow run so it reuses the original build
+artifact. Do not re-run the whole workflow after any file reaches PyPI: Python
+sdists are not guaranteed byte-reproducible, and the hash guard intentionally
+rejects different rebuilt bytes for an existing version.
+
 ### Testing
 
 - **Offline**: `pytest` — 513+ unit/contract tests (zero network)
