@@ -558,6 +558,32 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         )
         return text or "(no response)"
 
+    @mcp.tool()
+    async def usage_stats() -> str:
+        """Account usage snapshot: per-model caps, per-feature remaining
+        counters, reset timestamps, the effective default model (and whether
+        it was silently downgraded), plus this host's shared client-side
+        budget and active upstream cooldowns.
+
+        Answers "how much have we used / left / when does it reset / which
+        model can I actually use" so agents can pick the cheapest viable lane
+        before spending quota. Reads the same `conversation/init` bookkeeping
+        call the web app issues on page load — no message is sent and no
+        quota is consumed.
+
+        Note: `deep_research` under `features`/`deep_research.light_*` is the
+        LIGHT DR counter. `deep_research_heavy` draws on an independent
+        monthly cap (`deep_research.heavy_*` fields) that the backend may not
+        expose — when unreported, the authoritative signal is the connector's
+        own refusal. JSON output.
+        """
+        import asyncio
+
+        from gpt2agent.usage import build_usage_report
+
+        report = await asyncio.to_thread(build_usage_report, _backend)
+        return json.dumps(report, indent=2)
+
     try:
         from gpt2agent.tools import register_all
 
@@ -593,6 +619,16 @@ def main() -> None:
     sub.add_parser(
         "doctor",
         help="Probe the account read-only and report which tools work right now",
+    )
+
+    # usage subcommand — account quota snapshot (used / left / reset / model)
+    usage_p = sub.add_parser(
+        "usage",
+        help="Show account usage: model caps, feature quotas, resets, "
+        "and this host's shared rate-limit budget",
+    )
+    usage_p.add_argument(
+        "--json", action="store_true", help="Emit the raw report as JSON"
     )
 
     # install subcommand — register gpt2agent with one or more MCP clients
@@ -659,6 +695,19 @@ def main() -> None:
         from gpt2agent.doctor import run_doctor
 
         raise SystemExit(run_doctor())
+
+    if args.command == "usage":
+        from gpt2agent.backend import BackendClient
+        from gpt2agent.ratelimit import get_limiter
+        from gpt2agent.usage import build_usage_report, format_usage_report
+
+        get_limiter(load_config(getattr(args, "config", None)))
+        report = build_usage_report(BackendClient())
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            print(format_usage_report(report))
+        return
 
     if args.command == "install":
         from gpt2agent.install import run_install

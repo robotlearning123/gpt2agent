@@ -36,6 +36,14 @@ versioning: [SemVer](https://semver.org/).
   `connector_openai_*` connectors (pubmed, pdf, spreadsheets…) work as-is;
   OAuth apps like GitHub must be connected in chatgpt.com Settings first —
   ids come from `list_apps`.
+- **Usage report** (`gpt2agent/usage.py`, new `usage_stats` MCP tool and
+  `gpt2agent usage [--json]` CLI): one snapshot answering "how much used /
+  left / when does it reset / which model" — per-model caps and resets,
+  per-feature remaining counters, blocked features, the effective default
+  model with a `downgraded` flag when it differs from the intended one,
+  light-vs-heavy DR counters split out, plus this host's shared rate-limit
+  budget and active cooldowns. Reads the same `conversation/init`
+  bookkeeping call the web app issues on page load — no quota consumed.
 
 ### Fixed
 
