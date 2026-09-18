@@ -471,7 +471,7 @@ def test_citations_sequential_markers() -> None:
 def test_citations_multi_url_single_marker() -> None:
     m = _marker("citeturn0search0")
     out = apply_inline_citations(f"a {m} b", [_ref(m, ["u1", "u2", "u3"])])
-    assert out == "a [1](u1)[1](u2)[1](u3) b"
+    assert out == "a [1](u1)[2](u2)[3](u3) b"
 
 
 @pytest.mark.parametrize("urls", [None, [], [""], ["", ""]])
@@ -491,7 +491,7 @@ def test_citations_repeated_marker_reuses_index() -> None:
     m = _marker("citeturn0search0")
     out = apply_inline_citations(
         f"a {m} b {m}", [_ref(m, ["u1"]), _ref(m, ["u2"])])
-    assert out == "a [1](u1) b [1](u2)"
+    assert out == "a [1](u1) b [2](u2)"  # same marker, different URLs → different numbers
 
 
 def test_citations_absent_marker_skipped_without_index() -> None:

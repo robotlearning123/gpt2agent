@@ -27,15 +27,22 @@ def apply_inline_citations(text: str, refs: list) -> str:
     if not text:
         return text
     out = text
-    index: dict[str, int] = {}
+    counter = 0
     for ref in refs or []:
         marker = (ref or {}).get("matched_text") or ""
         if not marker or marker not in out:
             continue
         urls = [u for u in ((ref or {}).get("safe_urls") or []) if u]
-        if marker not in index:
-            index[marker] = len(index) + 1
-        num = index[marker]
-        repl = "".join(f"[{num}]({u})" for u in urls) if urls else f"[{num}]"
+        if urls:
+            # each URL gets its own sequential number (devin2 finding:
+            # multi-URL markers previously all rendered [1])
+            parts = []
+            for u in urls:
+                counter += 1
+                parts.append(f"[{counter}]({u})")
+            repl = "".join(parts)
+        else:
+            counter += 1
+            repl = f"[{counter}]"
         out = out.replace(marker, repl, 1)
     return _PRIVATE_USE.sub("", out)
