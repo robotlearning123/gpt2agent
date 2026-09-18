@@ -133,6 +133,15 @@ Check before heavy calls:
 ~/.claude/skills/deep-research/bin/quota.sh
 ```
 
+The counter `quota.sh` prints (`limits_progress[].feature_name ==
+"deep_research"`) is the GENERIC counter that gates the light `deep_research`
+path only. `deep_research_heavy` draws on an independent monthly cap on the
+connector channel which this counter does NOT reflect (verified live
+2026-09-19: heavy dispatch succeeded with the generic counter at 0) — a
+`remaining = 0` from `quota.sh` does not mean heavy DR is exhausted, and a
+non-zero value does not guarantee heavy capacity. Treat the heavy cap as
+unknown until the server refuses a heavy dispatch.
+
 Refuse to fire `--heavy` if remaining < 10 unless the user explicitly
 acknowledges the consumption.
 

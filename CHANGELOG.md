@@ -37,6 +37,20 @@ versioning: [SemVer](https://semver.org/).
   OAuth apps like GitHub must be connected in chatgpt.com Settings first —
   ids come from `list_apps`.
 
+### Fixed
+
+- **Heavy DR no longer gated by the generic `deep_research` counter**:
+  `deep_research_heavy` was pre-flight blocked whenever
+  `limits_progress[].feature_name == "deep_research"` hit 0 — but that
+  counter governs the light `deep_research` path only. Verified live
+  2026-09-19: a heavy DR dispatched `connector_openai_deep_research`
+  successfully while the generic counter read 0. Heavy DR now checks a
+  dedicated `deep_research_*` counter when the backend exposes one
+  (`limits_progress` or `blocked_features`) and fails open otherwise —
+  the authoritative signal is the connector's own error in the stream.
+  `quota.sh` output and the deep-research skill doc now state this
+  explicitly.
+
 ## [0.0.17] - 2026-09-19
 
 ### Added

@@ -761,6 +761,50 @@ class ConversationClient:
             )
         return info["feature_remaining"], info["feature_resets_after"]
 
+    async def _heavy_dr_quota(self) -> tuple[int | None, str | None]:
+        """Heavy DR quota probe — the generic ``deep_research`` counter does
+        NOT gate the heavy connector channel (verified live 2026-09-19: the
+        DR connector dispatched fine with ``deep_research`` remaining=0).
+        Its independent monthly cap is reported under a distinct feature
+        name; scan limits_progress + blocked_features for ``deep_research_*``
+        variants. The authoritative exhaustion signal is still the in-stream
+        ``usage_limit`` frame / connector error."""
+        # A cooldown observed by any process on this host answers instantly.
+        until = get_limiter().cooldown_for("feature:deep_research_heavy")
+        if until:
+            return 0, datetime.fromtimestamp(until).isoformat()
+        init = await self._limits()
+        if not init:
+            return None, None
+        for lim in init.get("limits_progress") or []:
+            if not isinstance(lim, dict):
+                continue
+            name = str(lim.get("feature_name") or "")
+            if not (name.startswith("deep_research_") and name != "deep_research"):
+                continue
+            rem = lim.get("remaining")
+            # Malformed/missing remaining means "unknown" — never gate on it.
+            remaining = (
+                rem if isinstance(rem, (int, float))
+                and not isinstance(rem, bool) else None
+            )
+            reset = lim.get("reset_after") or lim.get("resets_after")
+            if remaining is not None and remaining <= 0:
+                get_limiter().note_cooldown(
+                    "feature:deep_research_heavy", reset
+                )
+            return remaining, reset
+        for feat in init.get("blocked_features") or []:
+            if not isinstance(feat, dict):
+                continue
+            name = str(feat.get("name") or "")
+            if name.startswith("deep_research_") and name != "deep_research":
+                get_limiter().note_cooldown(
+                    "feature:deep_research_heavy", feat.get("resets_after")
+                )
+                return 0, feat.get("resets_after")
+        return None, None
+
     def _persist_cookies(self, session) -> None:
         """Fold cookies learned during a conversation POST back into the
         warm profile jar — upstream rotates ``__cf_bm`` on responses, and a
@@ -1834,13 +1878,14 @@ class ConversationClient:
         connector_openai_deep_research tool call.
         """
         # --- Quota guard ---
-        # Probe /backend-api/conversation/init (POST) to check deep_research quota.
-        # Response shape: limits_progress: [{"feature_name": "deep_research", ...}].
-        # Fail-open on probe error; only "remaining <= 0" aborts.
-        remaining, resets_after = await self._feature_remaining("deep_research")
+        # Heavy DR has its own quota counter — the generic ``deep_research``
+        # limits_progress entry gates light DR only and must not block here
+        # (verified live: connector dispatched with deep_research remaining=0).
+        # Fail-open on probe error; only a heavy-specific cap aborts.
+        remaining, resets_after = await self._heavy_dr_quota()
         if remaining is not None and remaining <= 0:
             raise UsageLimitError(
-                "Deep Research quota exhausted"
+                "Heavy Deep Research quota exhausted"
                 + (f" — resets at {resets_after}." if resets_after else "."),
                 resets_after=resets_after,
             )
@@ -2123,7 +2168,20 @@ class ConversationClient:
                     continue
                 if not isinstance(obj, dict):
                     continue
-                _raise_for_sse_error(obj)
+                try:
+                    _raise_for_sse_error(obj)
+                except UsageLimitError as exc:
+                    # Authoritative heavy-cap signal — share it so sibling
+                    # processes fail fast instead of burning another mint.
+                    get_limiter().note_cooldown(
+                        "feature:deep_research_heavy",
+                        exc.resets_after
+                        or obj.get("resets_after")
+                        or obj.get("reset_after")
+                        or obj.get("resets_at")
+                        or (time.time() + 3600),
+                    )
+                    raise
                 # Capture conversation_id from ANY frame that carries it at top
                 # level. _apply_patch only sets it from a few typed events
                 # (resume_conversation_token / message_marker /

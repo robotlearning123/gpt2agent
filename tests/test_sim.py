@@ -446,3 +446,61 @@ def test_github_repos_in_message_metadata() -> None:
     md = pl["messages"][0]["metadata"]
     assert md["selected_github_repos"] == ["robotlearning123/chatgpt2agent"]
     assert md["selected_all_github_repos"] is False
+
+
+# ── heavy-DR quota counter (distinct from generic deep_research) ──────────────
+
+
+def test_heavy_dr_quota_ignores_generic_counter() -> None:
+    # Verified live 2026-09-19: the DR connector dispatched fine with the
+    # generic deep_research counter at 0 — it must not gate heavy DR.
+    conv = ConversationClient(_CapBackend(_INIT))
+    conv._limits_cache = (0, _INIT)
+    remaining, _ = asyncio.run(conv._heavy_dr_quota())
+    assert remaining is None
+
+
+def test_heavy_dr_quota_reads_variant_counter() -> None:
+    init = {
+        "limits_progress": [
+            {"feature_name": "deep_research", "remaining": 0},
+            {"feature_name": "deep_research_standard", "remaining": 3,
+             "reset_after": "2026-10-01T00:00:00Z"},
+        ]
+    }
+    conv = ConversationClient(_CapBackend(init))
+    conv._limits_cache = (0, init)
+    remaining, reset = asyncio.run(conv._heavy_dr_quota())
+    assert remaining == 3
+    assert reset == "2026-10-01T00:00:00Z"
+
+
+def test_heavy_dr_quota_blocked_variant() -> None:
+    init = {
+        "blocked_features": [
+            {"name": "deep_research_standard",
+             "resets_after": "2026-10-01T00:00:00Z"}
+        ]
+    }
+    conv = ConversationClient(_CapBackend(init))
+    conv._limits_cache = (0, init)
+    remaining, reset = asyncio.run(conv._heavy_dr_quota())
+    assert remaining == 0
+    assert reset == "2026-10-01T00:00:00Z"
+
+
+def test_heavy_dr_quota_malformed_entries_fail_open() -> None:
+    # Non-dict entries, a malformed "remaining", and the generic counter at 0
+    # must not raise or gate — heavy quota is simply unknown.
+    init = {
+        "limits_progress": [
+            "garbage",
+            {"feature_name": "deep_research", "remaining": 0},
+            {"feature_name": "deep_research_standard", "remaining": "many"},
+        ],
+        "blocked_features": [None, {"name": "reason"}],
+    }
+    conv = ConversationClient(_CapBackend(init))
+    conv._limits_cache = (0, init)
+    remaining, _ = asyncio.run(conv._heavy_dr_quota())
+    assert remaining is None

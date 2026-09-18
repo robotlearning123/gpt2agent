@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 # Print remaining ChatGPT Deep Research quota for the selected account.
+#
+# NOTE: `limits_progress[].feature_name == "deep_research"` is the GENERIC
+# counter — it gates the light `deep_research` (model=research) path only.
+# `deep_research_heavy` (connector_openai_deep_research) has an independent
+# monthly cap reported under a different feature name; it is NOT reflected
+# here (verified live 2026-09-19: heavy dispatch succeeded with
+# deep_research remaining=0).
 set -euo pipefail
 
 if command -v gpt2agent >/dev/null 2>&1; then
@@ -52,8 +59,12 @@ def main():
             )
             return 1
         print(
-            f"deep_research remaining = {remaining}  "
+            f"deep_research (light) remaining = {remaining}  "
             f"reset = {lim.get('reset_after')}"
+        )
+        print(
+            "note: heavy DR (deep_research_heavy) has a separate monthly "
+            "quota not shown by this counter"
         )
         return 0
 
