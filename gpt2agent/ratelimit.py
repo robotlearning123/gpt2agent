@@ -155,9 +155,67 @@ class RateLimiter:
             return until
         return None
 
-    def note_429(self, lane: str, retry_s: float = 60.0) -> None:
-        """Short shared cooldown after an upstream HTTP 429."""
+    def note_429(self, lane: str, retry_s: float | None = None) -> None:
+        """Shared cooldown after an upstream HTTP 429 — exponential on
+        consecutive 429s (60s → 120 → 240 → cap 480) so a throttled account
+        gets real breathing room, not a metronome of retries."""
+        if retry_s is None:
+
+            def _bump(st):
+                k = f"429streak:{lane}"
+                streak = int(st["cooldowns"].get(k) or 0) + 1
+                st["cooldowns"][k] = streak
+                retry = min(60.0 * (2 ** (streak - 1)), 480.0)
+                st["cooldowns"][f"http429:{lane}"] = time.time() + retry
+                return retry
+
+            self._locked_state(_bump)
+            return
         self.note_cooldown(f"http429:{lane}", time.time() + retry_s)
+
+    def clear_429_streak(self, lane: str) -> None:
+        """Reset the exponential backoff after a successful request."""
+        if not self.enabled:
+            return
+        self._locked_state(
+            lambda st: st["cooldowns"].pop(f"429streak:{lane}", None)
+        )
+
+    # ── circuit breaker (consecutive failure tracking) ────────────────
+
+    def note_failure(self, key: str, threshold: int = 3,
+                     cooldown_s: float = 600.0) -> bool:
+        """Count a consecutive failure; at ``threshold`` arm a cooldown.
+
+        Returns True when the breaker just tripped. Use for lanes where
+        repeated attempts themselves look abusive (e.g. sentinel mints —
+        hammering chat-requirements while flagged makes things worse)."""
+        if not self.enabled:
+            return False
+
+        def _bump(st):
+            fails = int(st["cooldowns"].get(f"fails:{key}") or 0) + 1
+            st["cooldowns"][f"fails:{key}"] = fails
+            if fails >= threshold:
+                st["cooldowns"][f"breaker:{key}"] = time.time() + cooldown_s
+                return True
+            return False
+
+        return bool(self._locked_state(_bump))
+
+    def note_success(self, key: str) -> None:
+        if not self.enabled:
+            return
+
+        def _clear(st):
+            st["cooldowns"].pop(f"fails:{key}", None)
+            st["cooldowns"].pop(f"breaker:{key}", None)
+
+        self._locked_state(_clear)
+
+    def breaker_open(self, key: str) -> float | None:
+        """Epoch the breaker lifts, or None."""
+        return self.cooldown_for(f"breaker:{key}")
 
     # ── lanes ─────────────────────────────────────────────────────────
 
@@ -233,7 +291,11 @@ class RateLimiter:
             "conv_requests", "last_conv", self.min_interval_s, windowed=True
         )
         if wait > 0:
-            await asyncio.sleep(wait + random.uniform(0.05, 0.5))
+            # Humanize: the gap between messages isn't a metronome — add a
+            # jitter proportional to the interval so bursts don't look
+            # machine-paced.
+            jitter = random.uniform(0.1, max(1.0, self.min_interval_s * 0.4))
+            await asyncio.sleep(wait + jitter)
 
     def acquire_read(self) -> None:
         """Gate a bookkeeping GET/POST — light min-interval pacing only."""

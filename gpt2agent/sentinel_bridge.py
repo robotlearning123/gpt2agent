@@ -26,12 +26,24 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from base64 import b64encode
 from pathlib import Path
 
+from gpt2agent.ratelimit import get_limiter
 from gpt2agent.sim import SimProfile, get_profile
 
 _log = logging.getLogger(__name__)
+
+#: Circuit-breaker key for mint failures — after 3 consecutive failures the
+#: bridge cools down 10 min instead of hammering chat-requirements while
+#: flagged (which makes upstream flagging worse).
+_BREAKER_KEY = "sentinel_mint"
+_BREAKER_THRESHOLD = 3
+_BREAKER_COOLDOWN_S = 600.0
+
+#: Signals upstream uses when it has flagged the session/account.
+_UNUSUAL = ("unusual activity", "too many requests")
 
 
 def _bridge_dir() -> Path:
@@ -122,6 +134,17 @@ class SentinelBridge:
         ``oai-device-id``/``oai-client-version`` so the conversation POST
         looks like the real frontend end-to-end."""
         prof = self._profile
+        lim = get_limiter()
+        until = lim.breaker_open(_BREAKER_KEY)
+        if until:
+            from datetime import datetime
+
+            raise RuntimeError(
+                "sentinel bridge circuit breaker open until "
+                f"{datetime.fromtimestamp(until).isoformat(timespec='seconds')} "
+                f"({_BREAKER_THRESHOLD}+ consecutive mint failures) — not "
+                "retrying upstream; use browser=True meanwhile"
+            )
         sess = prof.ensure_session()
 
         config = prof.fingerprint_config()
@@ -143,7 +166,19 @@ class SentinelBridge:
             req = r.json()
         except Exception:
             pass
+        # "Unusual activity" means upstream flagged the session — cool down
+        # hard and drop the cookie jar; retrying as-is digs the hole deeper.
+        blob = str(req or r.text).lower()
+        if any(sig in blob for sig in _UNUSUAL):
+            lim.note_cooldown(f"breaker:{_BREAKER_KEY}", time.time() + 1800)
+            prof.drop_session()
+            raise RuntimeError(
+                "sentinel requirements flagged 'unusual activity' — "
+                "cooling the bridge for 30 min; use browser=True")
         if r.status_code != 200 or not (isinstance(req, dict) and req.get("token")):
+            lim.note_failure(
+                _BREAKER_KEY, _BREAKER_THRESHOLD, _BREAKER_COOLDOWN_S
+            )
             raise RuntimeError(
                 f"sentinel requirements failed: {r.status_code} "
                 f"{str(req or r.text)[:120]}")
@@ -157,6 +192,9 @@ class SentinelBridge:
         # Upstream passes str([ip, city, region, lat, lng]) into the VM.
         ts = self._vm.VM.get_turnstile(dx, p, str(prof.ip_info)) if dx else ""
         if not ts:
+            lim.note_failure(
+                _BREAKER_KEY, _BREAKER_THRESHOLD, _BREAKER_COOLDOWN_S
+            )
             raise RuntimeError("sentinel bridge: turnstile token empty")
 
         headers = {
@@ -170,6 +208,9 @@ class SentinelBridge:
         conduit = get_conduit(sess, prof, bearer, model)
         if conduit:
             headers["x-conduit-token"] = conduit
+        lim.note_success(_BREAKER_KEY)
+        # Keep the cookie jar continuous across process restarts.
+        prof.persist_cookies()
         return {"headers": headers, "cookies": dict(sess.cookies)}
 
 

@@ -92,6 +92,14 @@ def _raise_for_sse_error(obj: dict) -> None:
     if not isinstance(raw, str):
         raw = json.dumps(raw, ensure_ascii=False)
     msg = _redact_error(raw, max_len=500)
+    # Upstream flagged the session — cool the whole lane down and drop the
+    # warm cookie jar so the next request doesn't present the flagged
+    # fingerprint again.
+    if "unusual activity" in str(raw).lower():
+        get_limiter().note_cooldown(
+            "http429:conversation", time.time() + 1800
+        )
+        get_profile().drop_session()
     if obj.get("error_code") == "usage_limit" or "hit your limit" in str(raw).lower():
         # Distinct type so callers can offer fallbacks (other model, browser
         # lane, second account) instead of a generic stream failure.
@@ -608,6 +616,18 @@ class ConversationClient:
 
         profile = get_profile()
 
+        # Breaker open (or a flagged session) means "don't touch upstream" —
+        # the legacy gate hits the same chat-requirements endpoint, so fail
+        # fast into the browser-fallback path instead of degrading to it.
+        _until = get_limiter().breaker_open("sentinel_mint")
+        if _until:
+            from gpt2agent.backend import UpstreamChallengeError
+
+            raise UpstreamChallengeError(
+                "sentinel mint circuit breaker open until "
+                f"{datetime.fromtimestamp(_until).isoformat(timespec='seconds')}"
+            )
+
         def _mint():
             from gpt2agent.backend import _load_token as _blt
             token = _blt()
@@ -718,6 +738,20 @@ class ConversationClient:
             )
         return info["feature_remaining"], info["feature_resets_after"]
 
+    def _persist_cookies(self, session) -> None:
+        """Fold cookies learned during a conversation POST back into the
+        warm profile jar — upstream rotates ``__cf_bm`` on responses, and a
+        real tab carries that rotation into its next request."""
+        prof = get_profile()
+        if prof.session is None:
+            return
+        try:
+            for k, v in session.cookies.items():
+                prof.session.cookies.set(k, v)
+            prof.persist_cookies()
+        except Exception:
+            pass
+
     async def _request_setup(self, model: str):
         """Shared prelude for every conversation POST.
 
@@ -784,6 +818,9 @@ class ConversationClient:
                 timeout=300,
                 stream=True,
             )
+            self._persist_cookies(s)
+            if resp.status_code in (200, 201):
+                get_limiter().clear_429_streak("conversation")
             if resp.status_code == 401:
                 body = _safe_body(resp)
                 raise RuntimeError(
@@ -1149,6 +1186,11 @@ class ConversationClient:
             resp = await s.post(
                 conv_url, headers=headers, json=payload, timeout=300, stream=True,
             )
+            self._persist_cookies(s)
+            if resp.status_code in (200, 201):
+                get_limiter().clear_429_streak("conversation")
+            elif resp.status_code == 429:
+                get_limiter().note_429("conversation")
             if resp.status_code not in (200, 201):
                 body = _safe_body(resp)
                 raise RuntimeError(
@@ -1327,6 +1369,11 @@ class ConversationClient:
             resp = await s.post(
                 conv_url, headers=headers, json=payload, timeout=300, stream=True,
             )
+            self._persist_cookies(s)
+            if resp.status_code in (200, 201):
+                get_limiter().clear_429_streak("conversation")
+            elif resp.status_code == 429:
+                get_limiter().note_429("conversation")
             if resp.status_code not in (200, 201):
                 body = _safe_body(resp)
                 raise RuntimeError(
@@ -1512,6 +1559,11 @@ class ConversationClient:
                     timeout=1800,
                     stream=True,
                 )
+                self._persist_cookies(s)
+                if resp.status_code in (200, 201):
+                    get_limiter().clear_429_streak("conversation")
+                elif resp.status_code == 429:
+                    get_limiter().note_429("conversation")
                 if resp.status_code == 401:
                     raise RuntimeError("401 Unauthorized — run `codex login`")
                 if resp.status_code == 403:
@@ -1994,6 +2046,11 @@ class ConversationClient:
                 timeout=1800,
                 stream=True,
             )
+            self._persist_cookies(s)
+            if resp.status_code in (200, 201):
+                get_limiter().clear_429_streak("conversation")
+            elif resp.status_code == 429:
+                get_limiter().note_429("conversation")
             if resp.status_code == 401:
                 raise RuntimeError("401 Unauthorized — run `codex login`")
             if resp.status_code == 403:

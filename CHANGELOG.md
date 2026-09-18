@@ -6,6 +6,30 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.0.18] - 2026-09-19
+
+### Added
+
+- **Cookie continuity across restarts** (`sim.py`): the warm session's jar
+  (incl. rotated `__cf_bm`) is persisted to `sim-state.json` after every
+  mint and reloaded on next start — a server restart now looks like
+  reopening the same browser profile, not a brand-new client. Cookies
+  learned during conversation POSTs are folded back into the warm jar.
+- **Human pacing beats**: a 0.8–2.5 s delay between the page-load seed and
+  the first sentinel mint (real users don't POST 0 ms after DOM load), and
+  the conversation min-interval jitter widened to ~40% of the interval so
+  request gaps aren't metronomic.
+- **Sentinel mint circuit breaker** (`ratelimit.py` + `sentinel_bridge.py`):
+  3 consecutive mint failures open a 10 min shared breaker — callers get a
+  fast `RuntimeError` (browser fallback engages) instead of hammering
+  `chat-requirements` while flagged.
+- **"Unusual activity" handling**: detected in both the requirements
+  response and in-band SSE errors — drops the flagged session/cookie jar
+  and arms a 30 min cooldown rather than retrying the flagged identity.
+- **Exponential 429 backoff**: consecutive 429s escalate the shared lane
+  cooldown 60 s → 120 → 240 → 480 s cap, reset on the next success —
+  a throttled account gets real breathing room.
+
 ## [0.0.17] - 2026-09-19
 
 ### Added

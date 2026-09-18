@@ -264,15 +264,40 @@ class SimProfile:
 
         sess = cr.Session(impersonate=self.impersonate)
         sess.headers.update(self.frontend_headers())
+        # A real browser profile keeps cookies across restarts — reload the
+        # jar so a server restart looks like reopening the same browser, not
+        # a brand-new client fingerprint.
+        saved = (_load_state().get("cookies") or {})
+        for k, v in saved.items():
+            try:
+                sess.cookies.set(k, v)
+            except Exception:
+                pass
         self.seed_session(sess)
+        # Humans don't send a message 0ms after the page loads — give the
+        # freshly seeded session a beat before the requirements POST.
+        time.sleep(random.uniform(0.8, 2.5))
         self.session = sess
         return sess
+
+    def persist_cookies(self) -> None:
+        """Snapshot the warm session's cookie jar into sim-state so the next
+        process inherits the same browser identity (esp. ``__cf_bm``)."""
+        if self.session is None:
+            return
+        try:
+            _save_state({"cookies": dict(self.session.cookies)})
+        except Exception:
+            pass
 
     def drop_session(self) -> None:
         """Discard the warm session after a mint failure — a poisoned CF
         cookie jar or a flagged session should not be retried as-is."""
         sess = self.session
         self.session = None
+        # The jar was dropped because it looked poisoned/flagged — don't
+        # resurrect it on the next process start.
+        _save_state({"cookies": {}})
         if sess is not None:
             try:
                 sess.close()

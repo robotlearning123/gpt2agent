@@ -130,3 +130,48 @@ def test_read_lane_records(zero_wait_limiter):
     zero_wait_limiter.acquire_read()
     st = json.loads(zero_wait_limiter.state_path.read_text())
     assert st["last_read"] > 0
+
+
+def test_429_backoff_escalates(zero_wait_limiter):
+    lim = zero_wait_limiter
+    lim.note_429("read")
+    first = lim.cooldown_for("http429:read")
+    assert first and first - time.time() <= 61
+    lim.note_429("read")
+    second = lim.cooldown_for("http429:read")
+    assert second > first  # second strike pushes the cooldown further out
+    lim.note_429("read")
+    lim.note_429("read")
+    lim.note_429("read")
+    fifth = lim.cooldown_for("http429:read")
+    assert fifth - time.time() <= 481  # capped at 480s
+
+
+def test_429_streak_clears_on_success(zero_wait_limiter):
+    lim = zero_wait_limiter
+    lim.note_429("read")
+    lim.note_429("read")
+    lim.clear_429_streak("read")
+    lim.note_429("read")
+    # Back at the base 60s cooldown, not the escalated one.
+    assert lim.cooldown_for("http429:read") - time.time() <= 61
+
+
+def test_breaker_trips_after_threshold(zero_wait_limiter):
+    lim = zero_wait_limiter
+    assert lim.note_failure("mint", threshold=3, cooldown_s=600) is False
+    assert lim.note_failure("mint", threshold=3, cooldown_s=600) is False
+    assert lim.note_failure("mint", threshold=3, cooldown_s=600) is True
+    assert lim.breaker_open("mint") is not None
+    lim.note_success("mint")
+    assert lim.breaker_open("mint") is None
+
+
+def test_breaker_shared_across_instances(tmp_path, monkeypatch):
+    monkeypatch.delenv("GPT2AGENT_RATELIMIT_OFF", raising=False)
+    path = tmp_path / "s.json"
+    a = RateLimiter({"rate_limit": {"enabled": True}}, state_path=path)
+    b = RateLimiter({"rate_limit": {"enabled": True}}, state_path=path)
+    for _ in range(3):
+        a.note_failure("mint", threshold=3, cooldown_s=600)
+    assert b.breaker_open("mint") is not None

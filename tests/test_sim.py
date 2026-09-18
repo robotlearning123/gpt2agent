@@ -357,3 +357,54 @@ def test_stream_downgrade_note_via_complete(monkeypatch) -> None:
     assert "PARSED-OK" in out
     assert "gpt-5-6-mini" in out  # the downgrade note names the real slug
     assert "gpt-6-pro" in out
+
+
+# ── v0.0.18 cookie continuity ────────────────────────────────────────────────
+
+
+class _CookieJar(dict):
+    def set(self, k, v):
+        self[k] = v
+
+
+class _WarmSession:
+    def __init__(self, cookies=None):
+        self.cookies = _CookieJar(cookies or {})
+
+    def close(self):
+        pass
+
+
+def test_persist_cookies_round_trips(tmp_path, monkeypatch) -> None:
+    import gpt2agent.sim as sim_mod
+
+    monkeypatch.setattr(sim_mod, "_STATE_PATH", tmp_path / "sim-state.json")
+    p = _profile()
+    p.session = _WarmSession({"__cf_bm": "rotated-abc"})
+    p.persist_cookies()
+    saved = json.loads((tmp_path / "sim-state.json").read_text())
+    assert saved["cookies"]["__cf_bm"] == "rotated-abc"
+
+
+def test_drop_session_clears_persisted_cookies(tmp_path, monkeypatch) -> None:
+    import gpt2agent.sim as sim_mod
+
+    monkeypatch.setattr(sim_mod, "_STATE_PATH", tmp_path / "sim-state.json")
+    p = _profile()
+    p.session = _WarmSession({"__cf_bm": "flagged"})
+    p.persist_cookies()
+    p.drop_session()
+    saved = json.loads((tmp_path / "sim-state.json").read_text())
+    assert saved["cookies"] == {}
+    assert p.session is None
+
+
+def test_persist_cookies_noop_without_session(tmp_path, monkeypatch) -> None:
+    import gpt2agent.sim as sim_mod
+
+    monkeypatch.setattr(sim_mod, "_STATE_PATH", tmp_path / "sim-state.json")
+    p = _profile()
+    p.session = None
+    p.persist_cookies()  # must not raise or write a cookies key
+    saved = json.loads((tmp_path / "sim-state.json").read_text())
+    assert "cookies" not in saved
