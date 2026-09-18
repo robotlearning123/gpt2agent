@@ -70,3 +70,40 @@ the planned tag. **Do not push the release tag until the owner explicitly
 approves.** If a publish run fails and a rerun would retry the publish step,
 the same approval applies to the rerun. A repo rename additionally requires
 migrating the PyPI trusted publisher to the new repository path FIRST.
+
+## 7. Post-tag verification (added 2026-09-18 — mandatory)
+
+A pushed tag only STARTS the publish; verify it actually landed:
+
+```bash
+gh run list --repo robotlearning123/gpt2agent --branch vX.Y.Z   # Release run must go green
+gh release view vX.Y.Z --repo robotlearning123/gpt2agent        # release + assets exist
+pip index versions gpt2agent 2>/dev/null || curl -s https://pypi.org/pypi/gpt2agent/json | python3 -c 'import json,sys;print(json.load(sys.stdin)["info"]["version"])'
+```
+
+Report PyPI version + GitHub Release URL; do not claim published on tag
+push alone. If the run fails, read the job log before rerunning.
+
+## 8. Fleet sync + cleanup (added 2026-09-18 — mandatory)
+
+The fleet does NOT run the dev worktree — it runs the `gpt2agent` binary,
+which resolves to `~/.local/share/gpt2agent-venv` (editable install → the
+clone at `/home/robot/workspace/47-chatgpt2agent/gpt2agent`). Merging to main
+without syncing that clone is exactly how the fleet ended up running ~v0.0.14
+on 2026-09-18 while the fix sat in a worktree. After every merge-to-main:
+
+```bash
+scripts/fleet-sync.sh origin/main   # fast-forwards the clone, prints version
+                                    # + running MCP servers needing restart
+```
+
+Then clean up, in the same release session — not "later":
+
+- `git worktree list` → remove finished worktrees (`git worktree remove`);
+  stale branches stay recoverable, uncommitted work does not — check
+  `git status --porcelain` inside each before removing.
+- `git push origin --delete <merged-branch>` for the merged feature branch.
+- Repoint any editable install that referenced a removed worktree
+  (`pip install -e <clone>` or `pip install gpt2agent==<released>`).
+- Kill leftover background shells/watchers started during the release.
+- Keep `artifacts/verify/` receipts — never delete those.

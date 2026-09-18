@@ -48,4 +48,11 @@ python -m gpt2agent run             # start MCP server (stdio)
 3. `python scripts/verify_release.py`
 4. Merge PR, tag merge SHA (annotated tag), push tag
 5. CI publishes to PyPI (trusted publishing) + GitHub Release
-6. Full runbook: docs/release-validation.md (incl. owner publish gate)
+6. Verify the tag's Release run went green + `gh release view` + PyPI version
+   (tag push alone ≠ published)
+7. `scripts/fleet-sync.sh origin/main` — the fleet runs an editable install
+   pointing at /home/robot/workspace/47-chatgpt2agent/gpt2agent, NOT the dev
+   worktree; unsynced = fleet on old version (2026-09-18 incident)
+8. Same-session cleanup: remove merged worktrees/branches, repoint editable
+   installs, kill leftover background shells (docs/release-validation.md §8)
+9. Full runbook: docs/release-validation.md (incl. owner publish gate)
