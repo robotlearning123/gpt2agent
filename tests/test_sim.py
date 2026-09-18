@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from gpt2agent.backend import UsageLimitError, limits_from_init
-from gpt2agent.sim import SimProfile
+from gpt2agent.sim import IMPERSONATE, SimProfile
 from gpt2agent.sse import (
     ConversationClient,
     _build_payload,
@@ -504,3 +504,13 @@ def test_heavy_dr_quota_malformed_entries_fail_open() -> None:
     conv._limits_cache = (0, init)
     remaining, _ = asyncio.run(conv._heavy_dr_quota())
     assert remaining is None
+
+
+def test_profile_none_config_values_fall_back() -> None:
+    # _DEFAULTS["sentinel"] ships explicit Nones — they must not override
+    # the real defaults (None impersonate = bare TLS = CF 403s).
+    from gpt2agent.server import _DEFAULTS
+
+    prof = SimProfile(_DEFAULTS)
+    assert prof.impersonate == IMPERSONATE
+    assert prof.screen_w > 0

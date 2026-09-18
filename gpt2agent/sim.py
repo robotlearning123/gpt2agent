@@ -122,7 +122,10 @@ class SimProfile:
         cfg = (config or {}).get("sentinel", {}) or {}
         state = _load_state()
 
-        self.impersonate = cfg.get("impersonate", IMPERSONATE)
+        # `or` not `.get(..., default)`: the shipped _DEFAULTS set
+        # impersonate=None explicitly, and None must fall back — a bare
+        # (non-impersonated) TLS fingerprint gets 403'd by Cloudflare.
+        self.impersonate = cfg.get("impersonate") or IMPERSONATE
         self.ua = _UA
 
         self.device_id = state.get("device_id") or str(uuid.uuid4())
@@ -145,7 +148,7 @@ class SimProfile:
             self.nav_languages = f"{self.locale},{lang},en-US,en"
             self.accept_language = f"{self.locale},{lang};q=0.9,en-US;q=0.8,en;q=0.7"
 
-        screen = cfg.get("screen", _DEFAULT_SCREEN)
+        screen = cfg.get("screen") or _DEFAULT_SCREEN
         try:
             w, h = (int(x) for x in str(screen).lower().split("x"))
         except Exception:
