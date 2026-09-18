@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import AsyncIterator
 from uuid import uuid4
@@ -14,9 +15,16 @@ from uuid import uuid4
 from curl_cffi.requests import AsyncSession
 
 from gpt2agent._log_redact import redact_error as _redact_error
-from gpt2agent.backend import BackendClient, _BASE
+from gpt2agent.backend import (
+    BackendClient,
+    UsageLimitError,
+    _BASE,
+    limits_from_init,
+)
 from gpt2agent.citations import apply_inline_citations
+from gpt2agent.ratelimit import get_limiter
 from gpt2agent.sentinel import SentinelGate  # noqa: F401  (used in stream)
+from gpt2agent.sim import get_profile
 
 _log = logging.getLogger(__name__)
 
@@ -52,6 +60,23 @@ def _safe_body(resp: object) -> str:
     return _redact_error(text) if text else ""
 
 
+def _merge_headers(base: dict, extra: dict) -> dict:
+    """Case-insensitive header merge.
+
+    ``dict.update`` treats ``OAI-Device-Id`` and ``oai-device-id`` as distinct
+    keys; curl_cffi then sends BOTH joined with a comma — a duplicate
+    device-id header is a fingerprint anomaly all by itself. Replace the
+    existing key (preserving its position) regardless of case.
+    """
+    by_lower = {k.lower(): k for k in base}
+    for k, v in extra.items():
+        old = by_lower.get(k.lower())
+        if old is not None and old != k:
+            del base[old]
+        base[k] = v
+    return base
+
+
 def _raise_for_sse_error(obj: dict) -> None:
     """Surface in-band SSE error frames instead of silently dropping them."""
     raw: object = None
@@ -66,7 +91,20 @@ def _raise_for_sse_error(obj: dict) -> None:
         return
     if not isinstance(raw, str):
         raw = json.dumps(raw, ensure_ascii=False)
-    raise RuntimeError(f"ChatGPT SSE error: {_redact_error(raw, max_len=500)}")
+    msg = _redact_error(raw, max_len=500)
+    # Upstream flagged the session — cool the whole lane down and drop the
+    # warm cookie jar so the next request doesn't present the flagged
+    # fingerprint again.
+    if "unusual activity" in str(raw).lower():
+        get_limiter().note_cooldown(
+            "http429:conversation", time.time() + 1800
+        )
+        get_profile().drop_session()
+    if obj.get("error_code") == "usage_limit" or "hit your limit" in str(raw).lower():
+        # Distinct type so callers can offer fallbacks (other model, browser
+        # lane, second account) instead of a generic stream failure.
+        raise UsageLimitError(f"ChatGPT SSE error: {msg}")
+    raise RuntimeError(f"ChatGPT SSE error: {msg}")
 
 
 # /backend-api/f/conversation — the frontend-facing endpoint used by the web app.
@@ -340,32 +378,68 @@ def _is_connector_dispatch_text(text: str) -> bool:
     return text.startswith('{"path":') and "connector_openai_deep_research" in text
 
 
+def _connector_hint(connector_id: str) -> str:
+    """Normalize a connector id to the ``connector:<id>`` system-hint form
+    the frontend uses (e.g. ``connector:connector_openai_pubmed``)."""
+    c = connector_id.strip()
+    return c if c.startswith("connector:") else f"connector:{c}"
+
+
 def _build_payload(
     model: str,
     messages: list[dict],
     *,
     gizmo_id: str | None = None,
     temporary: bool = True,
+    profile=None,
+    connectors: list[str] | None = None,
+    github_repos: list[str] | None = None,
 ) -> dict:
+    """Conversation payload shaped like the real frontend's.
+
+    v0.0.17 aligns with what chatgpt.com actually sends (verified against
+    realasfngl/gpt4free reference traffic): IANA ``timezone`` + JS-style
+    ``timezone_offset_min`` consistent with the fingerprint geo,
+    ``client_contextual_info``, ``supports_buffering``/``supported_encodings``,
+    ``enable_message_followups``, ``client-created-root`` parent for a fresh
+    conversation, and per-message ``create_time``/``metadata``.
+    """
+    prof = profile or get_profile()
     payload: dict = {
         "action": "next",
         "messages": [
             {
                 "id": str(uuid4()),
                 "author": {"role": m["role"]},
+                "create_time": round(time.time(), 3),
                 "content": {"content_type": "text", "parts": [m["content"]]},
+                "metadata": {
+                    # Populated when the GitHub connector is enabled on the
+                    # account and repos are picked — mirrors the frontend's
+                    # per-message selection metadata.
+                    "selected_github_repos": github_repos or [],
+                    "selected_all_github_repos": False,
+                    "serialization_metadata": {"custom_symbol_offsets": []},
+                },
             }
             for m in messages
         ],
-        "parent_message_id": str(uuid4()),
+        "parent_message_id": "client-created-root",
         "model": model,
         "conversation_mode": {"kind": "primary_assistant"},
+        "enable_message_followups": True,
+        "system_hints": [_connector_hint(c) for c in (connectors or [])],
+        "supports_buffering": True,
+        "supported_encodings": ["v1"],
+        "client_contextual_info": prof.contextual_info(),
+        "paragen_cot_summary_display_override": "allow",
+        "force_parallel_switch": "auto",
         "force_paragen": False,
         "force_rate_limit": False,
         "force_use_sse": True,
-        "timezone_offset_min": -480,
+        "timezone_offset_min": prof.timezone_offset_min,
+        "timezone": prof.timezone,
         "history_and_training_disabled": temporary,
-        "system_hints": [],
     }
     if gizmo_id:
         payload["gizmo_id"] = gizmo_id
@@ -378,6 +452,7 @@ def _build_dr_payload(
     *,
     conversation_id: str | None = None,
     parent_message_id: str | None = None,
+    connectors: list[str] | None = None,
 ) -> dict:
     """Build payload for legacy Deep Research: model=research + system_hints=['research'].
 
@@ -394,7 +469,10 @@ def _build_dr_payload(
     handling in ``ConversationClient.deep_research``.
     """
     payload = _build_payload(DR_MODEL, [{"role": "user", "content": query}])
-    payload["system_hints"] = ["research"]
+    # "research" activates the DR backend; connected-app hints select sources.
+    payload["system_hints"] = ["research"] + [
+        _connector_hint(c) for c in (connectors or [])
+    ]
     payload["history_and_training_disabled"] = False
     if conversation_id:
         payload["conversation_id"] = conversation_id
@@ -459,7 +537,12 @@ def _looks_like_clarification(text: str) -> bool:
     return any(p in lower for p in _CLARIFICATION_HINTS)
 
 
-def _build_heavy_dr_payload(query: str, *, model: str | None = None) -> dict:
+def _build_heavy_dr_payload(
+    query: str,
+    *,
+    model: str | None = None,
+    connectors: list[str] | None = None,
+) -> dict:
     """Build payload for heavy Deep Research — the true Pro-tier 5–30 min DR path.
 
     Ground-truth reverse-engineered from chatgpt.com/deep-research browser traffic
@@ -480,6 +563,7 @@ def _build_heavy_dr_payload(query: str, *, model: str | None = None) -> dict:
     and reset timing can vary.
     """
     msg_id = str(uuid4())
+    prof = get_profile()
     return {
         "action": "next",
         "messages": [
@@ -495,25 +579,28 @@ def _build_heavy_dr_payload(query: str, *, model: str | None = None) -> dict:
                     "selected_sources": [],
                     "selected_github_repos": [],
                     "selected_all_github_repos": False,
-                    "system_hints": [HEAVY_DR_HINT],
+                    "system_hints": [HEAVY_DR_HINT]
+                    + [_connector_hint(c) for c in (connectors or [])],
                     "deep_research_version": "standard",
                     "venus_model_variant": "standard",
                     "serialization_metadata": {"custom_symbol_offsets": []},
-                    "user_timezone": "UTC",
+                    "user_timezone": prof.timezone,
                 },
             }
         ],
-        "parent_message_id": str(uuid4()),
+        "parent_message_id": "client-created-root",
         "model": model or HEAVY_DR_MODEL,
         "client_prepare_state": "success",
-        "timezone_offset_min": -480,
-        "timezone": "UTC",
+        "timezone_offset_min": prof.timezone_offset_min,
+        "timezone": prof.timezone,
         "conversation_mode": {"kind": "primary_assistant"},
         "enable_message_followups": True,
-        "system_hints": [HEAVY_DR_HINT],
+        "system_hints": [HEAVY_DR_HINT]
+        + [_connector_hint(c) for c in (connectors or [])],
         "thinking_effort": "extended",
         "supports_buffering": True,
         "supported_encodings": ["v1"],
+        "client_contextual_info": prof.contextual_info(),
         "force_parallel_switch": "auto",
         "paragen_cot_summary_display_override": "allow",
         # MUST be False — Deep Research is rejected by the server in
@@ -529,7 +616,7 @@ class ConversationClient:
     def __init__(self, backend: BackendClient) -> None:
         self._backend = backend
 
-    async def _bridge_headers(self):
+    async def _bridge_headers(self, model: str = "auto"):
         """Sentinel-bridge path: when the owner-supplied bridge directory
         exists (see gpt2agent/sentinel_bridge.py), mint the full sentinel
         header set in one consistent session. Returns (headers, cookies)
@@ -550,17 +637,31 @@ class ConversationClient:
         if not (sb._bridge_dir() / "wrapper" / "reverse" / "vm.py").exists():
             return None
 
+        profile = get_profile()
+
+        # Breaker open (or a flagged session) means "don't touch upstream" —
+        # the legacy gate hits the same chat-requirements endpoint, so fail
+        # fast into the browser-fallback path instead of degrading to it.
+        _until = get_limiter().breaker_open("sentinel_mint")
+        if _until:
+            from gpt2agent.backend import UpstreamChallengeError
+
+            raise UpstreamChallengeError(
+                "sentinel mint circuit breaker open until "
+                f"{datetime.fromtimestamp(_until).isoformat(timespec='seconds')}"
+            )
+
         def _mint():
-            from curl_cffi import requests as _cr
-            sess = _cr.Session(impersonate="chrome133a")
-            sb.seed_session(sess, sb.new_device_id())
-            did = sess.cookies.get("oai-did") or sb.new_device_id()
             from gpt2agent.backend import _load_token as _blt
             token = _blt()
-            hdrs = sb.SentinelBridge().mint(sess, token, did)
-            cookies = dict(sess.cookies)
-            sess.close()
-            return hdrs, cookies
+            # mint() performs prepare→conduit itself and returns the complete
+            # header suite (sentinel triple + conduit + echo logs + device-id
+            # + client-version) in a {"headers","cookies"} envelope.
+            out = sb.SentinelBridge().mint(token, model=model)
+            if isinstance(out, dict):
+                return out.get("headers") or out, out.get("cookies") or {}
+            sess = profile.session
+            return out, dict(sess.cookies) if sess is not None else {}
 
         import asyncio
         # Transient failures (CF seeding stalls, DNS blips) are common;
@@ -573,8 +674,184 @@ class ConversationClient:
             except Exception as exc:  # noqa: BLE001 - retry, then legacy
                 _log.warning("sentinel bridge mint attempt %d failed (%s)",
                              _attempt + 1, type(exc).__name__)
+                profile.drop_session()
                 await asyncio.sleep(4 + 6 * _attempt)
         return None
+
+    async def _limits(self) -> dict | None:
+        """Cached ``/backend-api/conversation/init`` probe (90 s TTL).
+
+        Fail-open: any error returns None so a probe failure never blocks a
+        request that might otherwise succeed.
+        """
+        import asyncio
+        import time as _time
+
+        now = _time.monotonic()
+        cached = getattr(self, "_limits_cache", None)
+        if cached and now - cached[0] < 90:
+            return cached[1]
+
+        def _probe():
+            tok = self._backend._token()
+            resp = self._backend._session.post(
+                _BASE + "/backend-api/conversation/init",
+                headers={
+                    "Authorization": f"Bearer {tok}",
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                json={"referral_source": "web"},
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            _log.debug("limits probe: HTTP %s", resp.status_code)
+            return None
+
+        try:
+            init = await asyncio.to_thread(_probe)
+        except Exception as exc:  # noqa: BLE001 - fail-open probe
+            _log.debug("limits probe failed (%s)", type(exc).__name__)
+            init = None
+        self._limits_cache = (now, init)
+        return init
+
+    async def _check_model_cap(self, model: str) -> None:
+        """Fail fast when the account's ``model_limits`` caps the request.
+
+        The web UI silently falls back to ``default_model_slug`` when a Pro
+        model is exhausted; a direct request instead dies mid-stream with an
+        opaque ``usage_limit`` frame. Checking ``conversation/init`` first
+        lets us report the cap + reset time before burning a mint.
+        """
+        init = await self._limits()
+        if not init:
+            return
+        info = limits_from_init(init, model=model)
+        if not info["model_resets_after"]:
+            return
+        # Publish the cap so sibling gpt2agent processes fail fast instead of
+        # burning a sentinel mint to rediscover it.
+        get_limiter().note_cooldown(
+            f"model:{model}", info["model_resets_after"]
+        )
+        fb = info.get("default_model_slug")
+        hint = (
+            f" Server-side fallback is {fb!r} — pass model={fb!r} to keep working"
+            if fb and fb != model
+            else ""
+        )
+        raise UsageLimitError(
+            f"{model} is rate-limited on this account until "
+            f"{info['model_resets_after']}.{hint} Or use browser=True.",
+            resets_after=info["model_resets_after"],
+        )
+
+    async def _feature_remaining(self, feature: str) -> tuple[int | None, str | None]:
+        # A cooldown observed by any process on this host answers instantly.
+        until = get_limiter().cooldown_for(f"feature:{feature}")
+        if until:
+            return 0, datetime.fromtimestamp(until).isoformat()
+        init = await self._limits()
+        info = limits_from_init(init, feature=feature)
+        if info["feature_remaining"] is not None and info["feature_remaining"] <= 0:
+            get_limiter().note_cooldown(
+                f"feature:{feature}", info["feature_resets_after"]
+            )
+        return info["feature_remaining"], info["feature_resets_after"]
+
+    async def _heavy_dr_quota(self) -> tuple[int | None, str | None]:
+        """Heavy DR quota probe — the generic ``deep_research`` counter does
+        NOT gate the heavy connector channel (verified live 2026-09-19: the
+        DR connector dispatched fine with ``deep_research`` remaining=0).
+        Its independent monthly cap is reported under a distinct feature
+        name; scan limits_progress + blocked_features for ``deep_research_*``
+        variants. The authoritative exhaustion signal is still the in-stream
+        ``usage_limit`` frame / connector error."""
+        # A cooldown observed by any process on this host answers instantly.
+        until = get_limiter().cooldown_for("feature:deep_research_heavy")
+        if until:
+            return 0, datetime.fromtimestamp(until).isoformat()
+        init = await self._limits()
+        if not init:
+            return None, None
+        for lim in init.get("limits_progress") or []:
+            if not isinstance(lim, dict):
+                continue
+            name = str(lim.get("feature_name") or "")
+            if not (name.startswith("deep_research_") and name != "deep_research"):
+                continue
+            rem = lim.get("remaining")
+            # Malformed/missing remaining means "unknown" — never gate on it.
+            remaining = (
+                rem if isinstance(rem, (int, float))
+                and not isinstance(rem, bool) else None
+            )
+            reset = lim.get("reset_after") or lim.get("resets_after")
+            if remaining is not None and remaining <= 0:
+                get_limiter().note_cooldown(
+                    "feature:deep_research_heavy", reset
+                )
+            return remaining, reset
+        for feat in init.get("blocked_features") or []:
+            if not isinstance(feat, dict):
+                continue
+            name = str(feat.get("name") or "")
+            if name.startswith("deep_research_") and name != "deep_research":
+                get_limiter().note_cooldown(
+                    "feature:deep_research_heavy", feat.get("resets_after")
+                )
+                return 0, feat.get("resets_after")
+        return None, None
+
+    def _persist_cookies(self, session) -> None:
+        """Fold cookies learned during a conversation POST back into the
+        warm profile jar — upstream rotates ``__cf_bm`` on responses, and a
+        real tab carries that rotation into its next request."""
+        prof = get_profile()
+        if prof.session is None:
+            return
+        try:
+            for k, v in session.cookies.items():
+                prof.session.cookies.set(k, v)
+            prof.persist_cookies()
+        except Exception:
+            pass
+
+    async def _request_setup(self, model: str):
+        """Shared prelude for every conversation POST.
+
+        Returns ``(headers, url)``. When the sentinel bridge mints, headers
+        carry the full frontend identity (sentinel triple + conduit + echo
+        logs + persistent device-id) and ``url`` is the ``/f/conversation``
+        path the real web app posts to. Legacy fallback posts to the classic
+        ``/conversation`` endpoint.
+        """
+        self._backend._reload_token_if_stale()
+        # Shared client-side budget — one account, many agents. Runs before
+        # the sentinel mint so a queued request doesn't waste a single-use
+        # token, and before the init probe so a known cooldown fails fast.
+        await get_limiter().acquire_conversation(model)
+        await self._check_model_cap(model)
+        headers = dict(self._backend._session.headers)
+        headers["Accept"] = "text/event-stream"
+        headers["Content-Type"] = "application/json"
+
+        bridge = await self._bridge_headers(model)
+        if bridge is not None:
+            _merge_headers(headers, bridge[0])
+            return headers, _F_CONV_URL
+        self._bridge_cookies = None
+        sentinel = await SentinelGate(self._backend).get_tokens()
+        headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
+            "chat-requirements"
+        ]
+        if sentinel.get("proof"):
+            headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
+        if sentinel.get("turnstile"):
+            headers["Openai-Sentinel-Turnstile-Token"] = sentinel["turnstile"]
+        return headers, _CONV_URL
 
     async def stream(
         self,
@@ -584,46 +861,38 @@ class ConversationClient:
         *,
         gizmo_id: str | None = None,
         temporary: bool = True,
+        connectors: list[str] | None = None,
+        github_repos: list[str] | None = None,
     ) -> AsyncIterator[str | dict]:
         # Yields text chunks (str). As the final item it may yield a single
         # ``{"_conversation_id": ...}`` dict sentinel for ``complete()`` to detect
         # agent-mode async runs — callers that join chunks must skip non-str items.
-        self._backend._reload_token_if_stale()
-        headers = dict(self._backend._session.headers)
-        headers["Accept"] = "text/event-stream"
-        headers["Content-Type"] = "application/json"
+        headers, conv_url = await self._request_setup(model)
 
-        bridge = await self._bridge_headers()
-        if bridge is not None:
-            headers.update(bridge[0])
-        else:
-            sentinel = await SentinelGate(self._backend).get_tokens()
-            headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
-                "chat-requirements"
-            ]
-            if sentinel.get("proof"):
-                headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
-            if sentinel.get("turnstile"):
-                headers["Openai-Sentinel-Turnstile-Token"] = sentinel[
-                    "turnstile"
-                ]
-
-        payload = _build_payload(model, messages, gizmo_id=gizmo_id, temporary=temporary)
+        payload = _build_payload(
+            model, messages, gizmo_id=gizmo_id, temporary=temporary,
+            connectors=connectors, github_repos=github_repos,
+        )
         if tools:
             payload["tools"] = tools
 
-        async with AsyncSession(impersonate="chrome131", verify=True) as s:
+        async with AsyncSession(
+            impersonate=get_profile().impersonate, verify=True
+        ) as s:
             _bc = getattr(self, "_bridge_cookies", None)
             if _bc:
                 for _k, _v in _bc.items():
                     s.cookies.set(_k, _v)
             resp = await s.post(
-                _CONV_URL,
+                conv_url,
                 headers=headers,
                 json=payload,
                 timeout=300,
                 stream=True,
             )
+            self._persist_cookies(s)
+            if resp.status_code in (200, 201):
+                get_limiter().clear_429_streak("conversation")
             if resp.status_code == 401:
                 body = _safe_body(resp)
                 raise RuntimeError(
@@ -636,6 +905,9 @@ class ConversationClient:
                     "403 Forbidden — token may have expired"
                     + (f": {body}" if body else "")
                 )
+            if resp.status_code == 429:
+                # Shared cooldown — other processes pace themselves too.
+                get_limiter().note_429("conversation")
             if resp.status_code not in (200, 201):
                 body = _safe_body(resp)
                 raise RuntimeError(
@@ -646,8 +918,11 @@ class ConversationClient:
             current_msg_id: str | None = None
             last_text = ""
             _conversation_id: str | None = None
+            _resolved_model: str | None = None
+            _last_patch_path: str | None = None
             done_received = False
             message_completed = False
+            emit: list[str] = []
 
             def _reset_if_new_msg(msg_id: str | None) -> bool:
                 """Return True if this frame starts a new message (caller must not dedupe)."""
@@ -664,6 +939,122 @@ class ConversationClient:
                 if role in ("assistant", "tool"):
                     message_completed = _is_successful_assistant_terminal(message)
 
+            def _on_envelope(vmsg: dict) -> None:
+                """A full message object — v-patch envelope, patch ``add`` op,
+                or Format-B frame. Only assistant text/multimodal parts emit;
+                the user's own message echo must never reach the output."""
+                nonlocal last_text
+                _track_message_lifecycle(vmsg)
+                if (vmsg.get("author") or {}).get("role") != "assistant":
+                    return
+                content = vmsg.get("content") or {}
+                if content.get("content_type") not in ("text", "multimodal_text"):
+                    return
+                parts = content.get("parts") or []
+                if not parts or not isinstance(parts[0], str):
+                    return
+                is_new = _reset_if_new_msg(vmsg.get("id"))
+                new = parts[0]
+                if is_new:
+                    if new:
+                        emit.append(new)
+                        last_text = new
+                elif new.startswith(last_text):
+                    delta = new[len(last_text):]
+                    if delta:
+                        emit.append(delta)
+                    last_text = new
+                elif new:
+                    emit.append(new)
+                    last_text = new
+
+            def _handle_frame(obj: dict) -> None:
+                """Dispatch one SSE frame across both wire formats.
+
+                Classic ``/conversation``: ``{"v": str}`` deltas, ``{"v":
+                {"message": ...}}`` envelopes, ``{"message": {...}}`` frames.
+                Frontend ``/f/conversation`` (v1 delta encoding): ``{"p": "",
+                "o": "add", "v": {"message": ...}}``, batch ``{"p": "", "o":
+                "patch", "v": [...]}``, path ops ``{"p": "/message/content/
+                parts/0", "o": "append", "v": str}``, and bare ``{"v": str}``
+                continuations of the last patched path.
+                """
+                nonlocal _resolved_model, _last_patch_path, last_text
+                nonlocal message_completed
+                t = obj.get("type")
+                if t == "server_ste_metadata":
+                    slug = (obj.get("metadata") or {}).get("model_slug")
+                    if slug:
+                        _resolved_model = slug
+                    return
+                if t in (
+                    "message_marker",
+                    "message_stream_complete",
+                    "resume_conversation_token",
+                    "input_message",
+                ):
+                    if t == "message_stream_complete":
+                        message_completed = True
+                    return
+
+                p = obj.get("p")
+                o = obj.get("o")
+                v = obj.get("v")
+
+                # Full message envelope (either encoding)
+                if (
+                    isinstance(v, dict)
+                    and "message" in v
+                    and p in (None, "")
+                    and o in (None, "add")
+                ):
+                    # `{"v":{"message":null}}` — .get("message", {}) returns
+                    # None (key present), so chained .get() would AttributeError.
+                    _on_envelope(v.get("message") or {})
+                    _last_patch_path = None
+                    return
+
+                # Batch patch
+                if p == "" and o == "patch" and isinstance(v, list):
+                    for sub in v:
+                        if isinstance(sub, dict):
+                            _handle_frame(sub)
+                    return
+
+                # Path-scoped patch
+                if isinstance(p, str) and p:
+                    _last_patch_path = p
+                    if p.endswith("/content/parts/0") and isinstance(v, str):
+                        message_completed = False
+                        if o == "append":
+                            emit.append(v)
+                            last_text += v
+                        elif v.startswith(last_text):
+                            delta = v[len(last_text):]
+                            if delta:
+                                emit.append(delta)
+                            last_text = v
+                        elif v:
+                            emit.append(v)
+                            last_text = v
+                    return
+
+                # Bare {"v": str} — classic delta, or a continuation of the
+                # last patched path on the f/ encoding.
+                if isinstance(v, str) and v:
+                    if _last_patch_path is None or _last_patch_path.endswith(
+                        "/content/parts/0"
+                    ):
+                        message_completed = False
+                        emit.append(v)
+                        last_text += v
+                    return
+
+                # Format B: full message frame
+                msg = obj.get("message")
+                if isinstance(msg, dict):
+                    _on_envelope(msg)
+
             async for raw_line in resp.aiter_lines():
                 if isinstance(raw_line, bytes):
                     raw_line = raw_line.decode("utf-8", errors="replace")
@@ -679,85 +1070,48 @@ class ConversationClient:
                 except json.JSONDecodeError:
                     continue
                 if not isinstance(obj, dict):
+                    # e.g. the bare "v1" encoding marker frame on f/conversation
                     continue
-                _raise_for_sse_error(obj)
+                try:
+                    _raise_for_sse_error(obj)
+                except UsageLimitError as exc:
+                    info = limits_from_init(
+                        (getattr(self, "_limits_cache", (0, None))[1]) or {},
+                        model=model,
+                    )
+                    reset = exc.resets_after or info["model_resets_after"]
+                    if reset:
+                        # Share the cap — sibling processes then fail fast.
+                        get_limiter().note_cooldown(f"model:{model}", reset)
+                    hint = f" Resets at {reset}." if reset else ""
+                    fb = info.get("default_model_slug")
+                    if fb and fb != model:
+                        hint += f" Server-side fallback: {fb!r}."
+                    raise UsageLimitError(
+                        f"{exc}{hint} Try a different model or browser=True.",
+                        resets_after=reset,
+                    ) from exc
 
                 # Capture conversation_id from any event that carries it
                 cid = obj.get("conversation_id")
                 if cid and not _conversation_id:
                     _conversation_id = cid
 
-                # Format A: v-patch (live streaming mode)
-                v = obj.get("v")
-                if v is not None:
-                    if isinstance(v, str):
-                        # String v-patch — continuation of current message id
-                        if v:
-                            message_completed = False
-                            yield v
-                            last_text += v
-                        continue
-                    if isinstance(v, dict):
-                        # `{"v":{"message":null}}` makes .get("message", {}) return
-                        # None (key present), so chained .get() would AttributeError.
-                        vmsg = v.get("message") or {}
-                        _track_message_lifecycle(vmsg)
-                        msg_id = vmsg.get("id")
-                        is_new = _reset_if_new_msg(msg_id)
-                        parts = (vmsg.get("content") or {}).get("parts") or []
-                        if parts and isinstance(parts[0], str):
-                            new = parts[0]
-                            if is_new:
-                                # New message — yield fresh, don't dedupe against prior stream
-                                if new:
-                                    yield new
-                                    last_text = new
-                            elif new.startswith(last_text):
-                                delta = new[len(last_text) :]
-                                if delta:
-                                    yield delta
-                                last_text = new
-                            elif new:
-                                yield new
-                                last_text = new
-                        continue
-
-                # Format B: full message replacement (history_disabled mode)
-                msg = obj.get("message")
-                if not isinstance(msg, dict):
-                    continue
-                _track_message_lifecycle(msg)
-                if (msg.get("author") or {}).get("role") != "assistant":
-                    continue
-                content = msg.get("content") or {}
-                ct = content.get("content_type")
-                if ct not in ("text", "multimodal_text"):
-                    continue
-                parts = content.get("parts") or []
-                if not parts or not isinstance(parts[0], str):
-                    continue
-                msg_id = msg.get("id")
-                is_new = _reset_if_new_msg(msg_id)
-                new = parts[0]
-                if is_new:
-                    if new:
-                        yield new
-                        last_text = new
-                elif new.startswith(last_text):
-                    delta = new[len(last_text) :]
-                    if delta:
-                        yield delta
-                    last_text = new
-                elif new:
-                    yield new
-                    last_text = new
+                emit.clear()
+                _handle_frame(obj)
+                for _t in emit:
+                    yield _t
 
             if not (done_received or message_completed):
                 raise _IncompleteStreamError(_conversation_id)
 
-            # Emit conversation_id for complete() to use (agent mode async detection)
-            if _conversation_id:
-                yield {"_conversation_id": _conversation_id}
+            # Emit sentinels for complete(): conversation id + resolved model
+            if _conversation_id or _resolved_model:
+                yield {
+                    "_conversation_id": _conversation_id,
+                    "_resolved_model": _resolved_model,
+                    "_requested_model": model,
+                }
 
     async def complete(
         self,
@@ -767,16 +1121,22 @@ class ConversationClient:
         gizmo_id: str | None = None,
         temporary: bool = True,
         poll_async: bool = False,
+        connectors: list[str] | None = None,
+        github_repos: list[str] | None = None,
     ) -> str:
         chunks: list[str] = []
         conv_id: str | None = None
+        resolved_model: str | None = None
         try:
             async for event in self.stream(
-                model, messages, gizmo_id=gizmo_id, temporary=temporary
+                model, messages, gizmo_id=gizmo_id, temporary=temporary,
+                connectors=connectors, github_repos=github_repos,
             ):
                 if isinstance(event, dict):
                     if event.get("_conversation_id"):
                         conv_id = event["_conversation_id"]
+                    if event.get("_resolved_model"):
+                        resolved_model = event["_resolved_model"]
                     continue  # never let a non-str sentinel reach "".join(chunks)
                 chunks.append(event)
         except _IncompleteStreamError as exc:
@@ -786,6 +1146,18 @@ class ConversationClient:
                     return recovered
             raise
         text = "".join(chunks)
+
+        # Silent downgrade detection: the SSE ``server_ste_metadata`` frame
+        # reports the slug that actually served the request. When it differs
+        # from what was asked for (quota cap or upstream routing), say so —
+        # never present a fallback model's output as the requested model's.
+        if resolved_model and resolved_model != model:
+            text += (
+                f"\n\n---\n**Model note** — requested `{model}` but the "
+                f"server resolved `{resolved_model}` (usage cap or upstream "
+                "routing). Retry later, pick a model explicitly, or use "
+                "browser=True."
+            )
 
         # Agent mode: the stream ends immediately with async_status and the real
         # response arrives later, so we poll the conversation for up to 5 min.
@@ -870,25 +1242,7 @@ class ConversationClient:
 
         Raises RuntimeError if image gen fails or times out.
         """
-        self._backend._reload_token_if_stale()
-        headers = dict(self._backend._session.headers)
-        headers["Accept"] = "text/event-stream"
-        headers["Content-Type"] = "application/json"
-
-        bridge = await self._bridge_headers()
-        if bridge is not None:
-            headers.update(bridge[0])
-        else:
-            sentinel = await SentinelGate(self._backend).get_tokens()
-            headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
-                "chat-requirements"
-            ]
-            if sentinel.get("proof"):
-                headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
-            if sentinel.get("turnstile"):
-                headers["Openai-Sentinel-Turnstile-Token"] = sentinel[
-                    "turnstile"
-                ]
+        headers, conv_url = await self._request_setup(model)
 
         payload = _build_payload(
             model, [{"role": "user", "content": prompt}], temporary=False
@@ -897,14 +1251,21 @@ class ConversationClient:
         conversation_id: str | None = None
         processing_text = ""
 
-        async with AsyncSession(impersonate="chrome131", verify=True) as s:
+        async with AsyncSession(
+            impersonate=get_profile().impersonate, verify=True
+        ) as s:
             _bc = getattr(self, "_bridge_cookies", None)
             if _bc:
                 for _k, _v in _bc.items():
                     s.cookies.set(_k, _v)
             resp = await s.post(
-                _CONV_URL, headers=headers, json=payload, timeout=300, stream=True,
+                conv_url, headers=headers, json=payload, timeout=300, stream=True,
             )
+            self._persist_cookies(s)
+            if resp.status_code in (200, 201):
+                get_limiter().clear_429_streak("conversation")
+            elif resp.status_code == 429:
+                get_limiter().note_429("conversation")
             if resp.status_code not in (200, 201):
                 body = _safe_body(resp)
                 raise RuntimeError(
@@ -932,7 +1293,13 @@ class ConversationClient:
                 if cid and not conversation_id:
                     conversation_id = cid
 
-                msg = obj.get("message", {})
+                # Message frames arrive as Format-B {"message": ...} on the
+                # classic endpoint and as {"v": {"message": ...}} envelopes on
+                # the f/ delta encoding.
+                msg = obj.get("message")
+                _v = obj.get("v")
+                if not isinstance(msg, dict) and isinstance(_v, dict):
+                    msg = _v.get("message")
                 if not isinstance(msg, dict):
                     continue
                 role = (msg.get("author") or {}).get("role", "")
@@ -1053,25 +1420,7 @@ class ConversationClient:
           tool_responses (list of {content_type, parts}),
           multimodal_assets (list of image asset dicts if any)
         """
-        self._backend._reload_token_if_stale()
-        headers = dict(self._backend._session.headers)
-        headers["Accept"] = "text/event-stream"
-        headers["Content-Type"] = "application/json"
-
-        bridge = await self._bridge_headers()
-        if bridge is not None:
-            headers.update(bridge[0])
-        else:
-            sentinel = await SentinelGate(self._backend).get_tokens()
-            headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
-                "chat-requirements"
-            ]
-            if sentinel.get("proof"):
-                headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
-            if sentinel.get("turnstile"):
-                headers["Openai-Sentinel-Turnstile-Token"] = sentinel[
-                    "turnstile"
-                ]
+        headers, conv_url = await self._request_setup(model)
 
         payload = _build_payload(
             model, [{"role": "user", "content": prompt}], temporary=temporary
@@ -1085,14 +1434,21 @@ class ConversationClient:
         done_received = False
         message_completed = False
 
-        async with AsyncSession(impersonate="chrome131", verify=True) as s:
+        async with AsyncSession(
+            impersonate=get_profile().impersonate, verify=True
+        ) as s:
             _bc = getattr(self, "_bridge_cookies", None)
             if _bc:
                 for _k, _v in _bc.items():
                     s.cookies.set(_k, _v)
             resp = await s.post(
-                _CONV_URL, headers=headers, json=payload, timeout=300, stream=True,
+                conv_url, headers=headers, json=payload, timeout=300, stream=True,
             )
+            self._persist_cookies(s)
+            if resp.status_code in (200, 201):
+                get_limiter().clear_429_streak("conversation")
+            elif resp.status_code == 429:
+                get_limiter().note_429("conversation")
             if resp.status_code not in (200, 201):
                 body = _safe_body(resp)
                 raise RuntimeError(
@@ -1122,7 +1478,10 @@ class ConversationClient:
                 if cid and not conversation_id:
                     conversation_id = cid
 
-                msg = obj.get("message", {})
+                msg = obj.get("message")
+                _v = obj.get("v")
+                if not isinstance(msg, dict) and isinstance(_v, dict):
+                    msg = _v.get("message")
                 if not isinstance(msg, dict):
                     continue
                 role = (msg.get("author") or {}).get("role", "")
@@ -1210,6 +1569,7 @@ class ConversationClient:
         query: str,
         *,
         max_clarification_rounds: int = 2,
+        connectors: list[str] | None = None,
     ) -> AsyncIterator[dict]:
         """Stream Deep Research events for *query*.
 
@@ -1231,6 +1591,18 @@ class ConversationClient:
         of starting research immediately. ``max_clarification_rounds`` caps how
         many auto-replies the wrapper sends before giving up (default 2).
         """
+        # Quota guard — same check heavy DR already does. Deep Research
+        # entitlement lives in limits_progress["deep_research"]; when it reads
+        # 0 the request would only burn a sentinel mint and die on an opaque
+        # in-stream error.
+        remaining, resets_after = await self._feature_remaining("deep_research")
+        if remaining is not None and remaining <= 0:
+            raise UsageLimitError(
+                "Deep Research quota exhausted"
+                + (f" — resets at {resets_after}." if resets_after else "."),
+                resets_after=resets_after,
+            )
+
         conversation_id: str | None = None
         last_assistant_msg_id: str | None = None
         current_query = query
@@ -1241,43 +1613,34 @@ class ConversationClient:
             # backend.get/post; the sentinel is single-use and short-lived,
             # so reusing the round-1 sentinel for a later auto-proceed POST
             # silently 403s ("token may have expired").
-            self._backend._reload_token_if_stale()
-            headers = dict(self._backend._session.headers)
-            headers["Accept"] = "text/event-stream"
-            headers["Content-Type"] = "application/json"
-            bridge = await self._bridge_headers()
-            if bridge is not None:
-                headers.update(bridge[0])
-            else:
-                sentinel = await SentinelGate(self._backend).get_tokens()
-                headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
-                    "chat-requirements"
-                ]
-                if sentinel.get("proof"):
-                    headers["Openai-Sentinel-Proof-Token"] = sentinel["proof"]
-                if sentinel.get("turnstile"):
-                    headers[
-                        "Openai-Sentinel-Turnstile-Token"
-                    ] = sentinel["turnstile"]
+            headers, conv_url = await self._request_setup(DR_MODEL)
 
             payload = _build_dr_payload(
                 current_query,
                 conversation_id=conversation_id,
                 parent_message_id=last_assistant_msg_id,
+                connectors=connectors,
             )
 
-            async with AsyncSession(impersonate="chrome131", verify=True) as s:
+            async with AsyncSession(
+                impersonate=get_profile().impersonate, verify=True
+            ) as s:
                 _bc = getattr(self, "_bridge_cookies", None)
                 if _bc:
                     for _k, _v in _bc.items():
                         s.cookies.set(_k, _v)
                 resp = await s.post(
-                    _CONV_URL,
+                    conv_url,
                     headers=headers,
                     json=payload,
                     timeout=1800,
                     stream=True,
                 )
+                self._persist_cookies(s)
+                if resp.status_code in (200, 201):
+                    get_limiter().clear_429_streak("conversation")
+                elif resp.status_code == 429:
+                    get_limiter().note_429("conversation")
                 if resp.status_code == 401:
                     raise RuntimeError("401 Unauthorized — run `codex login`")
                 if resp.status_code == 403:
@@ -1324,7 +1687,12 @@ class ConversationClient:
                         if cid and not conversation_id:
                             conversation_id = cid
 
-                        msg = obj.get("message", {})
+                        # Format-B {"message": ...} on the classic endpoint,
+                        # {"v": {"message": ...}} envelopes on f/ encoding.
+                        msg = obj.get("message")
+                        _v = obj.get("v")
+                        if not isinstance(msg, dict) and isinstance(_v, dict):
+                            msg = _v.get("message")
                         if not isinstance(msg, dict):
                             continue
 
@@ -1476,6 +1844,7 @@ class ConversationClient:
         query: str,
         *,
         model: str | None = None,
+        connectors: list[str] | None = None,
     ) -> AsyncIterator[dict]:
         """Stream true Pro-tier Deep Research events for *query*.
 
@@ -1509,43 +1878,31 @@ class ConversationClient:
         connector_openai_deep_research tool call.
         """
         # --- Quota guard ---
-        # Probe /backend-api/conversation/init (POST) to check deep_research quota.
-        # Response shape: limits_progress: [{"feature_name": "deep_research", ...}].
-        # Fail-open on probe error; only "remaining <= 0" aborts.
-        _INIT_PATH = "/backend-api/conversation/init"
-        remaining: int | None = None
-        try:
-            init_data = await asyncio.to_thread(
-                self._backend.post,
-                _INIT_PATH,
-                json={"conversation_mode_kind": "primary_assistant"},
-            )
-            limits = (init_data or {}).get("limits_progress") or []
-            for lim in limits:
-                if isinstance(lim, dict) and lim.get("feature_name") == "deep_research":
-                    raw = lim.get("remaining")
-                    if raw is not None:
-                        remaining = int(raw)
-                    break
-        except Exception as _exc:
-            _log.warning("DR quota check failed (%s) — proceeding anyway", _exc)
+        # Heavy DR has its own quota counter — the generic ``deep_research``
+        # limits_progress entry gates light DR only and must not block here
+        # (verified live: connector dispatched with deep_research remaining=0).
+        # Fail-open on probe error; only a heavy-specific cap aborts.
+        remaining, resets_after = await self._heavy_dr_quota()
         if remaining is not None and remaining <= 0:
-            raise RuntimeError(
-                f"Deep Research quota exhausted. "
-                f"Check {_BASE}{_INIT_PATH} (POST) to verify quota reset."
+            raise UsageLimitError(
+                "Heavy Deep Research quota exhausted"
+                + (f" — resets at {resets_after}." if resets_after else "."),
+                resets_after=resets_after,
             )
 
         # Re-read codex token before snapshotting headers — heavy DR runs
         # for 5–30 min and codex may refresh ~/.codex/auth.json mid-stream.
         self._backend._reload_token_if_stale()
+        await get_limiter().acquire_conversation(model or HEAVY_DR_MODEL)
         headers = dict(self._backend._session.headers)
         headers["Accept"] = "text/event-stream"
         headers["Content-Type"] = "application/json"
 
-        bridge = await self._bridge_headers()
+        bridge = await self._bridge_headers(model)
         if bridge is not None:
-            headers.update(bridge[0])
+            _merge_headers(headers, bridge[0])
         else:
+            self._bridge_cookies = None
             sentinel = await SentinelGate(self._backend).get_tokens()
             headers["Openai-Sentinel-Chat-Requirements-Token"] = sentinel[
                 "chat-requirements"
@@ -1557,7 +1914,9 @@ class ConversationClient:
                     "turnstile"
                 ]
 
-        payload = _build_heavy_dr_payload(query, model=model)
+        payload = _build_heavy_dr_payload(
+            query, model=model, connectors=connectors
+        )
 
         # --- Phase 1: SSE kickoff with JSON-patch delta parser ---
         # /f/conversation speaks "delta_encoding v1". The first assistant envelope
@@ -1754,7 +2113,9 @@ class ConversationClient:
                 _apply_path(state["last_path"], "append", v, events)
                 return
 
-        async with AsyncSession(impersonate="chrome131", verify=True) as s:
+        async with AsyncSession(
+            impersonate=get_profile().impersonate, verify=True
+        ) as s:
             _bc = getattr(self, "_bridge_cookies", None)
             if _bc:
                 for _k, _v in _bc.items():
@@ -1766,6 +2127,11 @@ class ConversationClient:
                 timeout=1800,
                 stream=True,
             )
+            self._persist_cookies(s)
+            if resp.status_code in (200, 201):
+                get_limiter().clear_429_streak("conversation")
+            elif resp.status_code == 429:
+                get_limiter().note_429("conversation")
             if resp.status_code == 401:
                 raise RuntimeError("401 Unauthorized — run `codex login`")
             if resp.status_code == 403:
@@ -1802,7 +2168,20 @@ class ConversationClient:
                     continue
                 if not isinstance(obj, dict):
                     continue
-                _raise_for_sse_error(obj)
+                try:
+                    _raise_for_sse_error(obj)
+                except UsageLimitError as exc:
+                    # Authoritative heavy-cap signal — share it so sibling
+                    # processes fail fast instead of burning another mint.
+                    get_limiter().note_cooldown(
+                        "feature:deep_research_heavy",
+                        exc.resets_after
+                        or obj.get("resets_after")
+                        or obj.get("reset_after")
+                        or obj.get("resets_at")
+                        or (time.time() + 3600),
+                    )
+                    raise
                 # Capture conversation_id from ANY frame that carries it at top
                 # level. _apply_patch only sets it from a few typed events
                 # (resume_conversation_token / message_marker /

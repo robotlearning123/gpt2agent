@@ -6,6 +6,129 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.0.18] - 2026-09-19
+
+### Added
+
+- **Cookie continuity across restarts** (`sim.py`): the warm session's jar
+  (incl. rotated `__cf_bm`) is persisted to `sim-state.json` after every
+  mint and reloaded on next start — a server restart now looks like
+  reopening the same browser profile, not a brand-new client. Cookies
+  learned during conversation POSTs are folded back into the warm jar.
+- **Human pacing beats**: a 0.8–2.5 s delay between the page-load seed and
+  the first sentinel mint (real users don't POST 0 ms after DOM load), and
+  the conversation min-interval jitter widened to ~40% of the interval so
+  request gaps aren't metronomic.
+- **Sentinel mint circuit breaker** (`ratelimit.py` + `sentinel_bridge.py`):
+  3 consecutive mint failures open a 10 min shared breaker — callers get a
+  fast `RuntimeError` (browser fallback engages) instead of hammering
+  `chat-requirements` while flagged.
+- **"Unusual activity" handling**: detected in both the requirements
+  response and in-band SSE errors — drops the flagged session/cookie jar
+  and arms a 30 min cooldown rather than retrying the flagged identity.
+- **Exponential 429 backoff**: consecutive 429s escalate the shared lane
+  cooldown 60 s → 120 → 240 → 480 s cap, reset on the next success —
+  a throttled account gets real breathing room.
+- **Connector support** (`chat`, `deep_research`, `deep_research_heavy`):
+  new `connectors` param injects `connector:<id>` system hints (the same
+  mechanism the frontend uses for connected-app sources), and `chat` gains
+  `github_repos` → per-message `selected_github_repos` metadata. First-party
+  `connector_openai_*` connectors (pubmed, pdf, spreadsheets…) work as-is;
+  OAuth apps like GitHub must be connected in chatgpt.com Settings first —
+  ids come from `list_apps`.
+- **Usage report** (`gpt2agent/usage.py`, new `usage_stats` MCP tool and
+  `gpt2agent usage [--json]` CLI): one snapshot answering "how much used /
+  left / when does it reset / which model" — per-model caps and resets,
+  per-feature remaining counters, blocked features, the effective default
+  model with a `downgraded` flag when it differs from the intended one,
+  light-vs-heavy DR counters split out, plus this host's shared rate-limit
+  budget and active cooldowns. Reads the same `conversation/init`
+  bookkeeping call the web app issues on page load — no quota consumed.
+- **Shared task queue** (`gpt2agent/taskqueue.py`, new `queue_submit` /
+  `queue_status` / `queue_result` / `queue_cancel` MCP tools): file-backed
+  queue in `~/.gpt2agent/tasks/` so a fleet of agents serializes work
+  through whichever gpt2agent server is running — flock-guarded claims
+  (no double execution), atomic writes, stale-claim rescue. A task that
+  hits `UsageLimitError` is parked `waiting` until the upstream
+  `resets_after` and fires itself — queue a heavy DR overnight and it
+  runs when the cap lifts. `GPT2AGENT_QUEUE_OFF=1` disables the worker.
+
+### Fixed
+
+- **Heavy DR no longer gated by the generic `deep_research` counter**:
+  `deep_research_heavy` was pre-flight blocked whenever
+  `limits_progress[].feature_name == "deep_research"` hit 0 — but that
+  counter governs the light `deep_research` path only. Verified live
+  2026-09-19: a heavy DR dispatched `connector_openai_deep_research`
+  successfully while the generic counter read 0. Heavy DR now checks a
+  dedicated `deep_research_*` counter when the backend exposes one
+  (`limits_progress` or `blocked_features`) and fails open otherwise —
+  the authoritative signal is the connector's own error in the stream.
+  `quota.sh` output and the deep-research skill doc now state this
+  explicitly.
+
+## [0.0.17] - 2026-09-19
+
+### Added
+
+- **Unified simulation profile** (`gpt2agent/sim.py`): one persistent browser
+  identity shared by the seed GET, sentinel requirements, conduit prepare,
+  and the conversation POST — same curl_cffi impersonation (chrome136), UA,
+  `oai-device-id`/`oai-session-id` (persisted in `~/.gpt2agent/sim-state.json`),
+  real `data-build` client version scraped from the homepage, and geo-consistent
+  timezone/`timezone_offset_min`/locale/IP lat-lng. Configurable via the new
+  `[sentinel]` section (`timezone`, `locale`, `impersonate`, `screen`,
+  `dark_mode`, `ip_latlng`).
+- **Frontend conversation path**: bridged requests now run
+  `POST /backend-api/f/conversation/prepare` → `conduit_token` →
+  `POST /backend-api/f/conversation` with `x-conduit-token` +
+  `oai-echo-logs`, matching what the real web app sends. The chat stream
+  parser understands the v1 delta encoding (`{"p","o","v"}` patch ops,
+  batch patches, `server_ste_metadata`, `message_stream_complete`).
+- **Model-downgrade detection**: `server_ste_metadata.model_slug` is captured
+  per stream; `chat` appends a note when the resolved slug differs from the
+  requested one — silent fallbacks are no longer invisible.
+- **Usage-cap reporting**: new `UsageLimitError` (a `RuntimeError` subclass)
+  is raised for `usage_limit` SSE frames and by a fail-open
+  `conversation/init` pre-flight that reports the capped model plus its
+  `resets_after` time. Optional `[models] fallback` slug retries chat on a
+  capped model. `deep_research` (light) now has the same quota guard heavy DR
+  already had, including the reset timestamp.
+- **Doctor**: new `account_limits` row (`model_limits`, `limits_progress`,
+  `blocked_features`, intended-vs-actual default model) and a `sentinel
+  (bridge)` probe row; the chat-family rows now inherit the *bridge* lane's
+  status when the bridge is enabled instead of the dead legacy solver's.
+- **Shared rate limiter** (`gpt2agent/ratelimit.py`): client-side budget
+  enforced inside gpt2agent for fleets that share one account. File-backed
+  state (`~/.gpt2agent/ratelimit-state.json`, `flock`-guarded) makes it
+  cross-process: every conversation POST shares a sliding window
+  (`max_per_window`/`window_s`) and minimum interval, bookkeeping reads get
+  light pacing, and upstream `usage_limit`/429 responses record keyed
+  cooldowns (`model:<slug>`, `feature:<name>`) so sibling processes fail fast
+  with the real reset time instead of burning a sentinel mint. Configure via
+  `[rate_limit]` (`enabled`, `min_interval_s`, `read_min_interval_s`,
+  `max_per_window`, `window_s`, `max_wait_s`); `GPT2AGENT_RATELIMIT_OFF=1`
+  disables. New `LocalRateLimitError` when the wait would exceed `max_wait_s`.
+  Doctor gained a `rate_limit` row showing window usage and active cooldowns.
+- **Browser fallback on challenge block**: `chat`/`agent`/`deep_research`
+  automatically retry through the browser transport when the direct path
+  raises `UpstreamChallengeError` and `[browser] enabled = true`.
+
+### Fixed
+
+- **Duplicate `oai-*` headers**: header merge is now case-insensitive — the
+  bridge's `oai-device-id`/`oai-client-version` previously coexisted with the
+  backend session's differently-cased copies and curl_cffi sent both joined
+  by a comma on every bridged request.
+- **Cross-fingerprint mint**: the sentinel mint previously ran chrome133a +
+  Chrome-140/Windows UA while the conversation POST went out chrome131 +
+  Chrome-131/macOS UA with a different device-id — a contradiction Cloudflare
+  cross-checks. Mint and POST now share the profile identity, and the mint
+  session is kept warm (reused across requests) instead of re-seeding a fresh
+  browser per message.
+- The user's own message echo inside v1-delta envelopes is no longer emitted
+  into the reply text.
+
 ## [0.0.16] - 2026-09-18
 
 ### Fixed

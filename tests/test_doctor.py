@@ -18,8 +18,16 @@ from gpt2agent import doctor as doctor_mod
 from gpt2agent.backend import UpstreamChallengeError
 
 
+_INIT_PATH = "/backend-api/conversation/init"
+
+
 class FakeClient:
-    """Exact-match canned GET responses. Any POST is a test failure."""
+    """Exact-match canned GET responses. Writes/quota POSTs are a test failure.
+
+    The single exception is ``conversation/init`` — a bookkeeping call the web
+    app issues on every page load. It sends no message and spends no quota, so
+    doctor may use it for the account_limits row.
+    """
 
     def __init__(self, routes: dict[str, Any] | None = None) -> None:
         self.routes = routes or {}
@@ -37,7 +45,9 @@ class FakeClient:
 
     def post(self, path: str, *_: Any, **__: Any) -> Any:
         self.posts.append(path)
-        raise AssertionError("doctor must never POST")
+        if path == _INIT_PATH:
+            return self.routes.get(_INIT_PATH, {})
+        raise AssertionError("doctor must never POST writes")
 
 
 _ROUTES: dict[str, Any] = {
@@ -57,6 +67,20 @@ _ROUTES: dict[str, Any] = {
     "/backend-api/codex/environments": {"environments": [{"id": "e"}]},
     "/backend-api/codex/tasks?limit=1": {"items": [{"task": {"id": "t"}}]},
     "/backend-api/apps/list": {"apps": ["connector_x"]},
+    _INIT_PATH: {
+        "default_model_slug": "gpt-5-6",
+        "intended_default_model_slug": "gpt-6-pro",
+        "model_limits": [
+            {"model_slug": "gpt-6-pro", "resets_after": "2026-09-20T01:31:58Z"}
+        ],
+        "limits_progress": [
+            {
+                "feature_name": "deep_research",
+                "remaining": 0,
+                "reset_after": "2026-09-18T21:56:57Z",
+            }
+        ],
+    },
 }
 
 
@@ -108,11 +132,27 @@ def test_read_only_probes_report_ok(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_doctor_never_posts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Doctor is read-only by construction — a POST would write or spend quota."""
+    """Doctor never POSTs anything that writes state or spends quota.
+
+    ``conversation/init`` is allowed — it is the read-only bookkeeping call
+    the web app fires on page load; everything else must remain GET-only.
+    """
     _patch_gate(monkeypatch, _GateOk)
     client = FakeClient(dict(_ROUTES))
     asyncio.run(doctor_mod.collect(client))
-    assert client.posts == []
+    assert set(client.posts) <= {_INIT_PATH}
+
+
+def test_account_limits_row_reports_caps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The limits row surfaces model caps, feature quota and downgrades."""
+    _patch_gate(monkeypatch, _GateOk)
+    rows = _collect(FakeClient(dict(_ROUTES)))
+    detail = _row(rows, "account_limits").detail
+    assert "gpt-6-pro" in detail
+    assert "deep_research remaining=0" in detail
+    assert "gpt-6-pro→gpt-5-6" in detail
 
 
 def test_probes_use_the_real_tool_paths(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -121,7 +161,8 @@ def test_probes_use_the_real_tool_paths(monkeypatch: pytest.MonkeyPatch) -> None
     client = FakeClient(dict(_ROUTES))
     asyncio.run(doctor_mod.collect(client))
     for path in _ROUTES:
-        assert path in client.gets, f"doctor never probed {path}"
+        hit = client.posts if path == _INIT_PATH else client.gets
+        assert path in hit, f"doctor never probed {path}"
 
 
 def test_get_conversation_without_history_is_ok(
@@ -176,7 +217,7 @@ def test_blocked_gate_blocks_the_chat_family(
     _patch_gate(monkeypatch, _GateBlocked)
     rows = _collect(FakeClient(dict(_ROUTES)))
 
-    assert _row(rows, "sentinel (chat-requirements)").result == "BLOCKED"
+    assert _row(rows, "sentinel (legacy gate)").result == "BLOCKED"
     for tool in doctor_mod._GATE_TOOLS:
         assert _row(rows, tool).result == "BLOCKED", f"{tool} should be blocked"
     assert doctor_mod.exit_code(rows) == 1
@@ -208,7 +249,7 @@ def test_gate_failure_for_another_reason_is_fail_not_blocked(
     _patch_gate(monkeypatch, _Gate403)
     rows = _collect(FakeClient(dict(_ROUTES)))
 
-    assert _row(rows, "sentinel (chat-requirements)").result == "FAIL"
+    assert _row(rows, "sentinel (legacy gate)").result == "FAIL"
     assert _row(rows, "chat").result == "FAIL"
     assert doctor_mod.exit_code(rows) == 1
 
@@ -231,8 +272,9 @@ def test_write_tools_are_reported_unverified_not_probed(
         assert row.result == "UNVERIFIED"
         assert "not probed" in row.detail
         assert "sentinel gate" in row.detail  # the code-read classification
-    # Nothing was written while classifying them.
-    assert client.posts == []
+    # Nothing was written while classifying them — conversation/init is the
+    # only permitted POST (read-only bookkeeping, see FakeClient).
+    assert set(client.posts) <= {_INIT_PATH}
 
 
 def test_unverified_rows_do_not_fail_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -317,7 +359,7 @@ def test_run_doctor_prints_the_table_and_returns_its_exit_code(
     assert text.splitlines()[0].startswith("gpt2agent doctor")
     assert "list_models" in text
     assert text.rstrip().splitlines()[-1] == (
-        "gpt2agent doctor: 22 OK, 0 failed, 0 blocked upstream, 4 unverified"
+        "gpt2agent doctor: 24 OK, 0 failed, 0 blocked upstream, 4 unverified"
     )
 
 

@@ -29,11 +29,37 @@ _DEFAULTS: dict[str, Any] = {
     # full ChatGPT account, so binding all interfaces would expose the account to
     # the LAN/WAN. Set host explicitly (and GPT2AGENT_ALLOW_REMOTE=1) to opt in.
     "server": {"host": "127.0.0.1", "port": 9000},
-    "models": {"chat": "gpt-5-6"},
+    "models": {
+        "chat": "gpt-5-6",
+        # Optional slug to retry with when the requested model hits the
+        # account usage cap (UsageLimitError). None = surface the error.
+        "fallback": None,
+    },
     # Phase-1 browser transport (gpt2agent/browser.py): drives chatgpt.com in
     # a real Chrome via Playwright while the sentinel challenge blocks the
     # conversation endpoint. Off unless [browser] enabled = true.
     "browser": {"enabled": False, "headed": True, "timeout_s": 180},
+    # Website-simulation identity (gpt2agent/sim.py): the shared session
+    # fingerprint used for sentinel mint → conversation POST. All optional;
+    # sensible browser-like defaults apply.
+    "sentinel": {
+        "timezone": None,     # IANA name, e.g. "America/New_York"
+        "locale": None,       # e.g. "en-US"
+        "impersonate": None,  # curl_cffi profile, e.g. "chrome136"
+        "screen": None,       # "WxH", e.g. "1920x1080"
+    },
+    # Shared client-side budget (gpt2agent/ratelimit.py): protects the
+    # account-level quotas when many agents share this account. State is
+    # file-backed (~/.gpt2agent/ratelimit-state.json) so separate gpt2agent
+    # processes share one budget. GPT2AGENT_RATELIMIT_OFF=1 disables.
+    "rate_limit": {
+        "enabled": True,
+        "min_interval_s": 15.0,      # min gap between conversation POSTs
+        "read_min_interval_s": 1.0,  # bookkeeping GET pacing
+        "max_per_window": 100,       # conversation POSTs per window
+        "window_s": 10800,           # sliding window (3h)
+        "max_wait_s": 300,           # queue up to this, then error
+    },
 }
 
 # Hosts that keep the unauthenticated HTTP transport reachable only from the
@@ -107,11 +133,22 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
     srv = cfg["server"]
     models = cfg["models"]
 
-    from gpt2agent.backend import BackendClient
+    from gpt2agent.backend import (
+        BackendClient,
+        UpstreamChallengeError,
+        UsageLimitError,
+    )
+    from gpt2agent.ratelimit import get_limiter
     from gpt2agent.sse import ConversationClient
+    from gpt2agent.sim import get_profile
     from gpt2agent.tools._browser import browser_transport
     from gpt2agent.tools.manual import build_handoff, gpt_chat_url
 
+    # Configure the shared simulation profile before any client reads it —
+    # get_profile() is a singleton; first caller wins.
+    get_profile(cfg)
+    # Same for the shared rate limiter (file-backed, cross-process).
+    get_limiter(cfg)
     _backend = BackendClient()
     conv = ConversationClient(_backend)
 
@@ -131,12 +168,23 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         "Do not ask clarifying questions; proceed with the best interpretation. "
     )
 
+    async def _chat_via_browser(prompt: str, **kw) -> str:
+        """Browser-lane fallback when the direct path is challenge-blocked."""
+        transport = browser_transport(cfg.get("browser", {}), "chat")
+        out = await transport.chat(prompt, **kw)
+        return (
+            "**Note** — direct backend was challenge-blocked; answered via "
+            "the browser lane.\n\n" + (out or "(no response)")
+        )
+
     @mcp.tool()
     async def chat(
         prompt: str,
         model: str = chat_model,
         temporary: bool = True,
         browser: bool = False,
+        connectors: list[str] | None = None,
+        github_repos: list[str] | None = None,
         manual: bool = False,
     ) -> str:
         """Chat with any ChatGPT model on your account.
@@ -147,6 +195,14 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
 
         Set `temporary=False` to allow tool-based features (image gen, code
         interpreter, canvas). Temporary chats (default) cannot use these tools.
+
+        `connectors` activates connected apps for this message — pass connector
+        ids from `list_apps` (e.g. `connector_openai_pubmed`, or a connected
+        GitHub connector id). First-party `connector_openai_*` connectors work
+        out of the box; OAuth apps (GitHub, Gmail) must be connected at
+        chatgpt.com → Settings → Connectors first. `github_repos` mirrors the
+        frontend's per-message repo picker (`selected_github_repos`) when the
+        GitHub connector is enabled.
 
         Set `manual=True` to get a paste-into-chatgpt.com handoff JSON instead
         of calling the backend (zero network calls).
@@ -164,9 +220,34 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         if browser:
             transport = browser_transport(cfg.get("browser", {}), "chat")
             return await transport.chat(prompt, model=model, temporary=temporary)
-        text = await conv.complete(
-            model, [{"role": "user", "content": prompt}], temporary=temporary
-        )
+        try:
+            text = await conv.complete(
+                model,
+                [{"role": "user", "content": prompt}],
+                temporary=temporary,
+                connectors=connectors,
+                github_repos=github_repos,
+            )
+        except UpstreamChallengeError:
+            if cfg.get("browser", {}).get("enabled"):
+                return await _chat_via_browser(
+                    prompt, model=model, temporary=temporary
+                )
+            raise
+        except UsageLimitError:
+            fallback = models.get("fallback")
+            if not fallback or fallback == model:
+                raise
+            text = await conv.complete(
+                fallback,
+                [{"role": "user", "content": prompt}],
+                temporary=temporary,
+            )
+            return (
+                f"**Note** — `{model}` is usage-capped on this account; "
+                f"answered with configured fallback `{fallback}`.\n\n"
+                + (text or "(no response)")
+            )
         return text or "(no response)"
 
     @mcp.tool()
@@ -199,23 +280,39 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         if browser:
             transport = browser_transport(cfg.get("browser", {}), "agent")
             return await transport.chat(prompt, temporary=False, mode="agent")
-        text = await conv.complete(
-            agent_model,
-            [{"role": "user", "content": prompt}],
-            temporary=False,
-            poll_async=True,  # agent mode runs async — poll the conversation
-        )
+        try:
+            text = await conv.complete(
+                agent_model,
+                [{"role": "user", "content": prompt}],
+                temporary=False,
+                poll_async=True,  # agent mode runs async — poll the conversation
+            )
+        except UpstreamChallengeError:
+            if cfg.get("browser", {}).get("enabled"):
+                transport = browser_transport(cfg.get("browser", {}), "agent")
+                out = await transport.chat(
+                    prompt, temporary=False, mode="agent"
+                )
+                return (
+                    "**Note** — direct backend was challenge-blocked; answered "
+                    "via the browser lane.\n\n" + (out or "(no response)")
+                )
+            raise
         return text or "(no response)"
 
     @mcp.tool()
     async def deep_research(
         query: str, auto_confirm: bool = True, browser: bool = False,
-        manual: bool = False,
+        connectors: list[str] | None = None, manual: bool = False,
     ) -> str:
         """Search the web and synthesize a detailed report with citations.
 
         Best for: current events, literature review, market research.
         Takes 30–120 seconds. Uses model='research' + system_hints=['research'].
+
+        `connectors` adds connected-app sources (e.g. `connector_openai_pubmed`
+        for literature). OAuth connectors (GitHub, Gmail) must be connected in
+        chatgpt.com → Settings → Connectors first; list ids via `list_apps`.
 
         When `auto_confirm` is True (default), an imperative prefix is prepended
         so the model proceeds without asking "Do you want me to start?".
@@ -248,14 +345,26 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         truncated = False
         timed_out = False
 
-        async for event in conv.deep_research(q):
-            if event["type"] == "tool":
-                tool_calls.append(event["call"])
-            elif event["type"] == "done":
-                final_text = event["text"]
-                refs = event.get("content_references", [])
-                truncated = bool(event.get("terminated_abnormally"))
-                timed_out = bool(event.get("timeout"))
+        try:
+            async for event in conv.deep_research(q, connectors=connectors):
+                if event["type"] == "tool":
+                    tool_calls.append(event["call"])
+                elif event["type"] == "done":
+                    final_text = event["text"]
+                    refs = event.get("content_references", [])
+                    truncated = bool(event.get("terminated_abnormally"))
+                    timed_out = bool(event.get("timeout"))
+        except UpstreamChallengeError:
+            if cfg.get("browser", {}).get("enabled"):
+                transport = browser_transport(
+                    cfg.get("browser", {}), "deep_research")
+                out = await transport.chat(q, temporary=False, mode="research")
+                return (
+                    "**Note** — direct backend was challenge-blocked; answered "
+                    "via the browser lane (no Sources section).\n\n"
+                    + (out or "(no response)")
+                )
+            raise
 
         # Append a brief sources section if citations were returned
         if refs:
@@ -278,7 +387,7 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
     @mcp.tool()
     async def deep_research_heavy(
         query: str, auto_confirm: bool = True, browser: bool = False,
-        manual: bool = False,
+        connectors: list[str] | None = None, manual: bool = False,
     ) -> str:
         """Long-form Deep Research using gpt-6-pro (5–30 min, uses monthly DR quota — check /backend-api/conversation/init for remaining). For short web-augmented answers use `deep_research` instead.
 
@@ -323,7 +432,9 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         truncated = False
         timed_out = False
 
-        async for event in conv.deep_research_heavy(q, model=heavy_dr_model):
+        async for event in conv.deep_research_heavy(
+            q, model=heavy_dr_model, connectors=connectors
+        ):
             etype = event.get("type")
             if etype == "done":
                 final_text = event["text"]
@@ -447,6 +558,206 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         )
         return text or "(no response)"
 
+    @mcp.tool()
+    async def usage_stats() -> str:
+        """Account usage snapshot: per-model caps, per-feature remaining
+        counters, reset timestamps, the effective default model (and whether
+        it was silently downgraded), plus this host's shared client-side
+        budget and active upstream cooldowns.
+
+        Answers "how much have we used / left / when does it reset / which
+        model can I actually use" so agents can pick the cheapest viable lane
+        before spending quota. Reads the same `conversation/init` bookkeeping
+        call the web app issues on page load — no message is sent and no
+        quota is consumed.
+
+        Note: `deep_research` under `features`/`deep_research.light_*` is the
+        LIGHT DR counter. `deep_research_heavy` draws on an independent
+        monthly cap (`deep_research.heavy_*` fields) that the backend may not
+        expose — when unreported, the authoritative signal is the connector's
+        own refusal. JSON output.
+        """
+        import asyncio
+
+        from gpt2agent.usage import build_usage_report
+
+        report = await asyncio.to_thread(build_usage_report, _backend)
+        return json.dumps(report, indent=2)
+
+    # ── shared task queue ─────────────────────────────────────────────
+    # File-backed (~/.gpt2agent/tasks/*.json) so every agent/process on this
+    # host sees one queue. Whichever gpt2agent server is running drains it
+    # serially under the shared rate limiter; UsageLimitError parks the task
+    # until the upstream reset instead of dropping it.
+    _worker_task = None
+
+    async def _execute_task(task: dict) -> dict:
+        kind = task.get("kind")
+        p = task.get("payload") or {}
+        if kind == "chat":
+            text = await conv.complete(
+                p.get("model") or chat_model,
+                [{"role": "user", "content": p["prompt"]}],
+                temporary=bool(p.get("temporary", False)),
+                connectors=p.get("connectors") or None,
+                github_repos=p.get("github_repos") or None,
+            )
+            return {"text": text}
+        if kind in ("deep_research", "deep_research_heavy"):
+            gen = (
+                conv.deep_research(p["query"], connectors=p.get("connectors"))
+                if kind == "deep_research"
+                else conv.deep_research_heavy(
+                    p["query"],
+                    model=p.get("model"),
+                    connectors=p.get("connectors"),
+                )
+            )
+            done: dict = {}
+            async for evt in gen:
+                if evt.get("type") == "done":
+                    done = evt
+            return done or {"text": "", "warning": "stream ended without done"}
+        raise RuntimeError(f"unknown task kind {kind!r}")
+
+    async def _queue_worker() -> None:
+        import asyncio as _aio
+        import time as _t
+
+        from gpt2agent.ratelimit import LocalRateLimitError
+        from gpt2agent.taskqueue import get_queue
+
+        queue = get_queue()
+        while True:
+            task = None
+            try:
+                queue.requeue_stale()
+                task = queue.claim_next()
+            except Exception:  # noqa: BLE001 - a corrupt file must not kill the worker
+                logging.getLogger(__name__).exception("queue claim failed")
+            if task is None:
+                await _aio.sleep(10)
+                continue
+            try:
+                result = await _execute_task(task)
+                queue.complete(task["id"], result)
+            except UsageLimitError as exc:
+                # Park until the upstream reset — the job fires itself later.
+                queue.wait_until(task["id"], exc.resets_after, str(exc))
+            except LocalRateLimitError as exc:
+                # Local shared budget exhausted — retry shortly.
+                queue.wait_until(task["id"], _t.time() + 120, str(exc))
+            except Exception as exc:  # noqa: BLE001
+                queue.fail(task["id"], f"{type(exc).__name__}: {exc}")
+
+    def _ensure_worker() -> None:
+        import asyncio as _aio
+
+        nonlocal _worker_task
+        if _worker_task is None or _worker_task.done():
+            _worker_task = _aio.get_running_loop().create_task(_queue_worker())
+
+    @mcp.tool()
+    async def queue_submit(
+        kind: str,
+        prompt: str,
+        model: str = "",
+        temporary: bool = False,
+        connectors: list[str] | None = None,
+        github_repos: list[str] | None = None,
+    ) -> str:
+        """Enqueue work on this host's shared gpt2agent task queue instead of
+        running it inline. For agent fleets sharing one ChatGPT account: the
+        queue serializes requests under the shared rate limiter, and a task
+        that hits an upstream quota cap is parked until `resets_after` and
+        fires itself — you don't have to babysit the wait.
+
+        `kind`: "chat" | "deep_research" | "deep_research_heavy".
+        `prompt`: the chat prompt or research query.
+        `model`: optional override (chat model slug; heavy-DR orchestrator).
+        `temporary`: chat only — disables history/training.
+        `connectors`/`github_repos`: forwarded to the underlying tool.
+
+        Returns the task id — poll with `queue_status`, fetch with
+        `queue_result`, abort with `queue_cancel`.
+        """
+        from gpt2agent.taskqueue import get_queue
+
+        if kind not in ("chat", "deep_research", "deep_research_heavy"):
+            return json.dumps(
+                {"error": f"unknown kind {kind!r}",
+                 "kinds": ["chat", "deep_research", "deep_research_heavy"]}
+            )
+        payload: dict[str, Any] = {"prompt": prompt, "temporary": temporary}
+        if model:
+            payload["model"] = model
+        if connectors:
+            payload["connectors"] = connectors
+        if github_repos:
+            payload["github_repos"] = github_repos
+        if kind.startswith("deep_research"):
+            payload["query"] = payload.pop("prompt")
+        queue = get_queue()
+        task = queue.submit(kind, payload)
+        resp = {"task_id": task["id"], "status": task["status"]}
+        if queue.enabled:
+            _ensure_worker()
+        else:
+            resp["note"] = "queue worker disabled (GPT2AGENT_QUEUE_OFF)"
+        return json.dumps(resp)
+
+    @mcp.tool()
+    async def queue_status(task_id: str = "") -> str:
+        """Show one task (`task_id`) or the whole queue when omitted.
+
+        Statuses: queued | claimed | waiting (parked until an upstream reset —
+        `not_before` carries the epoch) | done | failed | cancelled.
+        JSON output.
+        """
+        import time as _t
+
+        from gpt2agent.taskqueue import get_queue
+
+        queue = get_queue()
+        if task_id:
+            t = queue.get(task_id)
+            return json.dumps(t or {"error": f"no such task {task_id!r}"}, indent=2)
+        tasks = queue.list()
+        slim = [
+            {
+                "id": t["id"], "kind": t["kind"], "status": t["status"],
+                "attempts": t.get("attempts", 0),
+                "not_before": t.get("not_before"),
+                "error": t.get("error"),
+            }
+            for t in tasks
+        ]
+        return json.dumps({"now": _t.time(), "tasks": slim}, indent=2)
+
+    @mcp.tool()
+    async def queue_result(task_id: str) -> str:
+        """Fetch a finished task's result (`status == "done"`).
+
+        Returns the task record JSON; `result.text` holds the reply/report.
+        Not done yet → returns the record with its current status.
+        """
+        from gpt2agent.taskqueue import get_queue
+
+        t = get_queue().get(task_id)
+        return json.dumps(t or {"error": f"no such task {task_id!r}"}, indent=2)
+
+    @mcp.tool()
+    async def queue_cancel(task_id: str) -> str:
+        """Cancel a queued/waiting task. Already-terminal or running tasks
+        return their record unchanged."""
+        from gpt2agent.taskqueue import get_queue
+
+        t = get_queue().cancel(task_id)
+        return json.dumps(
+            t or {"error": f"no such task {task_id!r} or already terminal"},
+            indent=2,
+        )
+
     try:
         from gpt2agent.tools import register_all
 
@@ -482,6 +793,16 @@ def main() -> None:
     sub.add_parser(
         "doctor",
         help="Probe the account read-only and report which tools work right now",
+    )
+
+    # usage subcommand — account quota snapshot (used / left / reset / model)
+    usage_p = sub.add_parser(
+        "usage",
+        help="Show account usage: model caps, feature quotas, resets, "
+        "and this host's shared rate-limit budget",
+    )
+    usage_p.add_argument(
+        "--json", action="store_true", help="Emit the raw report as JSON"
     )
 
     # install subcommand — register gpt2agent with one or more MCP clients
@@ -548,6 +869,19 @@ def main() -> None:
         from gpt2agent.doctor import run_doctor
 
         raise SystemExit(run_doctor())
+
+    if args.command == "usage":
+        from gpt2agent.backend import BackendClient
+        from gpt2agent.ratelimit import get_limiter
+        from gpt2agent.usage import build_usage_report, format_usage_report
+
+        get_limiter(load_config(getattr(args, "config", None)))
+        report = build_usage_report(BackendClient())
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            print(format_usage_report(report))
+        return
 
     if args.command == "install":
         from gpt2agent.install import run_install

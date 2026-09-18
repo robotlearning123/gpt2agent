@@ -436,7 +436,7 @@ def test_quota_wrapper_reports_verified_zero_remaining(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "deep_research remaining = 0  reset = tomorrow"
+    assert "deep_research (light) remaining = 0  reset = tomorrow" in result.stdout
     assert result.stderr == ""
 
 

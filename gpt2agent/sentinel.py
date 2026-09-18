@@ -111,9 +111,24 @@ class SentinelGate:
                     "payload).\n" + _UPSTREAM_CHALLENGE_NOTE
                 )
             proof_for_xor = out.get("proof") or p
-            tok = await asyncio.to_thread(
-                _turn.solve_turnstile, dx, proof_for_xor
-            )
+            # Prefer the bridge solver (wrapper.reverse.vm) — it handles the
+            # current upstream challenge format; fall back to the vendored one.
+            # The bridge VM expects the FINGERPRINT p_token (not the PoW proof).
+            tok = ""
+            try:
+                from gpt2agent.sentinel_bridge import _load, get_profile, p_token as _ptok
+                vm = _load("vm")
+                prof = get_profile()
+                _fp_p = _ptok(prof.fingerprint_config())
+                ip_info = str(prof.ip_info)
+                tok = vm.VM.get_turnstile(dx, _fp_p, ip_info) or ""
+            except Exception as _bridge_err:
+                import logging as _l
+                _l.getLogger(__name__).debug("bridge solver failed: %s", _bridge_err)
+            if not tok:
+                tok = await asyncio.to_thread(
+                    _turn.solve_turnstile, dx, proof_for_xor
+                )
             if not tok:
                 raise UpstreamChallengeError(
                     "required Turnstile challenge could not be solved "
