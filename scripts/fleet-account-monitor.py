@@ -99,22 +99,43 @@ print(json.dumps({'exp': exp, 'src': str(src), 'me_email': (me or {}).get('email
             "token_ttl_min": ttl_min, "token_src": data.get("src")}
 
 
+def _sys_env() -> dict:
+    # cron provides no session bus: point systemctl --user at the user manager
+    env = dict(os.environ)
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    env.setdefault("DBUS_SESSION_BUS_ADDRESS",
+                   f"unix:path={env['XDG_RUNTIME_DIR']}/bus")
+    return env
+
+
+def _pid_is_runner(pid: int) -> bool:
+    try:
+        return "runner.py" in Path(f"/proc/{pid}/cmdline").read_bytes().decode(
+            "utf-8", "replace")
+    except OSError:
+        return False
+
+
 def check_runner(name: str) -> dict:
     pid_file = G2A / f"runner-{name}.pid"
     hb = G2A / f"heartbeat-{name}"
+    # systemd is the supervisor of record — check it first (a stale pid file
+    # left by a start_runner.sh attempt must not mask a healthy unit).
+    r = subprocess.run(["systemctl", "--user", "is-active",
+                        f"token-agent-g2a-runner-{name}.service"],
+                       capture_output=True, text=True, timeout=10,
+                       env=_sys_env())
+    alive = r.stdout.strip() == "active"
     pid = None
-    if pid_file.exists():
+    if not alive and pid_file.exists():
         try:
-            pid = int(pid_file.read_text().split("=")[1].strip())
+            pid = int(pid_file.read_text().split("=")[-1].strip())
         except (ValueError, IndexError):
             pass
-    alive = bool(pid) and Path(f"/proc/{pid}").exists()
-    if not alive:
-        # systemd-managed runner: no pid file, check unit state instead
-        r = subprocess.run(["systemctl", "--user", "is-active",
-                            f"token-agent-g2a-runner-{name}.service"],
-                           capture_output=True, text=True, timeout=10)
-        alive = r.stdout.strip() == "active"
+        # pid reuse guard: only count it alive if it really is runner.py
+        alive = bool(pid) and _pid_is_runner(pid)
+        if not alive:
+            pid = None
     hb_age = None
     if hb.exists():
         hb_age = round(time.time() - hb.stat().st_mtime)
@@ -127,7 +148,8 @@ def check_runner(name: str) -> dict:
         # exit harmlessly if one is actually alive elsewhere.
         unit = f"token-agent-g2a-runner-{name}.service"
         r = subprocess.run(["systemctl", "--user", "restart", unit],
-                           capture_output=True, text=True, timeout=30)
+                           capture_output=True, text=True, timeout=30,
+                           env=_sys_env())
         if r.returncode != 0 and (G2A / "start_runner.sh").exists():
             r = subprocess.run(["bash", str(G2A / "start_runner.sh"), name],
                                capture_output=True, text=True, timeout=30)
