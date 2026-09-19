@@ -113,3 +113,72 @@ def test_format_renders_key_lines() -> None:
 def test_report_is_json_serializable() -> None:
     rep = build_usage_report(_Client(_INIT))
     json.dumps(rep)
+
+
+_ACCT = {
+    "accounts": {
+        "default": {
+            "account": {"plan_type": "pro", "plan_display_name": "Pro"},
+            "features": ["canvas", "dalle_3", "caterpillar"],
+            "entitlement": {
+                "subscription_plan": "chatgptpro",
+                "has_active_subscription": True,
+                "expires_at": "2026-09-21T08:15:49+00:00",
+                "renews_at": "2026-09-21T02:15:49+00:00",
+                "is_delinquent": False,
+                "scheduled_plan_change": {
+                    "changes_at": "2026-09-21T02:15:49+00:00",
+                    "plan_type": "plus",
+                },
+            },
+        }
+    }
+}
+
+
+class _ClientWithAccounts(_Client):
+    def get(self, path, **kw):
+        if "accounts/check" in path:
+            return _ACCT
+        raise RuntimeError("unexpected")
+
+
+def test_report_subscription_and_scheduled_downgrade() -> None:
+    rep = build_usage_report(_ClientWithAccounts(_INIT))
+    sub = rep["subscription"]
+    assert sub["plan"] == "chatgptpro"
+    assert sub["has_active_subscription"] is True
+    assert sub["expires_at"] == "2026-09-21T08:15:49+00:00"
+    assert sub["scheduled_plan_change"] == {
+        "plan_type": "plus",
+        "changes_at": "2026-09-21T02:15:49+00:00",
+    }
+    assert sub["features"] == ["canvas", "dalle_3", "caterpillar"]
+
+
+def test_report_subscription_failsoft_without_get() -> None:
+    rep = build_usage_report(_Client(_INIT))
+    assert rep["subscription"] == {}
+
+
+def test_report_banner_captured() -> None:
+    init = dict(_INIT)
+    init["banner_info"] = {
+        "name": "account_sharing_degrade",
+        "title": "Suspicious activity detected",
+        "resets_after": "2026-09-19T21:45:00Z",
+    }
+    rep = build_usage_report(_ClientWithAccounts(init))
+    assert rep["banner"]["name"] == "account_sharing_degrade"
+    out = format_usage_report(rep)
+    assert "Suspicious activity detected" in out
+    assert "2026-09-19T21:45:00" in out
+
+
+def test_format_renders_subscription_section() -> None:
+    rep = build_usage_report(_ClientWithAccounts(_INIT))
+    out = format_usage_report(rep)
+    assert "chatgptpro" in out
+    assert "scheduled downgrade to plus" in out
+    assert "2026-09-21T02:15:49" in out
+    assert "features enabled: 3" in out

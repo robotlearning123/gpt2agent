@@ -6,6 +6,18 @@ versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **usage report: subscription + feature flags + banners** (`usage.py`):
+  `gpt2agent usage` / `usage_stats` now also query
+  `GET /backend-api/accounts/check` — subscription plan, renew/expire
+  timestamps, **scheduled plan changes** (e.g. a pending Pro→Plus
+  downgrade, rendered with a ⚠), delinquency, and the enabled account
+  feature list. `conversation/init` `banner_info` (model caps,
+  account_sharing_degrade, …) is surfaced as an "Account flag" line.
+  The accounts call is fail-soft — the report still renders if it errors.
+
+
 ## [0.0.19] - 2026-09-19
 
 ### Fixed
