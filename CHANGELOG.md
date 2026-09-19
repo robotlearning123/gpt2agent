@@ -17,6 +17,12 @@ versioning: [SemVer](https://semver.org/).
   account_sharing_degrade, …) is surfaced as an "Account flag" line.
   The accounts call is fail-soft — the report still renders if it errors.
 
+- **usage report: full account-level view** (`usage.py`): adds
+  `/backend-api/me` identity (email, name, user/account ids, country,
+  orgs, created date), account metadata from `accounts/check`
+  (structure, plan display name, paid history), and local task-queue
+  counts by state. All fail-soft.
+
 
 ## [0.0.19] - 2026-09-19
 

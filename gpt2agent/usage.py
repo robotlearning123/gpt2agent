@@ -29,6 +29,7 @@ from typing import Any
 _INIT_PATH = "/backend-api/conversation/init"
 _INIT_PAYLOAD = {"conversation_mode_kind": "primary_assistant"}
 _ACCOUNTS_PATH = "/backend-api/accounts/check/v4-2023-04-27"
+_ME_PATH = "/backend-api/me"
 
 
 def _iso(ts: float | None) -> str | None:
@@ -84,13 +85,16 @@ def build_usage_report(client) -> dict[str, Any]:
     # Fail-soft: the report still works without it (test doubles may only
     # implement ``post``).
     subscription: dict[str, Any] = {}
+    account: dict[str, Any] = {}
     try:
         acct = client.get(_ACCOUNTS_PATH) or {}
         acc = (acct.get("accounts") or {}).get("default") or {}
+        meta = acc.get("account") or {}
         ent = acc.get("entitlement") or {}
         sched = ent.get("scheduled_plan_change") or {}
         subscription = {
             "plan": ent.get("subscription_plan"),
+            "plan_display_name": meta.get("plan_display_name"),
             "has_active_subscription": ent.get("has_active_subscription"),
             "expires_at": ent.get("expires_at"),
             "renews_at": ent.get("renews_at"),
@@ -101,12 +105,35 @@ def build_usage_report(client) -> dict[str, Any]:
             }
             if sched.get("plan_type")
             else None,
-            "features": (acc.get("account") or {}).get("features")
-            or acc.get("features")
-            or [],
+            "features": meta.get("features") or acc.get("features") or [],
+        }
+        account = {
+            "account_id": meta.get("account_id"),
+            "created_time": meta.get("created_time"),
+            "structure": meta.get("structure"),
+            "has_previously_paid_subscription": meta.get(
+                "has_previously_paid_subscription"
+            ),
         }
     except Exception:
         subscription = {}
+
+    # /me — identity. Fail-soft as well.
+    try:
+        me = client.get(_ME_PATH) or {}
+        orgs = ((me.get("orgs") or {}).get("data")) or []
+        account.update(
+            {
+                "user_id": me.get("id"),
+                "email": me.get("email"),
+                "name": me.get("name"),
+                "country": me.get("country"),
+                "orgs": [o.get("title") or o.get("name") for o in orgs],
+                "created": me.get("created"),
+            }
+        )
+    except Exception:
+        pass
 
     def _feature(name: str) -> dict[str, Any] | None:
         return next((f for f in features if f["feature_name"] == name), None)
@@ -144,7 +171,20 @@ def build_usage_report(client) -> dict[str, Any]:
         "deep_research": deep_research,
         "banner": banner,
         "subscription": subscription,
+        "account": account,
     }
+
+    # Local task queue — counts per lifecycle state (fail-soft).
+    try:
+        from gpt2agent.taskqueue import TaskQueue
+
+        counts: dict[str, int] = {}
+        for t in TaskQueue().list():
+            s = t.get("status") or "unknown"
+            counts[s] = counts.get(s, 0) + 1
+        report["task_queue"] = {"counts": counts, "total": sum(counts.values())}
+    except Exception:
+        pass
 
     try:
         from gpt2agent.ratelimit import get_limiter
@@ -179,6 +219,24 @@ def build_usage_report(client) -> dict[str, Any]:
 def format_usage_report(report: dict[str, Any]) -> str:
     """Human-readable rendering for the ``gpt2agent usage`` CLI."""
     lines = [f"Account usage (fetched {report.get('fetched_at') or '?'})", ""]
+
+    acct = report.get("account") or {}
+    if acct:
+        who = acct.get("email") or acct.get("name") or "?"
+        lines.append("Account")
+        lines.append(f"  {who}" + (f"  ({acct['name']})" if acct.get("name") else ""))
+        bits = []
+        if acct.get("account_id"):
+            bits.append(f"id {acct['account_id']}")
+        if acct.get("country"):
+            bits.append(acct["country"])
+        if acct.get("created_time"):
+            bits.append(f"created {acct['created_time'][:10]}")
+        if acct.get("orgs"):
+            bits.append("orgs: " + ", ".join(str(o) for o in acct["orgs"]))
+        if bits:
+            lines.append("  " + "  |  ".join(bits))
+        lines.append("")
 
     sub = report.get("subscription") or {}
     if sub:
@@ -269,4 +327,14 @@ def format_usage_report(report: dict[str, Any]) -> str:
                 lines.append(f"  cooldown {key} until {until}")
         else:
             lines.append("  disabled")
+
+    tq = report.get("task_queue")
+    if tq:
+        counts = tq.get("counts") or {}
+        lines.append("\nLocal task queue")
+        if not counts:
+            lines.append("  empty")
+        else:
+            for state, n in sorted(counts.items()):
+                lines.append(f"  {state}: {n}")
     return "\n".join(lines)
