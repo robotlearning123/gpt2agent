@@ -4,8 +4,12 @@ Aggregates the two sources of truth:
 
 * ``POST /backend-api/conversation/init`` — the same bookkeeping call the web
   app issues on page load. Carries ``model_limits`` (per-model caps),
-  ``limits_progress`` (per-feature remaining counters), ``blocked_features``
-  and the default/intended model slugs.
+  ``limits_progress`` (per-feature remaining counters), ``blocked_features``,
+  ``banner_info`` (account-safety flags) and the default/intended model slugs.
+* ``GET /backend-api/accounts/check/v4-2023-04-27`` — subscription
+  entitlement (plan, renews/expires, scheduled plan change such as a
+  pending downgrade to Plus) and enabled account feature flags. Fail-soft:
+  if the call fails the report still renders without the section.
 * the shared rate-limiter state file — how much of the local client-side
   budget the fleet has committed plus active upstream cooldowns.
 
@@ -24,6 +28,7 @@ from typing import Any
 
 _INIT_PATH = "/backend-api/conversation/init"
 _INIT_PAYLOAD = {"conversation_mode_kind": "primary_assistant"}
+_ACCOUNTS_PATH = "/backend-api/accounts/check/v4-2023-04-27"
 
 
 def _iso(ts: float | None) -> str | None:
@@ -70,6 +75,39 @@ def build_usage_report(client) -> dict[str, Any]:
     default = init.get("default_model_slug")
     intended = init.get("intended_default_model_slug")
 
+    # init.banner_info — account-safety banners (e.g. account_sharing_degrade)
+    banner = init.get("banner_info")
+    if not isinstance(banner, dict) or not banner.get("name"):
+        banner = None
+
+    # accounts/check — subscription entitlement + enabled feature flags.
+    # Fail-soft: the report still works without it (test doubles may only
+    # implement ``post``).
+    subscription: dict[str, Any] = {}
+    try:
+        acct = client.get(_ACCOUNTS_PATH) or {}
+        acc = (acct.get("accounts") or {}).get("default") or {}
+        ent = acc.get("entitlement") or {}
+        sched = ent.get("scheduled_plan_change") or {}
+        subscription = {
+            "plan": ent.get("subscription_plan"),
+            "has_active_subscription": ent.get("has_active_subscription"),
+            "expires_at": ent.get("expires_at"),
+            "renews_at": ent.get("renews_at"),
+            "is_delinquent": ent.get("is_delinquent"),
+            "scheduled_plan_change": {
+                "plan_type": sched.get("plan_type"),
+                "changes_at": sched.get("changes_at"),
+            }
+            if sched.get("plan_type")
+            else None,
+            "features": (acc.get("account") or {}).get("features")
+            or acc.get("features")
+            or [],
+        }
+    except Exception:
+        subscription = {}
+
     def _feature(name: str) -> dict[str, Any] | None:
         return next((f for f in features if f["feature_name"] == name), None)
 
@@ -104,6 +142,8 @@ def build_usage_report(client) -> dict[str, Any]:
         "features": features,
         "blocked_features": blocked,
         "deep_research": deep_research,
+        "banner": banner,
+        "subscription": subscription,
     }
 
     try:
@@ -139,6 +179,37 @@ def build_usage_report(client) -> dict[str, Any]:
 def format_usage_report(report: dict[str, Any]) -> str:
     """Human-readable rendering for the ``gpt2agent usage`` CLI."""
     lines = [f"Account usage (fetched {report.get('fetched_at') or '?'})", ""]
+
+    sub = report.get("subscription") or {}
+    if sub:
+        lines.append("Subscription")
+        plan = sub.get("plan") or "?"
+        status = "active" if sub.get("has_active_subscription") else "INACTIVE"
+        renew = sub.get("renews_at") or sub.get("expires_at")
+        tail = f"  renews {renew}" if renew else ""
+        if sub.get("is_delinquent"):
+            tail += "  DELINQUENT"
+        lines.append(f"  plan: {plan}  ({status}){tail}")
+        sched = sub.get("scheduled_plan_change") or {}
+        if sched.get("plan_type"):
+            lines.append(
+                f"  ⚠ scheduled downgrade to {sched['plan_type']}"
+                f" at {sched.get('changes_at')}"
+            )
+        feats = sub.get("features") or []
+        if feats:
+            lines.append(f"  account features enabled: {len(feats)}")
+        lines.append("")
+
+    banner = report.get("banner")
+    if banner:
+        note = banner.get("title") or banner.get("name")
+        rst = banner.get("resets_after")
+        lines.append(
+            f"⚠ Account flag: {note}"
+            + (f" (resets {rst})" if rst else "")
+            + "\n"
+        )
 
     models = report.get("models") or {}
     default = models.get("default_model_slug") or "?"
