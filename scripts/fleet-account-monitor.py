@@ -175,21 +175,43 @@ def check_version() -> dict:
         return {"ok": False, "error": str(exc)[:200]}
 
 
+def check_bridge() -> dict:
+    """Local-only sentinel-bridge health — no upstream call.
+
+    Catches the failure class that actually happened: bridge dir wiped or a
+    venv dependency lost (ModuleNotFoundError). A live mint probe stays in
+    `gpt2agent doctor` — probing upstream every 15min is itself a flag risk."""
+    d = Path(os.environ.get("GPT2AGENT_SENTINEL_BRIDGE",
+                            Path.home() / ".gpt2agent" / "sentinel-bridge"))
+    if not (d / "ENABLED").exists():
+        return {"bridge": True, "ok": False, "error": "no ENABLED marker"}
+    if not (d / "wrapper" / "reverse" / "vm.py").exists():
+        return {"bridge": True, "ok": False, "error": "wrapper/reverse/vm.py missing"}
+    if str(d) not in sys.path:
+        sys.path.insert(0, str(d))
+    try:
+        import wrapper.reverse.vm  # noqa: F401
+        return {"bridge": True, "ok": True}
+    except Exception as exc:
+        return {"bridge": True, "ok": False, "error": f"import: {exc}"}
+
+
 def main() -> int:
     results = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "accounts": [check_account(n, h) for n, h in ACCOUNTS.items()],
         "runners": [check_runner(n) for n in ("a", "b")],
         "install": check_version(),
+        "bridge": check_bridge(),
     }
-    flat = results["accounts"] + results["runners"] + [results["install"]]
+    flat = results["accounts"] + results["runners"] + [results["install"], results["bridge"]]
     results["ok"] = all(r.get("ok") for r in flat)
     tmp = STATUS_JSON.with_suffix(".tmp")
     tmp.write_text(json.dumps(results, indent=1) + "\n")
     tmp.chmod(0o600)
     tmp.replace(STATUS_JSON)
     summary = " | ".join(
-        f"{r.get('account') or r.get('runner') or 'install'}:"
+        f"{r.get('account') or r.get('runner') or ('bridge' if r.get('bridge') else 'install')}:"
         f"{'OK' if r.get('ok') else 'FAIL ' + str(r.get('error', ''))[:80]}"
         for r in flat
     )
