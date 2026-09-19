@@ -118,7 +118,13 @@ def test_report_is_json_serializable() -> None:
 _ACCT = {
     "accounts": {
         "default": {
-            "account": {"plan_type": "pro", "plan_display_name": "Pro"},
+            "account": {
+                "plan_type": "pro",
+                "plan_display_name": "Pro",
+                "account_id": "acct-x",
+                "created_time": "2023-03-14T18:11:32Z",
+                "structure": "personal",
+            },
             "features": ["canvas", "dalle_3", "caterpillar"],
             "entitlement": {
                 "subscription_plan": "chatgptpro",
@@ -136,10 +142,22 @@ _ACCT = {
 }
 
 
+_ME = {
+    "id": "user-abc123",
+    "email": "user@example.com",
+    "name": "Test User",
+    "country": "US",
+    "created": 1678817383,
+    "orgs": {"data": [{"title": "Personal", "name": "org-1"}]},
+}
+
+
 class _ClientWithAccounts(_Client):
     def get(self, path, **kw):
         if "accounts/check" in path:
             return _ACCT
+        if path.endswith("/me"):
+            return _ME
         raise RuntimeError("unexpected")
 
 
@@ -182,3 +200,26 @@ def test_format_renders_subscription_section() -> None:
     assert "scheduled downgrade to plus" in out
     assert "2026-09-21T02:15:49" in out
     assert "features enabled: 3" in out
+
+
+def test_report_account_identity() -> None:
+    rep = build_usage_report(_ClientWithAccounts(_INIT))
+    a = rep["account"]
+    assert a["email"] == "user@example.com"
+    assert a["account_id"] == "acct-x"
+    assert a["country"] == "US"
+    assert a["orgs"] == ["Personal"]
+    out = format_usage_report(rep)
+    assert "user@example.com" in out and "acct-x" in out
+
+
+def test_report_task_queue_counts(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("GPT2AGENT_TASK_DIR", str(tmp_path / "tasks"))
+    from gpt2agent.taskqueue import TaskQueue
+
+    q = TaskQueue()
+    q.submit("chat", {"prompt": "x"})
+    q.submit("chat", {"prompt": "y"})
+    rep = build_usage_report(_ClientWithAccounts(_INIT))
+    assert rep["task_queue"]["counts"] == {"queued": 2}
+    assert rep["task_queue"]["total"] == 2
