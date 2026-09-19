@@ -109,6 +109,12 @@ def check_runner(name: str) -> dict:
         except (ValueError, IndexError):
             pass
     alive = bool(pid) and Path(f"/proc/{pid}").exists()
+    if not alive:
+        # systemd-managed runner: no pid file, check unit state instead
+        r = subprocess.run(["systemctl", "--user", "is-active",
+                            f"token-agent-g2a-runner-{name}.service"],
+                           capture_output=True, text=True, timeout=10)
+        alive = r.stdout.strip() == "active"
     hb_age = None
     if hb.exists():
         hb_age = round(time.time() - hb.stat().st_mtime)
@@ -116,10 +122,15 @@ def check_runner(name: str) -> dict:
            "heartbeat_age_s": hb_age}
     healthy = alive and hb_age is not None and hb_age < HEARTBEAT_MAX_AGE_S
     if not healthy:
-        # restart via the lane's own script; runner.py's flock makes a
-        # double-start exit harmlessly if one is actually alive elsewhere
-        r = subprocess.run(["bash", str(G2A / "start_runner.sh"), name],
+        # Prefer systemd (autopilot lane owns the units now); fall back to
+        # the lane's start_runner.sh. runner.py's flock makes a double-start
+        # exit harmlessly if one is actually alive elsewhere.
+        unit = f"token-agent-g2a-runner-{name}.service"
+        r = subprocess.run(["systemctl", "--user", "restart", unit],
                            capture_output=True, text=True, timeout=30)
+        if r.returncode != 0 and (G2A / "start_runner.sh").exists():
+            r = subprocess.run(["bash", str(G2A / "start_runner.sh"), name],
+                               capture_output=True, text=True, timeout=30)
         res["restarted"] = r.returncode == 0
         res["ok"] = res["restarted"]
         _log(f"runner-{name} unhealthy (alive={alive} hb_age={hb_age}) "
