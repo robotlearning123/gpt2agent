@@ -14,7 +14,13 @@ try:
 except ImportError:
     import tomli as tomllib  # type: ignore
 
-from mcp.server.fastmcp import FastMCP
+# MCP SDK version compatibility: works with both mcp 1.x and 2.x
+# 1.x: from mcp.server.fastmcp import FastMCP
+# 2.x: from mcp.server.mcpserver import MCPServer (FastMCP renamed)
+try:
+    from mcp.server.mcpserver import MCPServer as FastMCP  # mcp >= 2
+except ImportError:
+    from mcp.server.fastmcp import FastMCP  # mcp < 2
 
 # ── config ──────────────────────────────────────────────────────────────────
 
