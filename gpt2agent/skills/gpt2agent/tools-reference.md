@@ -1,6 +1,6 @@
 # gpt2agent MCP Tools Reference
 
-Complete parameter reference for all 25 MCP tools exposed by the gpt2agent server.
+Complete parameter reference for the conversation/account tools below (25 of the 30 registered). The other five — `usage_stats` and the queue tools `queue_submit`, `queue_status`, `queue_result`, `queue_cancel` — are registered but not yet documented here.
 Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 
 ---
@@ -23,7 +23,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Purpose**: Send a single prompt to any ChatGPT model and get a text response.
 - **Parameters**:
   - `prompt` (str, required) -- the user message to send.
-  - `model` (str, default: value from `config.toml` `[models].chat`, fallback `"gpt-5-6"`) -- model slug. Run `list_models` to see all available slugs.
+  - `model` (str, default: value from `config.toml` `[models].chat`, fallback `"gpt-5-6"`) -- model slug. Run `list_models` to see all available slugs (some exposed slugs, e.g. Work-only GPT-6 Sol/Luna, resolve to `gpt-5-6` on this surface).
   - `temporary` (bool, default: `True`) -- when `True`, sets `history_and_training_disabled=True` which prevents the conversation from being saved and **blocks tool-based features** (image gen, code interpreter, canvas, memory persistence). Set `False` to enable those features.
   - `manual` (bool, default: `False`) -- when `True`, make zero network calls and return a JSON handoff (`status: manual_handoff`) with the exact prompt to paste into chatgpt.com, the target URL, and readback steps via `list_conversations`/`get_conversation`. Fallback while the upstream Sentinel challenge blocks `/backend-api/conversation`.
 - **Returns**: `str` -- the assistant's reply text.
@@ -37,7 +37,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Notes**:
   - `temporary=True` (default) means the conversation is ephemeral -- not saved to ChatGPT history, cannot use image gen / code interpreter / canvas.
   - If you need tool-based features (image gen, code interpreter, canvas), you **must** pass `temporary=False`.
-  - Available model slugs depend on your subscription tier. Pro plan unlocks `gpt-5-5-pro`, `gpt-5-6-pro`, `o3-pro`, etc.
+  - Available model slugs depend on your subscription tier. Pro plan unlocks `gpt-6-pro`, `o3-pro`, etc. GPT-5.5 retires on 2026-10-14; GPT-6 Sol/Luna are Work & Codex-only.
 
 ---
 

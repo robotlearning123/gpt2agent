@@ -195,9 +195,11 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
     ) -> str:
         """Chat with any ChatGPT model on your account.
 
-        Pass `model` to switch slugs — e.g. `gpt-5-5-pro` (410K, pro reasoning),
-        `gpt-6-pro`, `o3-pro`, `gpt-5-6-thinking`, `gpt-5-6` (default). Call `list_models`
-        first to enumerate what your account has access to.
+        Pass `model` to switch slugs — e.g. `gpt-6-pro` (410K, pro reasoning),
+        `gpt-5-6` (GPT-5.6 Sol, default), `gpt-5-6-thinking` (262K), `o3-pro` (196K).
+        GPT-6 Sol / GPT-6 Luna are Work & Codex-only: on the Chat surface their
+        slugs resolve to `gpt-5-6` and the reply says so via a Model note. Call
+        `list_models` first to enumerate what your account has access to.
 
         Set `temporary=False` to allow tool-based features (image gen, code
         interpreter, canvas). Temporary chats (default) cannot use these tools.

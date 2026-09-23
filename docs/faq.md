@@ -23,9 +23,20 @@ with `GPT2AGENT_ALLOW_REMOTE=1`. Prefer stdio.
 
 ### Plus vs Pro — what's the difference?
 
-Both work. Pro unlocks the heavier models (e.g. `gpt-5-5-pro`, `o3-pro`) and a
-larger monthly Deep Research quota. Run `list_models` to see exactly what your
+Both work. Pro unlocks the heavier models (e.g. `gpt-6-pro`, `o3-pro`) and a
+larger monthly Deep Research quota (GPT-5.5 models retire from all ChatGPT
+surfaces on 2026-10-14). Run `list_models` to see exactly what your
 account has, and `account_status` for your plan.
+
+### Can I use GPT-6 Sol / GPT-6 Luna?
+
+Not through the Chat surface. OpenAI docs (2026-09-22) put GPT-6 Sol
+(`gpt-6-sol`) and GPT-6 Luna (`gpt-6-luna`) in ChatGPT **Work and Codex only** —
+they are not available in Chat. Measured 2026-09-23: a Chat request for
+`gpt-6-sol`, `gpt-6-luna`, or their `-wm` variants is silently served by
+`gpt-5-6`, and the reply carries a *Model note* naming the resolved slug. Use
+`gpt-6-pro` / `gpt-5-6` for Chat work; Codex-side work goes through the Codex
+tools.
 
 ### How much Deep Research can I run?
 

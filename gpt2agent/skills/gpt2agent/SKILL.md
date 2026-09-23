@@ -1,20 +1,20 @@
 # gpt2agent — ChatGPT Plus/Pro MCP Tools
 
-Best practices for using the 25 gpt2agent MCP tools that expose your ChatGPT
+Best practices for using the 30 gpt2agent MCP tools that expose your ChatGPT
 account inside any MCP client.
 
 ## Quick reference
 
 | Task | Tool | Key params |
 |---|---|---|
-| Ask a model | `chat` | `model="gpt-6-pro"` (410K), `model="gpt-5-6"` (default) |
+| Ask a model | `chat` | `model="gpt-6-pro"` (410K), `model="gpt-5-6"` (GPT-5.6 Sol, default) |
 | Web research | `deep_research` | ~30–120s; inline citations; `auto_confirm=False` for interactive |
 | Long-form research | `deep_research_heavy` | 5–30min; gpt-6-pro; **monthly quota** |
 | Agent task | `agent` | autonomous browsing + code execution; 262K context |
 | Generate image | `generate_image` | returns download URLs + metadata |
 | Run code | `code_interpreter` | ChatGPT sandbox; returns output + charts |
 | Canvas doc | `canvas_execute` | live editing environment |
-| List models | `list_models` | 21 models with capabilities + thinking efforts |
+| List models | `list_models` | 23 models with capabilities + thinking efforts |
 | Read memories | `memory_list` / `memory_search(query=...)` | |
 | Account info | `account_status` | plan, expiry, groups |
 | Codex tasks | `list_codex_envs` / `list_codex_tasks` / `codex_task_create` | |
@@ -24,11 +24,14 @@ account inside any MCP client.
 | Slug | Context | Best for |
 |---|---|---|
 | `gpt-6-pro` | 410K | Deepest reasoning; heavy DR; single effort tier |
-| `gpt-5-6` | default | Fast, balanced; general chat |
-| `gpt-5-6-thinking` | | Extra reasoning steps |
-| `gpt-6-astra-wm` | 262K | Working-memory variant (may need special hints) |
-| `o3-pro` | | Legacy pro reasoning |
+| `gpt-5-6` | default | Fast, balanced; general chat (GPT-5.6 Sol) |
+| `gpt-5-6-thinking` | 262K | Extra reasoning steps |
+| `o3-pro` | 196K | Legacy pro reasoning |
 | `agent-mode` | 262K | Autonomous browsing/execution (use `agent` tool) |
+
+GPT-6 Sol / GPT-6 Luna (`gpt-6-sol`, `gpt-6-luna`) are Work & Codex-only — the
+Chat surface silently resolves their slugs to `gpt-5-6` (a *Model note* says so).
+Run `list_models` for the live roster.
 
 Run `list_models` first to see what your account has.
 
@@ -139,4 +142,4 @@ chat(prompt="...", browser=True)
 | Image gen fails | `temporary=True` | Pass `temporary=False` |
 | `gpt_chat` 422 | `g-p-` prefix GPT | Only `g-` prefix supported currently |
 | Heavy DR empty | Connector not enabled | Enable Deep Research in chatgpt.com Settings |
-| `astra-wm` empty | Model behavior | Use `gpt-6-pro` instead |
+| `-wm` slugs resolve to `gpt-5-6` | Work-only working-memory models | Chat serves those slugs via the default model; use `gpt-6-pro` |
