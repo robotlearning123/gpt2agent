@@ -484,7 +484,12 @@ class _MessageDelta:
         p = obj.get("p")
         o = obj.get("o")
         v = obj.get("v")
-        if o == "patch" and isinstance(v, list) and p in (None, ""):
+        if isinstance(v, list) and p in (None, ""):
+            # A batch of sub-ops. The wire usually tags these ``o: "patch"``,
+            # but some frames carry no ``o`` at all (canvas capture
+            # 2026-09-23, A-tools/04_raw_frames_canvas.jsonl) — treat both as
+            # the same batch, otherwise the frame's ops (status flips included)
+            # are silently dropped.
             for sub in v:
                 if isinstance(sub, dict):
                     self.apply(sub)

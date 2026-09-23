@@ -385,3 +385,35 @@ def test_stream_emits_prose_only_on_the_same_frames(
     assert _stdout() not in text
     assert "\n" not in text
     assert [e for e in events if isinstance(e, dict)][-1]["_conversation_id"] == _CONV_ID
+
+
+def test_bare_list_batch_without_o_flag_is_applied() -> None:
+    """A batch frame with no ``o`` key still applies its sub-ops.
+
+    The recorded canvas stream (2026-09-23, live-matrix A-tools capture)
+    carries at least one batch frame with no ``o``; before this fix its status
+    flip and appends were silently dropped and the tool message stayed
+    ``in_progress``.
+    """
+    from gpt2agent import sse as sse_mod
+
+    delta = sse_mod._MessageDelta()
+    delta.reset(
+        {
+            "id": "m1",
+            "author": {"role": "tool", "name": "api_tool.call_tool"},
+            "content": {"content_type": "code", "parts": [""]},
+            "status": "in_progress",
+        }
+    )
+    applied = delta.apply(
+        {
+            "v": [
+                {"p": "/message/content/text", "o": "append", "v": "55\n"},
+                {"p": "/message/status", "o": "replace", "v": "finished_successfully"},
+            ]
+        }
+    )
+    assert applied is True
+    assert delta.message["status"] == "finished_successfully"
+    assert delta.message["content"]["text"].endswith("55\n")
