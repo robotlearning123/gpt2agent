@@ -41,3 +41,6 @@ docs/superpowers/
 
 # embedded worktree gitlinks must never be tracked
 .worktrees/
+
+# Generated fleet reports (untracked artifacts must not dirty the tree)
+artifacts/reports/
