@@ -75,8 +75,10 @@ deep-research pipeline rather than free-form chat.
 
 Three things worth knowing:
 
-- The account's **default slug is `gpt-6-pro`** (410K, pro reasoning). Chat over
-  the backend resolves to it unless you ask for something else.
+- The account's **default slug is `gpt-6-pro`** (410K, pro reasoning) — that is
+  the ChatGPT UI/backend default. gpt2agent's own `chat` tool ships its own
+  default (`gpt-5-6`, configurable via `[models].chat`), so a `chat` call that
+  omits `model=` does **not** use the account default.
 - **Title ≠ slug.** Several slugs carry renamed titles (`gpt-5-6-mini` is titled
   "GPT-5.6 Luna", `gpt-5-6` is titled "GPT-5.6 Sol"). If you key on titles you
   will mis-route; key on slugs.
