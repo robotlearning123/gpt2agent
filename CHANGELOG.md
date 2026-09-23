@@ -4,6 +4,37 @@ All notable changes to this project will be documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [0.0.22] - 2026-09-23
+
+### Changed
+
+- **Model roster synced to the 2026-09-22 GPT-6 release** (README, FAQ,
+  configuration docs, skills, and tool docstrings): GPT-6 Sol (`gpt-6-sol`)
+  and GPT-6 Luna (`gpt-6-luna`) are ChatGPT **Work & Codex-only** — not served
+  on the Chat surface gpt2agent drives. Measured 2026-09-23: Chat requests for
+  `gpt-6-sol`, `gpt-6-luna`, `gpt-6-sol-wm`, or `gpt-6-luna-wm` are silently
+  resolved to `gpt-5-6` and the reply carries the existing *Model note*.
+  Examples no longer name `gpt-5-5-pro` (GPT-5.5 retires across ChatGPT
+  surfaces on 2026-10-14); current examples: `gpt-6-pro` (410K), `gpt-5-6`
+  (GPT-5.6 Sol, default), `gpt-5-6-thinking` (262K), `o3-pro` (196K).
+
+### Fixed
+
+- **Release metadata consistency**: `.claude-plugin/plugin.json` and
+  `server.json` were left at 0.0.20 by the v0.0.21 release commit, so
+  `scripts/verify_release.py` failed on main. Both files now carry the
+  current version.
+
+## [0.0.21] - 2026-09-20
+
+### Changed
+
+- MCP SDK: import-compatible with both `mcp` layout families, but only the
+  pinned range `mcp>=1.27,<2` is supported — `gpt2agent run` under `mcp` 2.x
+  fails at startup (measured 2026-09-23), and CI/tests exercise 1.x only.
+- Monitor: local sentinel-bridge health check per tick (#73); runner health
+  check works under cron (#72).
+
 ## [0.0.20] - 2026-09-19
 
 ### Added
