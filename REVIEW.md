@@ -35,7 +35,10 @@ and any independent reviewer. Every line here traces to a confirmed incident.
 ## Skip lists
 
 - Lockfiles, `dist/`, `build/`, `gpt2agent/_vendored/`, the generated
-  `QA_REPORT.html`, and anything CI already gates (`ci.yml`, `release.yml`).
+  `QA_REPORT.html`, and anything CI already gates (`ci.yml`).
+- **Workflow files are never skipped**: `.github/workflows/release.yml` runs
+  only on a version tag, so nothing else validates it before it can break
+  publishing, permissions, or the release gate.
 
 ## Nits
 
