@@ -62,3 +62,36 @@ def test_power_the_unpatched_call_is_what_crashes() -> None:
     """Power demo: the naive call really does raise on a v2-style ctor."""
     with pytest.raises(TypeError, match="host"):
         _V2Style("gpt2agent", host="127.0.0.1", port=9000, log_level="WARNING")
+
+
+def test_build_server_call_site_uses_the_guard_under_v2_style_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Call-site regression test.
+
+    Pins the actual ``build_server`` construction, not just the helper: a
+    revert to an unconditional ``FastMCP(host=..., port=...)`` call must fail
+    here when the SDK constructor is v2-shaped. The stub is a subclass of the
+    real FastMCP so tool registration still exercises the full code path.
+    """
+    import gpt2agent.backend as backend_mod
+    import gpt2agent.sse as sse_mod
+
+    real = server.FastMCP
+
+    class _V2LikeReal(real):  # type: ignore[misc, valid-type]
+        def __init__(self, name: str, log_level: str | None = None) -> None:
+            super().__init__(name, log_level=log_level)
+
+    monkeypatch.setattr(server, "FastMCP", _V2LikeReal)
+    monkeypatch.setattr(backend_mod, "BackendClient", lambda *a, **k: object())
+    monkeypatch.setattr(sse_mod, "ConversationClient", lambda *a, **k: object())
+
+    cfg = {
+        "server": {"host": "10.0.0.1", "port": 8123},
+        "models": {"chat": "gpt-5-6", "agent": "agent-mode"},
+        "browser": {},
+    }
+    mcp = server.build_server(cfg)
+    assert isinstance(mcp, _V2LikeReal)  # constructed without host/port
+    assert len(mcp._tool_manager._tools) == 30
