@@ -9,7 +9,9 @@ host = "127.0.0.1"
 port = 9000
 
 [models]
-# Default model for the `chat` tool
+# Default model for the `chat` tool ("gpt-5-6" = GPT-5.6 Sol; use "gpt-6-pro"
+# for the Pro tier's deepest Chat model). GPT-6 Sol/Luna slugs are Work &
+# Codex-only.
 chat = "gpt-5-6"
 
 # Override the model for `agent` (default: agent-mode)

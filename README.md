@@ -19,20 +19,21 @@ Zed, and any MCP client.
 
 ---
 
-## Status — REST conversations restored (v0.0.15, 2026-09-17)
+## Status — REST conversations restored (checked 2026-09-23, v0.0.21)
 
-> Checked 2026-09-17 against a live account. Re-check your own account any time
-> with **`gpt2agent doctor`** (below).
+> Re-checked 2026-09-23 against a live account: conversation tools were last
+> live-verified end-to-end 2026-09-17 and `chat` was re-probed 2026-09-23.
+> Re-check your own account any time with **`gpt2agent doctor`** (below).
 
 The Sentinel/Turnstile challenge that blocked conversation tools since 2026-09-08
-is now solved via a **sentinel bridge** (see below). **12 of 16 live-tested tools
-PASS**; 4 have documented limitations.
+is now solved via a **sentinel bridge** (see below). **24 of 29 probed surfaces
+pass `gpt2agent doctor`** (2026-09-23, v0.0.21); the rest are documented below.
 
 | State | Tools |
 |---|---|
-| ✅ **Working (live-verified 2026-09-17)** | `chat` (gpt-6-pro ✅, gpt-5-6 ✅), `agent` ✅, `deep_research` ✅ (inline citations), `code_interpreter` ✅, `canvas_execute` ✅, `generate_image` ✅, `list_models` (21), `account_status`, `list_conversations`, `get_conversation`, `list_custom_gpts` (5), `memory_list` (69), `memory_search`, `list_apps` (98), `list_codex_envs`, `list_codex_tasks`, `list_tasks`, `custom_instructions_get` |
-| ⚠ **Known limitations** | `chat(astra-wm)` — model returns empty for this slug; `gpt_chat` — 422 with `g-p-` prefix GPTs (public/store); `memory_create_via_chat` — model doesn't reliably invoke memory tool; `deep_research_heavy` — connector-dependent, may need Settings → Connectors → Deep Research enabled |
-| ❓ Unverified | `custom_instructions_set`, `codex_task_create` — plain REST writes; not probed (would write to your account) |
+| ✅ **Working (doctor-verified 2026-09-23, v0.0.21; conversation tools live-verified 2026-09-17, chat re-probed 2026-09-23)** | `chat` (gpt-6-pro ✅, gpt-5-6 ✅), `agent` ✅, `deep_research` ✅ (inline citations), `code_interpreter` ✅, `canvas_execute` ✅, `generate_image` ✅, `list_models` (23), `account_status`, `list_conversations` (5), `get_conversation`, `list_custom_gpts` (0), `memory_list` (5), `memory_search`, `list_apps` (107), `list_codex_envs` (0), `list_codex_tasks` (0), `list_tasks` (1), `custom_instructions_get`, `account_limits`, `rate_limit`, `sentinel (bridge)` |
+| ⚠ **Known limitations** | `chat(<Work-only slug>)` — GPT-6 Sol/Luna are Work & Codex-only; on the Chat surface the backend silently resolves their slugs to `gpt-5-6` and the tool appends a **Model note** (measured 2026-09-23); `gpt_chat` — 422 with `g-p-` prefix GPTs (public/store); `memory_create_via_chat` — model does not reliably invoke memory tool; `deep_research_heavy` — connector-dependent, may need Settings → Connectors → Deep Research enabled |
+| ❓ Unverified | `custom_instructions_set`, `codex_task_create` — plain REST writes; `get_file_info`, `get_file_download_url` — need a `file_id`; not probed read-only |
 | 🔇 **Fallback available** | All conversation tools support `manual=True` (zero-network handoff) and `browser=True` (real Chrome via `[browser]` extra) |
 
 ### The sentinel bridge
@@ -72,7 +73,7 @@ It never sends a message, never creates a conversation, and never spends quota.
 
 ## What it does
 
-gpt2agent exposes **25 MCP tools** that forward requests directly to ChatGPT's backend API.
+gpt2agent exposes **30 MCP tools** that forward requests directly to ChatGPT's backend API.
 No proxy process. No separate account. No platform API key. Your `codex login`,
 your token, your quota.
 
@@ -183,13 +184,18 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 
 ---
 
-## Tools (25)
+## Tools (30)
+
+> The tables below document the 25 conversation/account tools that `gpt2agent
+> doctor` covers. The other five — `usage_stats` and the queue tools
+> `queue_submit`, `queue_status`, `queue_result`, `queue_cancel` — are
+> registered but not yet documented here; a `tools/list` call lists all 30.
 
 ### Chat & reasoning
 
 | Tool | Parameters | What it does | Status |
 |---|---|---|---|
-| `chat` | `prompt`, `model`, `temporary`, `manual`, `browser` | Talk to any model on your account (`gpt-5-6` default, override via `model=`). Pass `gpt-6-pro` (410K), `gpt-6-astra-wm` (262K + working-memory), `o3-pro`, … | ✅ **live-verified** (gpt-6-pro, gpt-5-6) |
+| `chat` | `prompt`, `model`, `temporary`, `manual`, `browser` | Talk to any model on your account (`gpt-5-6` = GPT-5.6 Sol, default; override via `model=`). Pass `gpt-6-pro` (410K), `gpt-5-6-thinking` (262K), `o3-pro` (196K), … | ✅ **live-verified** (gpt-6-pro, gpt-5-6) |
 | `agent` | `prompt`, `manual`, `browser` | **Agent Mode** — 262K context with autonomous browsing, code execution, tool use | ✅ **live-verified** |
 | `deep_research` | `query`, `auto_confirm`, `manual`, `browser` | Web-augmented research with **inline `[N](url)` citations** (~30–120 s) | ✅ **live-verified** (incl. citations) |
 | `deep_research_heavy` | `query`, `auto_confirm`, `manual`, `browser` | Long-form DR via `gpt-6-pro` + connector (5–30 min, monthly quota) | ⚠ connector-dependent |
@@ -210,26 +216,26 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 | `generate_image` | Generate images via ChatGPT's built-in DALL-E. Returns download URLs + metadata (uses `temporary=False` internally) | ✅ **live-verified** |
 | `code_interpreter` | Run Python in ChatGPT's sandbox. Returns output + charts/images (uses `temporary=False` internally) | ✅ **live-verified** |
 | `canvas_execute` | Execute code via ChatGPT's Canvas feature (uses `temporary=False` internally) | ✅ **live-verified** |
-| `get_file_info` | Metadata for any ChatGPT file | ✅ |
-| `get_file_download_url` | Temporary download URL (~1h expiry) | ✅ |
+| `get_file_info` | Metadata for any ChatGPT file (needs a `file_id`) | ✅ |
+| `get_file_download_url` | Temporary download URL (~1h expiry; needs a `file_id`) | ✅ |
 
 ### Account introspection
 
 | Tool | What it does | Status |
 |---|---|---|
 | `account_status` | Plan, country, groups, feature count, subscription expiry | ✅ |
-| `list_models` | All models (slug, max_tokens, reasoning_type, capabilities, thinking_efforts) | ✅ (21 models) |
+| `list_models` | All models (slug, max_tokens, reasoning_type, capabilities, thinking_efforts) | ✅ (23 models, 2026-09-23) |
 | `list_conversations` | Recent conversations (titles: emails/phones redacted); `limit` parameter | ✅ |
 | `get_conversation` | Full message history (multimodal, code, images, DR widget-state reports) | ✅ |
 | `list_tasks` | Scheduled / completed ChatGPT tasks | ✅ |
-| `list_apps` | Connected apps + connectors (bare-id shape with type classification) | ✅ (98) |
-| `list_custom_gpts` | Your private GPTs (id, display_name, description, short_url) | ✅ (5) |
+| `list_apps` | Connected apps + connectors (bare-id shape with type classification) | ✅ (107) |
+| `list_custom_gpts` | Your private GPTs (id, display_name, description, short_url) | ✅ (0) |
 
 ### Memory & instructions
 
 | Tool | What it does | Status |
 |---|---|---|
-| `memory_list` | List all ChatGPT memories | ✅ (69) |
+| `memory_list` | List all ChatGPT memories | ✅ (5) |
 | `memory_search` | Keyword filter over memories (`query` parameter) | ✅ |
 | `memory_create_via_chat` | Add a memory (model-initiated workaround — POST `/memories` is 405) | ⚠ model-dependent |
 | `custom_instructions_get` | Read your current `about_user` / `about_model` | ✅ |
@@ -271,7 +277,7 @@ $CODEX_HOME/auth.json (default ~/.codex/auth.json) ← auto-refreshed by Codex
    │  curl_cffi → chatgpt.com/backend-api/*          │
    └────────────────────────────────────────────────┘
         |
-   25 MCP tools  (chat, agent, DR ×2, GPT chat, image gen,
+   30 MCP tools  (chat, agent, DR ×2, GPT chat, image gen,
                   code interpreter, canvas, memory r/w,
                   instructions r/w, codex r/w, account introspect)
 ```
@@ -298,7 +304,7 @@ host = "127.0.0.1"   # loopback only; the HTTP transport is UNAUTHENTICATED
 port = 9000
 
 [models]
-chat     = "gpt-5-6"        # default for chat tool
+chat     = "gpt-5-6"        # default for chat tool (GPT-5.6 Sol; e.g. "gpt-6-pro")
 agent    = "agent-mode"     # default for agent tool
 heavy_dr = "gpt-6-pro"      # override slug for deep_research_heavy
 
@@ -327,8 +333,7 @@ Key rules:
 
 - **`gpt_chat`** with `g-p-` prefix GPTs (public/store) returns 422 — the
   `conversation_origin` payload was reverse-engineered for `g-` prefix only.
-- **`chat(astra-wm)`** returns empty — the model may need special system hints
-  for working-memory mode.
+- **`chat(<Work-only slug>)`** — GPT-6 Sol and GPT-6 Luna are served on ChatGPT **Work and Codex only** (not Chat). Measured 2026-09-23: Chat-surface requests for `gpt-6-sol`, `gpt-6-luna`, `gpt-6-sol-wm`, or `gpt-6-luna-wm` are silently served by `gpt-5-6`, and the tool appends a *Model note* naming the resolved slug. Use `gpt-6-pro` for the deepest Chat model.
 - **`memory_create_via_chat`** depends on the model choosing to invoke the
   memory tool; it doesn't always do so from a plain-text prompt.
 - **`deep_research_heavy`** depends on the DR connector — check

@@ -38,9 +38,10 @@ def register(mcp, client: BackendClient) -> None:
         """List the models available on your account.
 
         Returns a list of model dicts; the `slug` field of each (e.g.
-        "gpt-5-5-pro", "o3-pro") is exactly what you pass as `model=` to the
-        `chat` tool. Other keys: title, description, max_tokens, reasoning_type,
-        capabilities, enabled_tools.
+        "gpt-6-pro", "gpt-5-6", "o3-pro") is exactly what you pass as `model=`
+        to the `chat` tool — though some exposed slugs (e.g. the Work-only
+        GPT-6 Sol/Luna) are not served on this Chat surface. Other keys: title,
+        description, max_tokens, reasoning_type, capabilities, enabled_tools.
         """
         data = await async_get(
             client,
