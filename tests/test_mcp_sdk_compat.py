@@ -64,6 +64,34 @@ def test_power_the_unpatched_call_is_what_crashes() -> None:
         _V2Style("gpt2agent", host="127.0.0.1", port=9000, log_level="WARNING")
 
 
+def test_guard_falls_back_when_signature_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exotic callables must not crash startup either.
+
+    ``inspect.signature`` raises TypeError/ValueError for some callables; the
+    guard then serves the kwargs every SDK accepts instead of failing.
+    """
+
+    def _no_signature(*_a: object, **_k: object) -> None:
+        raise ValueError("no signature available")
+
+    monkeypatch.setattr(server.inspect, "signature", _no_signature)
+    assert server._fastmcp_kwargs({"host": "10.0.0.1", "port": 8123}) == {
+        "log_level": "WARNING"
+    }
+
+
+def test_http_transport_refuses_when_bind_cannot_be_honored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under a v2-shaped SDK the HTTP branch must refuse, not mis-bind."""
+    monkeypatch.setattr(server, "FastMCP", _V2Style)
+    assert server._http_sdk_bind_supported({}) is False
+    monkeypatch.setattr(server, "FastMCP", _V1Style)
+    assert server._http_sdk_bind_supported({}) is True
+
+
 def test_build_server_call_site_uses_the_guard_under_v2_style_sdk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

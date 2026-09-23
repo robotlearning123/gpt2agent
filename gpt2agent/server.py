@@ -147,13 +147,24 @@ def _fastmcp_kwargs(srv: dict[str, Any]) -> dict[str, Any]:
     kwargs: dict[str, Any] = {"log_level": "WARNING"}
     try:
         params = inspect.signature(FastMCP.__init__).parameters
-    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+    except (TypeError, ValueError):
         return kwargs
     if "host" in params:
         kwargs["host"] = str(srv.get("host", "127.0.0.1"))
     if "port" in params:
         kwargs["port"] = int(srv.get("port", 9000))
     return kwargs
+
+
+def _http_sdk_bind_supported(srv: dict[str, Any]) -> bool:
+    """Whether the HTTP transport can honor the configured bind on this SDK.
+
+    mcp 1.x takes ``host``/``port`` on the constructor; 2.x moved them to
+    ``run()``/the app factories, which this build does not route yet — so
+    under 2.x ``mcp.run(transport="streamable-http")`` would silently bind the
+    SDK default and the loopback guard would no longer describe the real bind.
+    """
+    return "host" in _fastmcp_kwargs(srv)
 
 
 def build_server(cfg: dict[str, Any]) -> FastMCP:
@@ -945,6 +956,15 @@ def main() -> None:
     else:
         host = cfg["server"]["host"]
         port = cfg["server"]["port"]
+        if not _http_sdk_bind_supported(cfg["server"]):
+            raise SystemExit(
+                f"Refusing to start the HTTP transport on this mcp SDK: it no longer "
+                f"accepts host/port on the server constructor, so the configured bind "
+                f"{host}:{port} would be silently ignored and the SDK default served "
+                f"instead.\n"
+                f"  • Install the pinned range: pip install 'mcp>=1.27,<2'\n"
+                f"  • Or use stdio: gpt2agent run --stdio"
+            )
         # The HTTP transport has NO authentication and proxies a full ChatGPT
         # account (read history, spend DR quota, overwrite custom instructions,
         # launch Codex tasks). Refuse to bind a non-loopback interface unless the

@@ -14,9 +14,11 @@ versioning: [SemVer](https://semver.org/).
   `TypeError: MCPServer.__init__() got an unexpected keyword argument 'host'`
   (observed with `mcp` 2.2.0, 2026-09-23). The kwargs are now passed only when
   the installed SDK's constructor takes them. `mcp>=1.27,<2` remains the
-  supported range; stdio startup, tool listing and tool calls were verified
-  locally under 2.2.0 with this guard (the HTTP transport is not exercised
-  under 2.x).
+  supported range. Under 2.2.0, stdio startup, tool listing and tool calls
+  were verified locally with this guard; the HTTP transport now refuses to
+  start under 2.x with an actionable message instead of silently binding the
+  SDK default (2.x moved `host`/`port` from the constructor to `run()`, which
+  this build does not route yet).
 
 ## [0.0.22] - 2026-09-23
 
