@@ -41,6 +41,11 @@ python -m gpt2agent run             # start MCP server (stdio)
 - Release gate: `scripts/release-emulation-test.sh <worktree>` (11 checks)
 - Parameter contracts: `tests/test_param_matrix.py` (34 cases)
 
+## Review
+
+Non-trivial diffs follow [REVIEW.md](REVIEW.md) — repo-specific always-check
+rules and the verification bar for reviewers.
+
 ## Release
 
 1. Bump version in 4 files: pyproject.toml, __init__.py, plugin.json, server.json
