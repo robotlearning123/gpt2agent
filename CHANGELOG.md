@@ -19,6 +19,49 @@ versioning: [SemVer](https://semver.org/).
   start under 2.x with an actionable message instead of silently binding the
   SDK default (2.x moved `host`/`port` from the constructor to `run()`, which
   this build does not route yet).
+- **Heavy Deep Research shipped the connector's 160-char acknowledgement
+  instead of the report**: the live payload (2026-09-23, real Pro account,
+  lane `A-dr-heavy`) carries the DR start resource as
+  `/connector_openai_deep_research/start`, while `_dr_report_from_widget_state`
+  demanded the `implicit_link::` long form — so the widget report was never
+  read and both the SSE stream and the Phase-2 poll returned the async ack
+  ("Deep Research has started working on this.", 160 chars) as the answer. The
+  carrier check is now connector-scoped (the `tool`-node envelope and the
+  completed widget/report status gates are unchanged), the ack no longer ends
+  the stream, and `_poll_dr_completion` skips it and keeps polling (bounded by
+  `max_wait`, default 1800 s). Re-reading the recorded conversation with the
+  fixed code returns the real report: 3388 chars / 411 words /
+  9 content_references. The SDK provenance gate also accepts payloads without
+  `chatgpt_sdk.connector_type` (account B omits it with every other identity
+  field present — measured 2026-09-23; B's recorded run extracts 2507 chars /
+  8 references with the fix, and 0 with the pre-fix extractor).
+- **Empty replies on `gpt-6-pro` and other `stream_handoff` turns**: the
+  upstream stream can end a turn with a `stream_handoff` frame
+  (`resume_sse_endpoint` / `subscribe_ws_topic`) and never deliver the
+  assistant text on the SSE stream, while the answer IS persisted in the
+  conversation — the client returned an empty string with `status: ok`
+  (measured on both live accounts, 2026-09-23: 3/3 and 2/2). `complete()` now
+  detects the frame and, only when the stream produced no text, polls the
+  conversation for the persisted answer (bounded by `_poll_async_response`'s
+  300 s default, so such a turn waits instead of returning empty).
+- **Empty tool returns on the `/f/conversation` v1-delta path**
+  (`code_interpreter`, `canvas_execute`): the delta wire carries tool content
+  as `/message/content/text` patch frames and batch patches, which `stream()`
+  applied but `tool_call()` did not, so the tool returned `text=""` /
+  `parts=[]` even though the run had succeeded (account A stdout `302`,
+  account B answer `42`). Both readers now share one patch applier
+  (`_apply_message_patch`).
+
+### Known upstream issues (no client fix; raw frames captured 2026-09-23)
+
+- **`deep_research` (light) fails on both accounts**: the `research`-model turn
+  is accepted, then aborted ~4 s in with an in-band
+  `{"error": "Error in message stream"}` and is never persisted — not the
+  handoff class, unaffected by `auto_confirm`, consumes no DR quota (the
+  counters did not move across the failures). Retry when upstream recovers.
+- **Canvas is retired upstream**: `canvas_execute` returns the model's own
+  deprecation notice ("Canvas is deprecated…") instead of creating a canvas
+  document; no canvas node is produced any more. Use `code_interpreter`.
 
 ## [0.0.22] - 2026-09-23
 
