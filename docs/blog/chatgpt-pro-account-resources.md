@@ -80,20 +80,23 @@ Three things worth knowing:
 - **Title ≠ slug.** Several slugs carry renamed titles (`gpt-5-6-mini` is titled
   "GPT-5.6 Luna", `gpt-5-6` is titled "GPT-5.6 Sol"). If you key on titles you
   will mis-route; key on slugs.
-- The `-wm` (working-memory) slugs are listed but are **not served on the Chat
-  surface**: measured on this account, Chat requests for `gpt-6-sol-wm`,
-  `gpt-6-luna-wm`, and `gpt-6-astra-wm` (and the plain `gpt-6-sol` /
-  `gpt-6-luna`) were answered by `gpt-5-6` instead. The other four work-mode
-  slugs were not completion-probed. Officially, GPT-6 Sol and GPT-6 Luna are
-  ChatGPT **Work and Codex-only** — "They aren't available in Chat"
-  ([ChatGPT models page](https://learn.chatgpt.com/docs/models)). A tool that
-  does not compare the *resolved* model against the *requested* one will
-  silently report the wrong model's answer.
+- The `-wm` (working-memory) slugs are listed, but the three that were probed —
+  `gpt-6-sol-wm`, `gpt-6-luna-wm`, `gpt-6-astra-wm` (and plain `gpt-6-sol` /
+  `gpt-6-luna`) — were answered by `gpt-5-6` on Chat instead, with the client
+  noting the substitution. The other four work-mode slugs were not
+  completion-probed, and a substituted answer alone does not prove a product
+  block; the one official availability statement in play covers Sol and Luna:
+  GPT-6 Sol and GPT-6 Luna are ChatGPT **Work and Codex-only** — "They aren't
+  available in Chat" ([ChatGPT models
+  page](https://learn.chatgpt.com/docs/models)). A tool that does not compare
+  the *resolved* model against the *requested* one will silently report the
+  wrong model's answer.
 
 Also on the clock: **GPT-5.5 retires from ChatGPT, ChatGPT Work, and Codex on
 2026-10-14**; the OpenAI API is unaffected
-([same page](https://learn.chatgpt.com/docs/models)). The `gpt-5-5*` slugs are
-counted days from being unserved on these surfaces.
+([same page](https://learn.chatgpt.com/docs/models)). The official note names
+`gpt-5.5`; the `gpt-5-5*` and `gpt-5.5-wm` rows above belong to that line —
+check the note for the exact per-variant list before pinning any of them.
 
 ## 3. Capabilities and their real quotas
 
@@ -103,7 +106,7 @@ with its own reset time. Measured on this account:
 | Resource | Where it comes from | Measured value |
 |---|---|---|
 | Deep research (light) | `limits_progress` counter | **181 remaining**, resets 2026-10-17 (~24 days after this reading) |
-| Deep research (heavy) | separate budget | **no counter reported** (`heavy_remaining: null`); the connector's own error is the authority |
+| Deep research (heavy) | separate budget | **no counter reported** (`heavy_remaining: null`) — this snapshot cannot say what gates it |
 | Image generation | `limits_progress` counter | **1,000 remaining**, resets 2026-09-24 (~24 h after this reading) |
 | Memory storage | `/backend-api/memories` | **455 tokens used of a 5,000,000-token budget** (5 entries) |
 | Per-model caps | `model_limits` | **none active** (`capped: []`) — no model currently throttled |
@@ -145,7 +148,8 @@ rather than just chat.
 Wrapped as an MCP server (stdio or streamable-HTTP transport), the surfaces
 above become **30 tools**. The conversation tools:
 
-`chat` · `agent` (browsing + code execution, 262K context) · `deep_research`
+`chat` · `agent` (browsing + code execution; the project docs describe a 262K
+context) · `deep_research`
 (inline citations) · `deep_research_heavy` (connector-backed) · `gpt_chat`
 (your Custom GPTs) · `code_interpreter` · `canvas_execute` · `generate_image` ·
 `memory_create_via_chat`
