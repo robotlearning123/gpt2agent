@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import logging
 import os
@@ -135,6 +136,26 @@ def _dr_incomplete_note(timed_out: bool) -> str:
     return note + ". Retry, or use get_conversation to check for a fuller report."
 
 
+def _fastmcp_kwargs(srv: dict[str, Any]) -> dict[str, Any]:
+    """Constructor kwargs accepted by whichever MCP SDK is installed.
+
+    mcp 1.x (``FastMCP``) takes ``host``/``port``; 2.x (``MCPServer``, which
+    ``FastMCP`` aliases) dropped them — they moved to the run()/app factories —
+    so passing them unconditionally crashed ``gpt2agent run`` at startup
+    (measured against mcp 2.2.0, 2026-09-23).
+    """
+    kwargs: dict[str, Any] = {"log_level": "WARNING"}
+    try:
+        params = inspect.signature(FastMCP.__init__).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callables
+        return kwargs
+    if "host" in params:
+        kwargs["host"] = str(srv.get("host", "127.0.0.1"))
+    if "port" in params:
+        kwargs["port"] = int(srv.get("port", 9000))
+    return kwargs
+
+
 def build_server(cfg: dict[str, Any]) -> FastMCP:
     srv = cfg["server"]
     models = cfg["models"]
@@ -158,12 +179,7 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
     _backend = BackendClient()
     conv = ConversationClient(_backend)
 
-    mcp = FastMCP(
-        "gpt2agent",
-        host=str(srv.get("host", "127.0.0.1")),
-        port=int(srv.get("port", 9000)),
-        log_level="WARNING",
-    )
+    mcp = FastMCP("gpt2agent", **_fastmcp_kwargs(srv))
 
     chat_model = models.get("chat", "gpt-5-6")
     agent_model = models.get("agent", "agent-mode")

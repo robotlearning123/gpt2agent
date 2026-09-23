@@ -4,6 +4,20 @@ All notable changes to this project will be documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **`gpt2agent run` crashed at startup when `mcp` 2.x was present**: the
+  server constructor passed `host`/`port` unconditionally, and 2.x's
+  `MCPServer` (the renamed `FastMCP`) no longer accepts them — startup raised
+  `TypeError: MCPServer.__init__() got an unexpected keyword argument 'host'`
+  (observed with `mcp` 2.2.0, 2026-09-23). The kwargs are now passed only when
+  the installed SDK's constructor takes them. `mcp>=1.27,<2` remains the
+  supported range; stdio startup, tool listing and tool calls were verified
+  locally under 2.2.0 with this guard (the HTTP transport is not exercised
+  under 2.x).
+
 ## [0.0.22] - 2026-09-23
 
 ### Changed
