@@ -186,10 +186,10 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 
 ## Tools (30)
 
-> The tables below document the 25 conversation/account tools. The other five —
-> `usage_stats` and the queue tools `queue_submit`, `queue_status`,
-> `queue_result`, `queue_cancel` — are registered but not yet documented here;
-> `gpt2agent doctor` lists all 30.
+> The tables below document the 25 conversation/account tools that `gpt2agent
+> doctor` covers. The other five — `usage_stats` and the queue tools
+> `queue_submit`, `queue_status`, `queue_result`, `queue_cancel` — are
+> registered but not yet documented here; a `tools/list` call lists all 30.
 
 ### Chat & reasoning
 

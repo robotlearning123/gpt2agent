@@ -54,7 +54,7 @@ return your plan and feature count.
 
 ## 5. First calls
 
-- `chat` — talk to any model on your account (`model="gpt-5-5-pro"`, `o3-pro`, …).
+- `chat` — talk to any model on your account (`model="gpt-6-pro"`, `o3-pro`, …).
 - `deep_research` — web-augmented research with citations (~1 min).
 - `generate_image` — DALL·E image generation.
 
