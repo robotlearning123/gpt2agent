@@ -136,7 +136,7 @@ Beyond conversations, a Pro account carries several addressable stores:
 | Conversations | 5 recent (list capped at `limit=5`) | full message history, multimodal, incl. deep-research reports |
 | Tasks | 1 | scheduled/completed task runs with prompt and final message |
 | Memory entries | 5 | the persistent memory store (5M-token budget above) |
-| Custom GPTs | 0 | private `g-p-` GPTs (this account has none) |
+| Custom GPTs | 0 | private Custom GPTs (this account has none) |
 | Codex environments / tasks | 0 / 0 | Codex cloud workspaces and their runs |
 
 Counts are per account — and the conversation count is a probe artifact: the
@@ -187,6 +187,10 @@ gpt2agent doctor     # which surfaces answer right now (no quota spent)
 gpt2agent usage      # quotas, counters, resets, subscription state
 # and from an MCP client: the list_models and usage_stats tools
 ```
+
+The memory-budget figures come from the same endpoint `memory_list` reads
+(`/backend-api/memories`): the tool returns the entries, and the budget fields
+(`memory_num_tokens`, `memory_max_tokens`) ride along in the raw response.
 
 A final warning that belongs in any inventory of this kind: this access path is
 unofficial, and automating it can get an account rate-limited or banned. Keep
