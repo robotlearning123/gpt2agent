@@ -216,8 +216,8 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 | `generate_image` | Generate images via ChatGPT's built-in DALL-E. Returns download URLs + metadata (uses `temporary=False` internally) | ✅ **live-verified** |
 | `code_interpreter` | Run Python in ChatGPT's sandbox. Returns output + charts/images (uses `temporary=False` internally) | ✅ **live-verified** |
 | `canvas_execute` | Execute code via ChatGPT's Canvas feature (uses `temporary=False` internally) | ✅ **live-verified** |
-| `get_file_info` | Metadata for any ChatGPT file | ✅ |
-| `get_file_download_url` | Temporary download URL (~1h expiry) | ✅ |
+| `get_file_info` | Metadata for any ChatGPT file (needs a `file_id`) | ✅ |
+| `get_file_download_url` | Temporary download URL (~1h expiry; needs a `file_id`) | ✅ |
 
 ### Account introspection
 

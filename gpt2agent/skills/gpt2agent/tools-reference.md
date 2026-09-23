@@ -37,7 +37,7 @@ Source: `gpt2agent/server.py` and `gpt2agent/tools/*.py`.
 - **Notes**:
   - `temporary=True` (default) means the conversation is ephemeral -- not saved to ChatGPT history, cannot use image gen / code interpreter / canvas.
   - If you need tool-based features (image gen, code interpreter, canvas), you **must** pass `temporary=False`.
-  - Available model slugs depend on your subscription tier. Pro plan unlocks `gpt-6-pro`, `o3-pro`, etc. GPT-5.5 retires on 2026-10-14; GPT-6 Sol/Luna are Work & Codex-only.
+  - Available model slugs depend on your subscription tier. Pro plan unlocks `gpt-6-pro`, `o3-pro`, etc. GPT-5.5 retires from ChatGPT surfaces (not the OpenAI API) on 2026-10-14; GPT-6 Sol/Luna are Work & Codex-only.
 
 ---
 

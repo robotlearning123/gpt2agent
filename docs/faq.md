@@ -35,8 +35,8 @@ Not through the Chat surface. OpenAI docs (2026-09-22) put GPT-6 Sol
 they are not available in Chat. Measured 2026-09-23: a Chat request for
 `gpt-6-sol`, `gpt-6-luna`, or their `-wm` variants is silently served by
 `gpt-5-6`, and the reply carries a *Model note* naming the resolved slug. Use
-`gpt-6-pro` / `gpt-5-6` for Chat work; Codex-side work goes through the Codex
-tools.
+`gpt-6-pro` / `gpt-5-6` for Chat work; the ChatGPT Work and Codex apps are
+where Sol and Luna are selectable.
 
 ### How much Deep Research can I run?
 

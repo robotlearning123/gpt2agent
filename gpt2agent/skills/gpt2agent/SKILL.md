@@ -142,4 +142,4 @@ chat(prompt="...", browser=True)
 | Image gen fails | `temporary=True` | Pass `temporary=False` |
 | `gpt_chat` 422 | `g-p-` prefix GPT | Only `g-` prefix supported currently |
 | Heavy DR empty | Connector not enabled | Enable Deep Research in chatgpt.com Settings |
-| `-wm` slugs resolve to `gpt-5-6` | Work-only working-memory models | Chat serves those slugs via the default model; use `gpt-6-pro` |
+| `-wm` slugs resolve to `gpt-5-6` | Work-only working-memory models | Measured 2026-09-23 for `gpt-6-sol-wm`, `gpt-6-luna-wm`, `gpt-6-astra-wm`; other work-mode slugs not probed |
