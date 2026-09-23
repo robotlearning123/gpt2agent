@@ -166,7 +166,12 @@ _WIDGET_STATE_TEXT_PREFIX = "The latest state of the widget is: "
 _DR_APP_RESOURCE = "Deep Research App_start"
 _DR_CONNECTOR_ID = "connector_openai_deep_research"
 _DR_CONNECTOR_URI = f"connectors://{_DR_CONNECTOR_ID}"
-_DR_RESOURCE_URI = f"/{_DR_CONNECTOR_ID}/implicit_link::{_DR_CONNECTOR_ID}/start"
+#: Scope of the connector's ``start`` tool resource. Fixtures and logs carried
+#: the long ``implicit_link::`` form, the live surface sends the plain
+#: ``/connector_openai_deep_research/start`` — both sit under this prefix
+#: (artifacts/verify/live-matrix-2026-09-23/A-dr-heavy/conversation_state.json
+#: node 936145e2; the exact-equality check returned ("", []) on that payload).
+_DR_RESOURCE_URI_PREFIX = f"/{_DR_CONNECTOR_ID}/"
 _DR_WIDGET_EXCLUSIVE_KEY = f"widget_state:{_DR_APP_RESOURCE}"
 
 
@@ -214,6 +219,12 @@ def _dr_report_from_widget_state(detail: dict | None) -> tuple[str, list]:
       provenance validation, not cryptographic authentication; the payload itself
       is unsigned and can still contain incorrect or prompt-injected research.
     * The text carrier must *start with* the prefix, not merely contain it.
+    * ``invoked_resource.resource_uri`` is matched by connector *scope*
+      (``/connector_openai_deep_research/…``), not by exact string: the live
+      surface sends ``…/start`` where the fixtures carried the
+      ``implicit_link::`` long form (A-dr-heavy 2026-09-23). What selects the
+      report stays structural — the widget state and its ``report_message``
+      must both carry their explicit completed values.
     * An in-progress draft is ignored: both the top-level widget status and the
       nested report status must carry their explicit completed values, so polling
       never emits a half-written report as the final answer.
@@ -261,9 +272,16 @@ def _dr_report_from_widget_state(detail: dict | None) -> tuple[str, list]:
             and sdk.get("attribution_id") == _DR_CONNECTOR_ID
             and sdk.get("resolved_pineapple_uri") == _DR_CONNECTOR_URI
             and sdk.get("distribution_channel") == "openai"
-            and sdk.get("connector_type") == "FIRST_PARTY_ECOSYSTEM"
+            # ``connector_type`` rides along on some accounts and is omitted on
+            # others (measured 2026-09-23: account A carries
+            # "FIRST_PARTY_ECOSYSTEM", account B omits it with every other
+            # identity field identical). The resource_name / attribution_id /
+            # resolved_pineapple_uri / invoked_resource checks above already pin
+            # this to the Deep Research connector, so accept either shape.
+            and sdk.get("connector_type") in (None, "FIRST_PARTY_ECOSYSTEM")
             and isinstance(invoked_resource, dict)
-            and invoked_resource.get("resource_uri") == _DR_RESOURCE_URI
+            and isinstance(invoked_resource.get("resource_uri"), str)
+            and invoked_resource["resource_uri"].startswith(_DR_RESOURCE_URI_PREFIX)
             and sdk.get("widget_state") is not None
         ):
             carriers.append(sdk["widget_state"])
@@ -318,6 +336,17 @@ def _ensure_list_slot(seq: list, part: str, value_factory):
     return seq[idx]
 
 
+def _append_value(existing, value):
+    """`append` semantics for one patched slot: lists extend, strings
+    concatenate (``/message/content/text`` and ``/message/content/parts/0``
+    accumulate), anything else is replaced."""
+    if isinstance(existing, list):
+        return [*existing, value]
+    if isinstance(existing, str) and isinstance(value, str):
+        return existing + value
+    return value
+
+
 def _merge_metadata_path(meta: dict, path: str, op: str, value) -> dict:
     if path == "/message/metadata":
         if op in ("append", "patch") and isinstance(value, dict):
@@ -352,13 +381,7 @@ def _merge_metadata_path(meta: dict, path: str, op: str, value) -> dict:
     key = parts[-1]
     if isinstance(cur, dict):
         if op == "append":
-            existing = cur.get(key)
-            if isinstance(existing, list):
-                cur[key] = [*existing, value]
-            elif isinstance(existing, str) and isinstance(value, str):
-                cur[key] = existing + value
-            else:
-                cur[key] = value
+            cur[key] = _append_value(cur.get(key), value)
         elif op == "patch" and isinstance(value, dict) and isinstance(cur.get(key), dict):
             cur[key] = {**cur[key], **value}
         else:
@@ -374,8 +397,138 @@ def _merge_metadata_path(meta: dict, path: str, op: str, value) -> dict:
     return out
 
 
+def _apply_message_patch(msg: dict, path: str, op: str | None, value):
+    """Apply one ``/f/conversation`` v1-delta patch op onto *msg*, in place.
+
+    The v1 encoding never resends a message: content arrives as JSON-pointer
+    ops — ``/message/content/text`` for code-interpreter/canvas payloads and
+    ``/message/content/parts/0`` for assistant prose. The ``metadata`` subtree
+    keeps the ``_merge_metadata_path`` shape; every other field is walked
+    generically. Returns the value now at the patched slot — a caller can emit
+    the delta the op produced — or None when the op could not be applied.
+    """
+    parts = _pointer_parts(path, "/message/")
+    if not parts:
+        return None
+    if parts[0] == "metadata":
+        meta = msg.get("metadata")
+        if not isinstance(meta, dict):
+            meta = {}
+        msg["metadata"] = _merge_metadata_path(meta, path, op or "replace", value)
+        return msg["metadata"]
+
+    cur: dict | list = msg
+    for i, part in enumerate(parts[:-1]):
+        next_part = parts[i + 1]
+        if isinstance(cur, dict):
+            nxt = cur.get(part)
+            if not isinstance(nxt, (dict, list)):
+                nxt = _new_container(next_part)
+                cur[part] = nxt
+            cur = nxt
+        elif isinstance(cur, list):
+            nxt = _ensure_list_slot(cur, part, lambda: _new_container(next_part))
+            if nxt is None:
+                return None
+            cur = nxt
+        else:
+            return None
+
+    key = parts[-1]
+    if isinstance(cur, dict):
+        existing = cur.get(key)
+        if op == "append":
+            cur[key] = _append_value(existing, value)
+        elif op == "patch" and isinstance(value, dict) and isinstance(existing, dict):
+            cur[key] = {**existing, **value}
+        else:
+            cur[key] = value
+        return cur[key]
+    if isinstance(cur, list):
+        if key == "-":
+            cur.append(value)
+            return value
+        if not key.isdigit():
+            return None
+        idx = int(key)
+        while len(cur) <= idx:
+            cur.append(None)
+        cur[idx] = _append_value(cur[idx], value) if op == "append" else value
+        return cur[idx]
+    return None
+
+
+class _MessageDelta:
+    """The message currently streaming on the ``/f/conversation`` v1 wire.
+
+    Content is not resent inside whole messages: it arrives as patch frames —
+    ``/message/content/text`` appends carry the code interpreter's code and
+    its execution output, ``/message/content/parts/0`` carries assistant prose
+    — either batched under ``{"p": "", "o": "patch", "v": [...]}`` or
+    continued by bare ``{"v": str}`` chunks. Applying them is shared with
+    ``stream()`` through :func:`_apply_message_patch`; a reader that only looks
+    at the `add` envelopes sees empty parts (live-matrix 2026-09-23).
+    """
+
+    def __init__(self) -> None:
+        self.message: dict = {}
+        self.last_path: str | None = None
+
+    def reset(self, message: dict) -> None:
+        """Start a new message from its ``add`` envelope."""
+        self.message = message
+        self.last_path = None
+
+    def apply(self, obj: dict) -> bool:
+        """Apply one frame in place; False when it carried no patch op."""
+        p = obj.get("p")
+        o = obj.get("o")
+        v = obj.get("v")
+        if o == "patch" and isinstance(v, list) and p in (None, ""):
+            for sub in v:
+                if isinstance(sub, dict):
+                    self.apply(sub)
+            return True
+        if isinstance(p, str) and p:
+            self.last_path = p
+            _apply_message_patch(self.message, p, o, v)
+            return True
+        if isinstance(v, str) and v and self.last_path:
+            # Bare chunk continuing the last patched path.
+            _apply_message_patch(self.message, self.last_path, "append", v)
+            return True
+        return False
+
+
 def _is_connector_dispatch_text(text: str) -> bool:
     return text.startswith('{"path":') and "connector_openai_deep_research" in text
+
+
+#: Opening words of the connector's async acknowledgement. Its own instruction
+#: pins the wording — ``invoked_resource.description`` on the live payload:
+#: "After calling this tool, do NOT directly respond to the user's query.
+#: Instead let the user know that Deep research has started working on their
+#: query. It will start by giving them a plan and then will continue to research
+#: the user's query. … The final report will be displayed in the Deep Research
+#: app widget." The model paraphrases the tail, so only the claim is matched.
+_DR_ASYNC_ACK_PREFIXES = (
+    "deep research has started",
+    "deep research is starting",
+)
+
+
+def _is_dr_async_ack(text: str) -> bool:
+    """True for the Deep Research async start acknowledgement (not the report).
+
+    Observed live (A-dr-heavy 2026-09-23, 160 chars): "Deep Research has started
+    working on this. It will first show its research plan, then produce the
+    under-400-word answer with the three papers and citation list." That node
+    reaches ``finished_successfully`` like a real answer although the report
+    only lands later in ``widget_state.report_message``; delivering the ack as
+    the final text was the live defect (shipped surface returned the 160-char
+    ack while the 3388-char report sat unread in the widget state).
+    """
+    return text.lstrip().lower().startswith(_DR_ASYNC_ACK_PREFIXES)
 
 
 def _connector_hint(connector_id: str) -> str:
@@ -917,12 +1070,14 @@ class ConversationClient:
 
             current_msg_id: str | None = None
             last_text = ""
+            _cur_msg: dict = {}  # message the f/ patch frames apply onto
             _conversation_id: str | None = None
             _resolved_model: str | None = None
             _banner: dict | None = None
             _last_patch_path: str | None = None
             done_received = False
             message_completed = False
+            _stream_handoff = False
             emit: list[str] = []
 
             def _reset_if_new_msg(msg_id: str | None) -> bool:
@@ -944,7 +1099,7 @@ class ConversationClient:
                 """A full message object — v-patch envelope, patch ``add`` op,
                 or Format-B frame. Only assistant text/multimodal parts emit;
                 the user's own message echo must never reach the output."""
-                nonlocal last_text
+                nonlocal last_text, _cur_msg
                 _track_message_lifecycle(vmsg)
                 if (vmsg.get("author") or {}).get("role") != "assistant":
                     return
@@ -954,6 +1109,7 @@ class ConversationClient:
                 parts = content.get("parts") or []
                 if not parts or not isinstance(parts[0], str):
                     return
+                _cur_msg = vmsg  # patch frames below apply onto this message
                 is_new = _reset_if_new_msg(vmsg.get("id"))
                 new = parts[0]
                 if is_new:
@@ -981,7 +1137,7 @@ class ConversationClient:
                 continuations of the last patched path.
                 """
                 nonlocal _resolved_model, _last_patch_path, last_text
-                nonlocal message_completed, _banner
+                nonlocal message_completed, _banner, _stream_handoff
                 t = obj.get("type")
                 if t == "server_ste_metadata":
                     slug = (obj.get("metadata") or {}).get("model_slug")
@@ -1004,6 +1160,28 @@ class ConversationClient:
                 ):
                     if t == "message_stream_complete":
                         message_completed = True
+                    return
+
+                if t == "stream_handoff":
+                    # The server stops delivering this turn on the SSE stream
+                    # and moves it to another transport (``resume_sse_endpoint``
+                    # or ``subscribe_ws_topic`` on the turn topic). Observed on
+                    # gpt-6-pro 2026-09-23: the frame is followed by metadata
+                    # then [DONE], no assistant text ever arrives, and the
+                    # answer IS persisted in the conversation — so ``complete``
+                    # polls for it instead of returning an empty string.
+                    # Evidence: artifacts/verify/live-matrix-2026-09-23/
+                    # A-models/raw/gpt-6-pro-frames.json.
+                    _stream_handoff = True
+                    _log.debug(
+                        "stream_handoff — answer is out-of-band (options: %s)",
+                        ", ".join(
+                            str(opt.get("type"))
+                            for opt in (obj.get("options") or [])
+                            if isinstance(opt, dict)
+                        )
+                        or "none",
+                    )
                     return
 
                 p = obj.get("p")
@@ -1035,26 +1213,31 @@ class ConversationClient:
                     _last_patch_path = p
                     if p.endswith("/content/parts/0") and isinstance(v, str):
                         message_completed = False
+                        applied = _apply_message_patch(_cur_msg, p, o, v)
+                        new = applied if isinstance(applied, str) else v
                         if o == "append":
                             emit.append(v)
-                            last_text += v
-                        elif v.startswith(last_text):
-                            delta = v[len(last_text):]
+                        elif new.startswith(last_text):
+                            delta = new[len(last_text):]
                             if delta:
                                 emit.append(delta)
-                            last_text = v
-                        elif v:
-                            emit.append(v)
-                            last_text = v
+                        elif new:
+                            emit.append(new)
+                        last_text = new
                     return
 
                 # Bare {"v": str} — classic delta, or a continuation of the
                 # last patched path on the f/ encoding.
                 if isinstance(v, str) and v:
-                    if _last_patch_path is None or _last_patch_path.endswith(
-                        "/content/parts/0"
-                    ):
+                    if _last_patch_path is None:
                         message_completed = False
+                        emit.append(v)
+                        last_text += v
+                    elif _last_patch_path.endswith("/content/parts/0"):
+                        message_completed = False
+                        _apply_message_patch(
+                            _cur_msg, _last_patch_path, "append", v
+                        )
                         emit.append(v)
                         last_text += v
                     return
@@ -1121,6 +1304,7 @@ class ConversationClient:
                     "_resolved_model": _resolved_model,
                     "_requested_model": model,
                     "_banner": _banner,
+                    "_stream_handoff": _stream_handoff,
                 }
 
     async def complete(
@@ -1138,6 +1322,7 @@ class ConversationClient:
         conv_id: str | None = None
         resolved_model: str | None = None
         banner: dict | None = None
+        stream_handoff = False
         try:
             async for event in self.stream(
                 model, messages, gizmo_id=gizmo_id, temporary=temporary,
@@ -1150,6 +1335,8 @@ class ConversationClient:
                         resolved_model = event["_resolved_model"]
                     if event.get("_banner"):
                         banner = event["_banner"]
+                    if event.get("_stream_handoff"):
+                        stream_handoff = True
                     continue  # never let a non-str sentinel reach "".join(chunks)
                 chunks.append(event)
         except _IncompleteStreamError as exc:
@@ -1159,6 +1346,16 @@ class ConversationClient:
                     return recovered
             raise
         text = "".join(chunks)
+
+        # Server-side ``stream_handoff`` (gpt-6-pro, 2026-09-23): the SSE ends
+        # with a handoff frame and no assistant text, while the answer is
+        # persisted server-side — returning "" here is the silent-empty defect.
+        # Poll the conversation for it. A handoff after partial text is not a
+        # case we have observed; if the stream already produced text we keep it
+        # and do not poll (conservative — never splice two copies of an answer),
+        # so this runs only for a text-less stream.
+        if stream_handoff and not text and conv_id:
+            text = await self._poll_async_response(conv_id)
 
         # Silent downgrade detection: the SSE ``server_ste_metadata`` frame
         # reports the slug that actually served the request. When it differs
@@ -1188,7 +1385,8 @@ class ConversationClient:
         # This MUST be opt-in (poll_async): conv_id is captured on nearly every
         # stream, so an unconditional "not text and conv_id" poll would make an
         # ordinary chat that returns empty text hang for the full poll window.
-        if poll_async and not text and conv_id:
+        # A handoff already polled above — never poll the same conversation twice.
+        if poll_async and not text and conv_id and not stream_handoff:
             text = await self._poll_async_response(conv_id)
 
         return text
@@ -1452,9 +1650,12 @@ class ConversationClient:
 
         conversation_id: str | None = None
         text_parts: list[str] = []
-        tool_calls: list[dict] = []
-        tool_responses: list[dict] = []
-        multimodal_assets: list[dict] = []
+        # Keyed by message: on the f/ wire a message's content keeps arriving in
+        # patch frames after its envelope, so an entry is rewritten as the
+        # message grows rather than appended once per frame.
+        calls_by_msg: dict[int, dict] = {}
+        responses_by_msg: dict[int, dict] = {}
+        assets_by_msg: dict[int, list[dict]] = {}
         done_received = False
         message_completed = False
 
@@ -1480,6 +1681,8 @@ class ConversationClient:
                 )
 
             last_text = ""
+            _delta = _MessageDelta()
+            msg_seq = 0
             async for raw_line in resp.aiter_lines():
                 if isinstance(raw_line, bytes):
                     raw_line = raw_line.decode("utf-8", errors="replace")
@@ -1502,17 +1705,33 @@ class ConversationClient:
                 if cid and not conversation_id:
                     conversation_id = cid
 
+                # A message envelope (Format-B ``{"message": ...}`` on the
+                # classic endpoint, ``{"p": "", "o": "add", "v": {"message":
+                # ...}}`` on the f/ delta encoding) starts a message; the patch
+                # frames that follow carry its content — code-interpreter and
+                # canvas payloads arrive entirely as ``/message/content/text``
+                # appends (canvas capture frames 30-43) — so apply them onto
+                # the streaming message instead of dropping them.
                 msg = obj.get("message")
                 _v = obj.get("v")
                 if not isinstance(msg, dict) and isinstance(_v, dict):
                     msg = _v.get("message")
-                if not isinstance(msg, dict):
+                if isinstance(msg, dict):
+                    _delta.reset(msg)
+                    msg_seq += 1
+                elif not _delta.apply(obj):
                     continue
+                msg = _delta.message
                 role = (msg.get("author") or {}).get("role", "")
                 recipient = msg.get("recipient", "all")
                 content = msg.get("content") or {}
                 ct = content.get("content_type", "")
-                parts = content.get("parts") or []
+                parts = content.get("parts")
+                if not isinstance(parts, list) or not parts:
+                    # Payload content types (``code``, ``execution_output``)
+                    # stream into ``content/text`` rather than ``parts``.
+                    text = content.get("text")
+                    parts = [text] if isinstance(text, str) and text else []
                 status = msg.get("status", "")
                 # A newer assistant/tool lifecycle supersedes any earlier
                 # message-level terminal status. [DONE] remains independent.
@@ -1543,11 +1762,11 @@ class ConversationClient:
                             call_parts.append(p)
                         elif isinstance(p, dict):
                             call_parts.append(json.dumps(p, ensure_ascii=False))
-                    tool_calls.append({
+                    calls_by_msg[msg_seq] = {
                         "recipient": recipient,
                         "content_type": ct,
                         "parts": call_parts,
-                    })
+                    }
 
                 # Tool response
                 elif role == "tool" and recipient == "all":
@@ -1570,11 +1789,11 @@ class ConversationClient:
                                 })
                             else:
                                 resp_parts.append(json.dumps(p, ensure_ascii=False))
-                    tool_responses.append({
+                    responses_by_msg[msg_seq] = {
                         "content_type": ct,
                         "parts": resp_parts,
-                    })
-                    multimodal_assets.extend(img_assets)
+                    }
+                    assets_by_msg[msg_seq] = img_assets
 
         if not (done_received or message_completed):
             raise RuntimeError(_INCOMPLETE_RESPONSE_MESSAGE)
@@ -1583,9 +1802,13 @@ class ConversationClient:
         return {
             "conversation_id": conversation_id,
             "text": final_text,
-            "tool_calls": tool_calls,
-            "tool_responses": tool_responses,
-            "multimodal_assets": multimodal_assets,
+            "tool_calls": list(calls_by_msg.values()),
+            "tool_responses": list(responses_by_msg.values()),
+            "multimodal_assets": [
+                asset
+                for assets in assets_by_msg.values()
+                for asset in assets
+            ],
         }
 
     async def deep_research(
@@ -1893,9 +2116,17 @@ class ConversationClient:
           {"type": "done",     "text": <full_text>,
            "content_references": [...], "search_result_groups": [...]}
 
+        The connector acks the kickoff ("Deep Research has started working on
+        this.") and runs the research in the background; that ack never becomes
+        the ``done`` text — the report is read from the widget state when it
+        lands, so phase 2 runs even when phase 1 ended on the ack.
+
         Rate: consumes from the account-reported "deep_research" quota; limits
         and reset timing can vary.
-        Timeout: 1800 s for initial SSE; poll phase adds up to 1800 s more.
+        Timeout: 1800 s for initial SSE; poll phase adds up to 1800 s more
+        (``_poll_dr_completion.max_wait``), after which the terminal event is
+        flagged ``timeout`` + ``terminated_abnormally`` instead of shipping the
+        ack.
 
         Note: the resolved_model_slug in user-message echo will show "i-mini-m"
         (the orchestration layer). The actual heavy reasoning runs inside the
@@ -1958,6 +2189,14 @@ class ConversationClient:
             "last_path": None,
             "tool_invoked": False,
             "tool_failed": False,
+            # True once the DR connector accepted an *asynchronous* task
+            # (tool_response_metadata: venus_message_type
+            # "initial_loading_message" / openai/asyncStatus — live payload
+            # A-dr-heavy 2026-09-23, node 936145e2). Its report is delivered
+            # later through the widget state, so the assistant text that
+            # follows the start (the connector's own ack) must not finish the
+            # stream — Phase 2 polls the widget state instead.
+            "dr_async_pending": False,
             "done_emitted": False,
             "citation_metadata": {},
             # True while the current assistant envelope is the connector-dispatch
@@ -1970,6 +2209,16 @@ class ConversationClient:
 
         def _emit_done(events: list) -> None:
             if state["done_emitted"]:
+                return
+            # The DR connector acks its async `start` in assistant text, and
+            # that text reaches finished_successfully like a real answer
+            # (live-matrix 2026-09-23 A-dr-heavy: the shipped surface returned
+            # the 160-char ack while the 3388-char report sat unread in the
+            # widget state). Keep it as progress and let the Phase-2 poll
+            # deliver the report from ``widget_state.report_message``.
+            if not state["tool_failed"] and (
+                state["dr_async_pending"] or _is_dr_async_ack(state["asst_text"])
+            ):
                 return
             md = state["asst_metadata"] or {}
             citation_md = state["citation_metadata"] or {}
@@ -2036,6 +2285,20 @@ class ConversationClient:
                 # the caller can distinguish "DR ran" from "DR silently
                 # fell through to i-mini-m because the connector isn't
                 # provisioned on this account".
+                meta = msg.get("metadata")
+                sdk = meta.get("chatgpt_sdk") if isinstance(meta, dict) else None
+                trm = (
+                    sdk.get("tool_response_metadata")
+                    if isinstance(sdk, dict)
+                    else None
+                )
+                if isinstance(trm, dict) and (
+                    trm.get("venus_message_type") == "initial_loading_message"
+                    or trm.get("openai/asyncStatus")
+                ):
+                    # Async DR accepted — the report arrives in the widget
+                    # state, not in the assistant text that follows.
+                    state["dr_async_pending"] = True
                 parts = content.get("parts") or []
                 text = parts[0] if parts and isinstance(parts[0], str) else ""
                 if text and ("Resource not found" in text or text.startswith("Error")):
@@ -2269,13 +2532,27 @@ class ConversationClient:
         report as an assistant text node, so we also fetch the hidden widget
         state and recover the report from ``widget_state.report_message`` (see
         :func:`_dr_report_from_widget_state`).
+
+        The connector's async start acknowledgement (see
+        :func:`_is_dr_async_ack`) is *not* the answer even though it reaches
+        ``finished_successfully``: it is skipped and polling continues, so an
+        async heavy-DR run returns the report instead of the ack
+        (live-matrix 2026-09-23 A-dr-heavy — the ack landed ~30 s after the
+        POST, the report arrived ~6 min in). The wait is bounded by ``max_wait``
+        (default 1800 s, inside the documented 5–30 min heavy-DR window); when
+        it expires the terminal event carries ``terminated_abnormally`` +
+        ``timeout`` and the ack text is dropped rather than shipped.
         """
         detail_path = (
             f"/backend-api/conversation/{conv_id}"
             "?include_visually_hidden_messages=true&include_widget_state=true"
         )
         deadline = time.monotonic() + max_wait
-        last_emitted = "" if _is_connector_dispatch_text(seed_text) else seed_text
+        last_emitted = (
+            ""
+            if _is_connector_dispatch_text(seed_text) or _is_dr_async_ack(seed_text)
+            else seed_text
+        )
 
         while time.monotonic() < deadline:
             await asyncio.sleep(interval)
@@ -2312,6 +2589,10 @@ class ConversationClient:
                 if not text:
                     continue
                 if _is_connector_dispatch_text(text):
+                    continue
+                # The DR async ack is a finished assistant text node too; only
+                # the widget state carries the report, so keep polling.
+                if _is_dr_async_ack(text):
                     continue
                 candidates.append(
                     (
