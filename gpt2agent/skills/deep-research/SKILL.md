@@ -98,8 +98,9 @@ explicitly wants you to handle locally, anything covered by `context7`
 widget. The connector **never** writes its report as an assistant text node in
 the conversation `mapping` (all the assistant text node carries is the connector's
 async ack — "Deep Research has started working on this.", measured 160 chars
-2026-09-23), so the legacy poll — which only scanned for assistant text — timed
-out at 1800s even though the research completed server-side.
+2026-09-23), so the legacy poll — which only scanned for assistant text —
+returned that ack as if it were the answer (and timed out at 1800s only when no
+text node existed at all), even though the research completed server-side.
 
 **The report lives in the hidden widget state.** Fetching the conversation with
 `?include_visually_hidden_messages=true&include_widget_state=true` exposes a node

@@ -1204,3 +1204,52 @@ def test_heavy_poll_timeout_drops_async_ack() -> None:
     assert dones[0]["text"] == ""
     assert dones[0]["timeout"] is True
     assert dones[0]["terminated_abnormally"] is True
+
+
+def test_poll_skips_reworded_ack_when_async_started() -> None:
+    """With the structural async flag, no assistant text can end the poll.
+
+    The model rewrites the connector ack wording, so the prefix check alone can
+    ship a reworded ack as the answer. ``async_started`` (the structural signal
+    Phase 1 observes) makes the poll skip assistant text entirely and wait for
+    the widget report.
+    """
+    from copy import deepcopy
+
+    from gpt2agent import sse as sse_mod
+
+    base = deepcopy(_load_widget_fixture()["no_report"])
+    base.setdefault("mapping", {})["zz-reworded-ack"] = {
+        "message": {
+            "id": "zz-reworded-ack",
+            "author": {"role": "assistant"},
+            "recipient": "all",
+            "content": {
+                "content_type": "text",
+                "parts": ["Deep research is now underway — I'll report back shortly."],
+            },
+            "status": "finished_successfully",
+            "create_time": 9e9,  # newest candidate
+            "metadata": {},
+        }
+    }
+
+    class _FixtureBackend(_FakeBackend):
+        def get(self, *_: Any, **__: Any) -> dict:
+            return base
+
+    client = sse_mod.ConversationClient(_FixtureBackend())  # type: ignore[arg-type]
+
+    async def _go(started: bool) -> list[dict]:
+        out: list[dict] = []
+        async for ev in client._poll_dr_completion(
+            "fixture-conv", interval=0, max_wait=1, async_started=started
+        ):
+            out.append(ev)
+        return out
+
+    protected = [e for e in asyncio.run(_go(True)) if e.get("type") == "done"]
+    assert all("underway" not in e.get("text", "") for e in protected), protected
+
+    control = [e for e in asyncio.run(_go(False)) if e.get("type") == "done"]
+    assert control and "underway" in control[-1]["text"], control

@@ -2506,6 +2506,7 @@ class ConversationClient:
                 state["conversation_id"],
                 seed_text=state["asst_text"],
                 connector_failed=state["tool_failed"],
+                async_started=state["dr_async_pending"],
             ):
                 yield evt
             return
@@ -2526,6 +2527,7 @@ class ConversationClient:
         *,
         seed_text: str = "",
         connector_failed: bool = False,
+        async_started: bool = False,
         interval: float = 120.0,
         max_wait: float = 1800.0,
     ) -> AsyncIterator[dict]:
@@ -2540,7 +2542,9 @@ class ConversationClient:
 
         The connector's async start acknowledgement (see
         :func:`_is_dr_async_ack`) is *not* the answer even though it reaches
-        ``finished_successfully``: it is skipped and polling continues, so an
+        ``finished_successfully``: when Phase 1 saw the connector's structural
+        async signal (``async_started``) every assistant text is skipped, and
+        otherwise the ack prefix is (it can be reworded by the model), so an
         async heavy-DR run returns the report instead of the ack
         (live-matrix 2026-09-23 A-dr-heavy — the ack landed ~30 s after the
         POST, the report arrived ~6 min in). The wait is bounded by ``max_wait``
@@ -2555,7 +2559,9 @@ class ConversationClient:
         deadline = time.monotonic() + max_wait
         last_emitted = (
             ""
-            if _is_connector_dispatch_text(seed_text) or _is_dr_async_ack(seed_text)
+            if async_started
+            or _is_connector_dispatch_text(seed_text)
+            or _is_dr_async_ack(seed_text)
             else seed_text
         )
 
@@ -2596,8 +2602,12 @@ class ConversationClient:
                 if _is_connector_dispatch_text(text):
                     continue
                 # The DR async ack is a finished assistant text node too; only
-                # the widget state carries the report, so keep polling.
-                if _is_dr_async_ack(text):
+                # the widget state carries the report, so keep polling. When
+                # Phase 1 observed the connector's *structural* async signal
+                # (``async_started``), no assistant text can be the answer:
+                # the model rewrites the ack wording, so the prefix check
+                # alone is not sufficient.
+                if async_started or _is_dr_async_ack(text):
                     continue
                 candidates.append(
                     (
