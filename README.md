@@ -31,7 +31,7 @@ pass `gpt2agent doctor`** (2026-09-23, v0.0.21); the rest are documented below.
 
 | State | Tools |
 |---|---|
-| ✅ **Working (doctor-verified 2026-09-23, v0.0.21; conversation tools live-verified 2026-09-17, chat re-probed 2026-09-23)** | `chat` (gpt-6-pro ✅, gpt-5-6 ✅), `agent` ✅, `deep_research` ✅ (inline citations), `code_interpreter` ✅, `canvas_execute` ✅, `generate_image` ✅, `list_models` (23), `account_status`, `list_conversations` (5), `get_conversation`, `list_custom_gpts` (0), `memory_list` (5), `memory_search`, `list_apps` (107), `list_codex_envs` (0), `list_codex_tasks` (0), `list_tasks` (1), `custom_instructions_get`, `account_limits`, `rate_limit`, `sentinel (bridge)` |
+| ✅ **Working (doctor-verified 2026-09-23, v0.0.21; conversation tools live-verified 2026-09-17, chat re-probed 2026-09-23)** | `chat` (gpt-6-pro ✅, gpt-5-6 ✅), `agent` ✅, `deep_research` ✅ (inline citations), `code_interpreter` ✅, `generate_image` ✅, `list_models` (23), `account_status`, `list_conversations` (5), `get_conversation`, `list_custom_gpts` (0), `memory_list` (5), `memory_search`, `list_apps` (107), `list_codex_envs` (0), `list_codex_tasks` (0), `list_tasks` (1), `custom_instructions_get`, `account_limits`, `rate_limit`, `sentinel (bridge)` |
 | ⚠ **Known limitations** | `chat(<Work-only slug>)` — GPT-6 Sol/Luna are Work & Codex-only; on the Chat surface the backend silently resolves their slugs to `gpt-5-6` and the tool appends a **Model note** (measured 2026-09-23); `gpt_chat` — 422 with `g-p-` prefix GPTs (public/store); `memory_create_via_chat` — model does not reliably invoke memory tool; `deep_research_heavy` — connector-dependent, may need Settings → Connectors → Deep Research enabled |
 | ❓ Unverified | `custom_instructions_set`, `codex_task_create` — plain REST writes; `get_file_info`, `get_file_download_url` — need a `file_id`; not probed read-only |
 | 🔇 **Fallback available** | All conversation tools support `manual=True` (zero-network handoff) and `browser=True` (real Chrome via `[browser]` extra) |
@@ -215,7 +215,7 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 |---|---|---|
 | `generate_image` | Generate images via ChatGPT's built-in DALL-E. Returns download URLs + metadata (uses `temporary=False` internally) | ✅ **live-verified** |
 | `code_interpreter` | Run Python in ChatGPT's sandbox. Returns output + charts/images (uses `temporary=False` internally) | ✅ **live-verified** |
-| `canvas_execute` | Execute code via ChatGPT's Canvas feature (uses `temporary=False` internally) | ✅ **live-verified** |
+| `canvas_execute` | Canvas was retired upstream (2026-05) — the tool returns the model's deprecation notice; use `code_interpreter` | ⚠ upstream-retired |
 | `get_file_info` | Metadata for any ChatGPT file (needs a `file_id`) | ✅ |
 | `get_file_download_url` | Temporary download URL (~1h expiry; needs a `file_id`) | ✅ |
 
@@ -334,6 +334,12 @@ Key rules:
 - **`gpt_chat`** with `g-p-` prefix GPTs (public/store) returns 422 — the
   `conversation_origin` payload was reverse-engineered for `g-` prefix only.
 - **`chat(<Work-only slug>)`** — GPT-6 Sol and GPT-6 Luna are served on ChatGPT **Work and Codex only** (not Chat). Measured 2026-09-23: Chat-surface requests for `gpt-6-sol`, `gpt-6-luna`, `gpt-6-sol-wm`, or `gpt-6-luna-wm` are silently served by `gpt-5-6`, and the tool appends a *Model note* naming the resolved slug. Use `gpt-6-pro` for the deepest Chat model.
+- **`deep_research` (light)** is failing upstream as of 2026-09-23: the
+  research turn is accepted, then aborted with an in-band
+  `Error in message stream` and never persisted (no DR quota is consumed).
+  `deep_research_heavy` is the working research path until this recovers.
+- **`canvas_execute`** — Canvas was retired upstream (2026-05); the tool now
+  returns the model's deprecation notice. Use `code_interpreter`.
 - **`memory_create_via_chat`** depends on the model choosing to invoke the
   memory tool; it doesn't always do so from a plain-text prompt.
 - **`deep_research_heavy`** depends on the DR connector — check

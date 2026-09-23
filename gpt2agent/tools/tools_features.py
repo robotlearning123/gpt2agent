@@ -77,6 +77,10 @@ def register(mcp, client: BackendClient, conv=None, cfg=None) -> None:
         Creates a Canvas document with live code execution. Similar to
         code_interpreter but uses the Canvas editing environment.
 
+        Canvas was retired upstream (2026-05): the model now answers with a
+        deprecation notice instead of creating a document (measured
+        2026-09-23 on a live Pro account). Use `code_interpreter` instead.
+
         Args:
             prompt: The code or instruction (e.g. "Create a React component that...").
             model: ChatGPT model to use. Defaults to gpt-5-6.
