@@ -12,6 +12,9 @@ User-facing documentation. (Project/contributor internals live in
   appearing, temporary-chat feature blocks, pipx/PEP-668.
 - **[FAQ](./faq.md)** — official? ban risk? stdio vs HTTP? Plus vs Pro? quota?
 - **[How it works](./how-it-works.md)** — the no-proxy architecture.
+- **[Blog: What a ChatGPT Pro account actually contains](./blog/chatgpt-pro-account-resources.md)**
+  — a measured inventory: 23 model slugs with context windows, per-feature
+  quotas and their reset clocks, and what stays out of reach.
 
 For the full per-tool reference (every argument, return shape, and gotcha for all
 30 tools), see [`gpt2agent/skills/gpt2agent/tools-reference.md`](../gpt2agent/skills/gpt2agent/tools-reference.md).
