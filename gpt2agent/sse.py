@@ -2056,6 +2056,22 @@ class ConversationClient:
                     # Path-scoped patch — applies onto the last envelope seen
                     if isinstance(p, str) and p:
                         _last_patch_path = p
+                        if not _cur_msg and (
+                            p.endswith("/content/parts/0")
+                            or p == "/message/status"
+                        ):
+                            # Patches before any envelope (wire reordering):
+                            # seed an implicit assistant-text anchor instead
+                            # of silently dropping the text (Devin S3 S1 —
+                            # done text was 'lo', losing 'Hel').
+                            _cur_msg = {
+                                "author": {"role": "assistant"},
+                                "content": {
+                                    "content_type": "text",
+                                    "parts": [""],
+                                },
+                                "metadata": {},
+                            }
                         if _cur_msg:
                             _apply_message_patch(_cur_msg, p, o, v)
                         if p == "/message/status" and isinstance(v, str):

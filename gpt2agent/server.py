@@ -381,6 +381,12 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         refs: list = []
         truncated = False
         timed_out = False
+        # Prefer the last CLEAN done over any later abnormal terminal: a
+        # completed answer must not be discarded because a later lifecycle
+        # started and never finished (Devin S3 S6b — user saw the partial
+        # + truncation note instead of the completed 'first answer').
+        clean_done: dict | None = None
+        last_done: dict | None = None
 
         try:
             async for event in conv.deep_research(
@@ -389,10 +395,9 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
                 if event["type"] == "tool":
                     tool_calls.append(event["call"])
                 elif event["type"] == "done":
-                    final_text = event["text"]
-                    refs = event.get("content_references", [])
-                    truncated = bool(event.get("terminated_abnormally"))
-                    timed_out = bool(event.get("timeout"))
+                    last_done = event
+                    if not event.get("terminated_abnormally"):
+                        clean_done = event
         except UpstreamChallengeError:
             if cfg.get("browser", {}).get("enabled"):
                 transport = browser_transport(
@@ -404,6 +409,13 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
                     + (out or "(no response)")
                 )
             raise
+
+        chosen = clean_done or last_done
+        if chosen is not None:
+            final_text = chosen["text"]
+            refs = chosen.get("content_references", [])
+            truncated = bool(chosen.get("terminated_abnormally"))
+            timed_out = bool(chosen.get("timeout"))
 
         # Append a brief sources section if citations were returned
         if refs:

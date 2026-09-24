@@ -355,6 +355,27 @@ def test_classic_bare_chunks_accumulate(
     assert dones and dones[0]["text"] == "Hello world"
 
 
+# Patches BEFORE any envelope (wire reordering) must not silently lose the
+# text — an implicit assistant anchor is seeded (Devin S3 S1: done was 'lo',
+# losing 'Hel').
+_PATCH_FIRST_FRAMES = [
+    _patch_line("/message/content/parts/0", "append", "Hel"),
+    _patch_line("/message/content/parts/0", "append", "lo"),
+    _patch_line("/message/status", "replace", "finished_successfully"),
+    "data: [DONE]",
+]
+
+
+def test_patch_before_envelope_keeps_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = _run_light_dr(monkeypatch, _PATCH_FIRST_FRAMES)
+    dones = [e for e in events if e.get("type") == "done"]
+    assert dones, f"no done event: {events}"
+    assert dones[-1]["text"] == "Hello", dones[-1]["text"]
+    assert not dones[-1].get("terminated_abnormally")
+
+
 def test_light_dr_payload_drops_research_hint() -> None:
     from gpt2agent.sse import LIGHT_DR_MODEL, _build_dr_payload
 
