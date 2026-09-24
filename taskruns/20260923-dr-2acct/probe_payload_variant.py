@@ -45,9 +45,17 @@ async def run(args: argparse.Namespace) -> int:
     if args.model:
         payload["model"] = args.model
     if args.hints is not None:
-        payload["system_hints"] = [h.strip() for h in args.hints.split(",") if h.strip()]
+        hints = [h.strip() for h in args.hints.split(",") if h.strip()]
+        if hints:
+            payload["system_hints"] = hints
+        else:
+            payload.pop("system_hints", None)
         msg0 = payload.get("messages", [{}])[0]
-        msg0.setdefault("metadata", {})["system_hints"] = payload["system_hints"]
+        msg0.setdefault("metadata", {})
+        if hints:
+            msg0["metadata"]["system_hints"] = hints
+        else:
+            msg0["metadata"].pop("system_hints", None)
     for key, val in (json.loads(args.set) if args.set else {}).items():
         if key.startswith("meta."):
             payload["messages"][0].setdefault("metadata", {})[key[5:]] = val
@@ -103,7 +111,11 @@ async def run(args: argparse.Namespace) -> int:
                 except _Abort as exc:
                     print(f"IN-BAND ABORT: {exc}")
                     break
-                msg = obj.get("message") or (obj.get("v") or {}).get("message")
+                _v = obj.get("v")
+                _msg = obj.get("message")
+                if not isinstance(_msg, dict) and isinstance(_v, dict):
+                    _msg = _v.get("message")
+                msg = _msg if isinstance(_msg, dict) else None
                 if isinstance(msg, dict):
                     last_role = (msg.get("author") or {}).get("role")
                     if last_role == "assistant":
@@ -135,7 +147,6 @@ def main() -> int:
     ap.add_argument("--keep-going", action="store_true",
                     help="do not stop at the first in-band error frame")
     args = ap.parse_args()
-    del orig_raise  # probe-local; sse patched above
     return asyncio.run(run(args))
 
 

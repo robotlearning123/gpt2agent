@@ -343,7 +343,9 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         """Search the web and synthesize a detailed report with citations.
 
         Best for: current events, literature review, market research.
-        Takes 30–120 seconds. Uses model='research' + system_hints=['research'].
+        Takes 30–120 seconds. Rides the configured chat model (default
+        gpt-5-6) with automatic web search — the legacy model='research'
+        lane was retired upstream in the 2026-09-22 GPT-6 rollout.
 
         `connectors` adds connected-app sources (e.g. `connector_openai_pubmed`
         for literature). OAuth connectors (GitHub, Gmail) must be connected in
@@ -381,7 +383,9 @@ def build_server(cfg: dict[str, Any]) -> FastMCP:
         timed_out = False
 
         try:
-            async for event in conv.deep_research(q, connectors=connectors):
+            async for event in conv.deep_research(
+                q, connectors=connectors, model=chat_model
+            ):
                 if event["type"] == "tool":
                     tool_calls.append(event["call"])
                 elif event["type"] == "done":

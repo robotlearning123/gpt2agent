@@ -96,16 +96,18 @@ def test_deep_research_has_content_references():
 
 
 def test_build_dr_payload_shape():
-    """Unit test: _build_dr_payload produces correct model + system_hints."""
-    from gpt2agent.sse import _build_dr_payload, DR_MODEL
+    """Unit test: _build_dr_payload rides the chat model, no research hint."""
+    from gpt2agent.sse import LIGHT_DR_MODEL, _build_dr_payload
 
     payload = _build_dr_payload("test query")
-    assert payload["model"] == DR_MODEL == "research"
-    assert payload["system_hints"] == ["research"]
+    assert payload["model"] == LIGHT_DR_MODEL == "gpt-5-6"
+    # The retired "research" hint must never be sent (upstream aborts the
+    # whole turn in-band when it is — taskruns/20260923-dr-2acct/).
+    assert "research" not in (payload.get("system_hints") or [])
     assert payload["conversation_mode"] == {"kind": "primary_assistant"}
     assert payload["force_use_sse"] is True
-    # DR requires persistent conversation; "temporary chats" reject DR with
-    # "Research is not currently supported in temporary chats".
+    # DR requires persistent conversation; "temporary chats" reject research
+    # with "Research is not currently supported in temporary chats".
     assert payload["history_and_training_disabled"] is False
     assert len(payload["messages"]) == 1
     assert payload["messages"][0]["content"]["parts"][0] == "test query"
