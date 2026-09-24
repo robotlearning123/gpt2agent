@@ -64,9 +64,11 @@ account in the same window (pipeline proven good → failure isolated upstream).
   - Unscoped patches carry no message id → interleaved-message scoping stays
     last-envelope-wins (wire-ambiguous; Devin S2 judged "only possible
     semantic"). Refs-before-any-envelope are dropped (never observed live).
-  - Light DR quota gate (`_feature_remaining("deep_research")`) kept: may
-    over-block when heavy quota is 0 though light rides auto-search;
-    conservative, documented.
+  - Light DR quota gate (`_feature_remaining("deep_research")`) kept and
+    MEASURED CORRECT (2026-09-24): each completed auto-search light turn
+    costs 1 from the same bucket (A −9 over 9 completed search turns,
+    B −1 over 1; aborted pre-fix turns cost 0), while heavy connector
+    runs bill elsewhere (two full heavy reports moved this bucket by 0).
   - Fleet editable install currently points at THIS worktree; run
     `scripts/fleet-sync.sh origin/main` after merge (release runbook §7).
 
