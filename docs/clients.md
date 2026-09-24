@@ -49,6 +49,30 @@ Zed nests the command under `context_servers`:
 }
 ```
 
+## Multiple ChatGPT accounts in one client
+
+Token selection follows `CODEX_HOME` (default `~/.codex`), so a second
+account is a second server entry with its own `env` — both run side by side
+in the same client, each with its own token, quota, and rate-limit budget:
+
+```json
+{
+  "mcpServers": {
+    "gpt2agent":   { "command": "gpt2agent", "args": ["run", "--stdio"] },
+    "gpt2agent-b": {
+      "command": "gpt2agent",
+      "args": ["run", "--stdio"],
+      "env": { "CODEX_HOME": "/home/you/.codex-second-account" }
+    }
+  }
+}
+```
+
+Log the second account in once with
+`CODEX_HOME=~/.codex-second-account codex login`, then restart the client.
+Tools are identical under both entries — pick the entry (and thus the
+account) by which server you call.
+
 ## Claude Code plugin
 
 Instead of `gpt2agent install --client claude-code`, you can install via the plugin

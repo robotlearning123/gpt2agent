@@ -31,7 +31,7 @@ pass `gpt2agent doctor`** (2026-09-23, v0.0.21); the rest are documented below.
 
 | State | Tools |
 |---|---|
-| ✅ **Working (doctor-verified 2026-09-23, v0.0.21; conversation tools live-verified 2026-09-17, chat re-probed 2026-09-23)** | `chat` (gpt-6-pro ✅, gpt-5-6 ✅), `agent` ✅, `deep_research` ⚠ (upstream failure since 2026-09-23 — see Limitations), `code_interpreter` ✅, `generate_image` ✅, `list_models` (23), `account_status`, `list_conversations` (5), `get_conversation`, `list_custom_gpts` (0), `memory_list` (5), `memory_search`, `list_apps` (107), `list_codex_envs` (0), `list_codex_tasks` (0), `list_tasks` (1), `custom_instructions_get`, `account_limits`, `rate_limit`, `sentinel (bridge)` |
+| ✅ **Working (doctor-verified 2026-09-23, v0.0.21; conversation tools live-verified 2026-09-17, chat re-probed 2026-09-23; DR light+heavy both accounts 2026-09-23)** | `chat` (gpt-6-pro ✅, gpt-5-6 ✅), `agent` ✅, `deep_research` ✅ (rides chat model since the GPT-6 rollout — see Limitations), `deep_research_heavy` ✅ (connector-dependent), `code_interpreter` ✅, `generate_image` ✅, `list_models` (23), `account_status`, `list_conversations` (5), `get_conversation`, `list_custom_gpts` (0), `memory_list` (5), `memory_search`, `list_apps` (107), `list_codex_envs` (0), `list_codex_tasks` (0), `list_tasks` (1), `custom_instructions_get`, `account_limits`, `rate_limit`, `sentinel (bridge)` |
 | ⚠ **Known limitations** | `chat(<Work-only slug>)` — GPT-6 Sol/Luna are Work & Codex-only; on the Chat surface the backend silently resolves their slugs to `gpt-5-6` and the tool appends a **Model note** (measured 2026-09-23); `gpt_chat` — 422 with `g-p-` prefix GPTs (public/store); `memory_create_via_chat` — model does not reliably invoke memory tool; `deep_research_heavy` — connector-dependent, may need Settings → Connectors → Deep Research enabled |
 | ❓ Unverified | `custom_instructions_set`, `codex_task_create` — plain REST writes; `get_file_info`, `get_file_download_url` — need a `file_id`; not probed read-only |
 | 🔇 **Fallback available** | All conversation tools support `manual=True` (zero-network handoff) and `browser=True` (real Chrome via `[browser]` extra) |
@@ -197,7 +197,7 @@ the selected Codex auth file on mtime change so long calls don't 401 mid-flight.
 |---|---|---|---|
 | `chat` | `prompt`, `model`, `temporary`, `manual`, `browser` | Talk to any model on your account (`gpt-5-6` = GPT-5.6 Sol, default; override via `model=`). Pass `gpt-6-pro` (410K), `gpt-5-6-thinking` (262K), `o3-pro` (196K), … | ✅ **live-verified** (gpt-6-pro, gpt-5-6) |
 | `agent` | `prompt`, `manual`, `browser` | **Agent Mode** — 262K context with autonomous browsing, code execution, tool use | ✅ **live-verified** |
-| `deep_research` | `query`, `auto_confirm`, `manual`, `browser` | Web-augmented research with **inline `[N](url)` citations** (~30–120 s) | ✅ **live-verified** (incl. citations) |
+| `deep_research` | `query`, `auto_confirm`, `manual`, `browser` | Web research with **inline `[N](url)` citations** (~15–120 s); rides the chat model's auto-search (the `research` lane was retired upstream 2026-09-22) | ✅ **live-verified** (both accounts, incl. citations, 2026-09-23) |
 | `deep_research_heavy` | `query`, `auto_confirm`, `manual`, `browser` | Long-form DR via `gpt-6-pro` + connector (5–30 min, monthly quota) | ⚠ connector-dependent |
 | `gpt_chat` | `gizmo_id`, `prompt`, `manual`, `browser` | Talk through one of your Custom GPTs — *experimental* (`g-` prefix verified; `g-p-` store GPTs return 422) | ⚠ partial |
 
@@ -334,10 +334,13 @@ Key rules:
 - **`gpt_chat`** with `g-p-` prefix GPTs (public/store) returns 422 — the
   `conversation_origin` payload was reverse-engineered for `g-` prefix only.
 - **`chat(<Work-only slug>)`** — GPT-6 Sol and GPT-6 Luna are served on ChatGPT **Work and Codex only** (not Chat). Measured 2026-09-23: Chat-surface requests for `gpt-6-sol`, `gpt-6-luna`, `gpt-6-sol-wm`, or `gpt-6-luna-wm` are silently served by `gpt-5-6`, and the tool appends a *Model note* naming the resolved slug. Use `gpt-6-pro` for the deepest Chat model.
-- **`deep_research` (light)** is failing upstream as of 2026-09-23: the
-  research turn is accepted, then aborted with an in-band
-  `Error in message stream` and never persisted (no DR quota is consumed).
-  `deep_research_heavy` is the working research path until this recovers.
+- **`deep_research` (light)** rides the configured chat model (default
+  `gpt-5-6`) with automatic web search since the 2026-09-22 GPT-6 rollout
+  retired the legacy `model="research"` + `system_hints=["research"]` lane
+  (accepted turn, then in-band `Error in message stream`; no payload variant
+  recovers it — 11 live probes, 2026-09-23). Citations render from the
+  stream's `content_references` as before; the search itself is the model's
+  auto-search, so an occasional knowledge-only answer may carry no Sources.
 - **`canvas_execute`** — Canvas was retired upstream (2026-05); the tool now
   returns the model's deprecation notice. Use `code_interpreter`.
 - **`memory_create_via_chat`** depends on the model choosing to invoke the
