@@ -1939,6 +1939,8 @@ class ConversationClient:
                 _cur_msg: dict = {}
                 _cur_status: str = ""
                 _last_patch_path: str | None = None
+                _implicit_prefix: str = ""
+                _envelope_seen: bool = False
                 refs_latest: list = []
                 srg_latest: list = []
                 emit: list[dict] = []
@@ -2036,6 +2038,7 @@ class ConversationClient:
                     ``{"v": str}`` continuations of the last patched path.
                     """
                     nonlocal _cur_msg, _cur_status, _last_patch_path
+                    nonlocal _implicit_prefix, _envelope_seen
                     nonlocal last_assistant_msg_id
                     nonlocal round_completed_successfully, done_text, last_text
                     p, o, v = f.get("p"), f.get("o"), f.get("v")
@@ -2056,7 +2059,7 @@ class ConversationClient:
                     # Path-scoped patch — applies onto the last envelope seen
                     if isinstance(p, str) and p:
                         _last_patch_path = p
-                        if not _cur_msg and (
+                        if not _cur_msg and not _envelope_seen and (
                             p.endswith("/content/parts/0")
                             or p == "/message/status"
                         ):
@@ -2074,6 +2077,11 @@ class ConversationClient:
                             }
                         if _cur_msg:
                             _apply_message_patch(_cur_msg, p, o, v)
+                        if (
+                            p.endswith("/content/parts/0")
+                            and not _envelope_seen
+                        ):
+                            _implicit_prefix = _cur_text()
                         if p == "/message/status" and isinstance(v, str):
                             _cur_status = v
                             if (_cur_msg.get("author") or {}).get(
@@ -2105,6 +2113,8 @@ class ConversationClient:
                         # mis-attributed stray text onto the new message
                         # (Devin S1 reproduction, 2026-09-23).
                         _last_patch_path = None
+                        _was_first_envelope = not _envelope_seen
+                        _envelope_seen = True
                         role = (msg.get("author") or {}).get("role", "")
                         content = msg.get("content") or {}
                         ct = content.get("content_type", "")
@@ -2154,6 +2164,29 @@ class ConversationClient:
 
                         # Text streaming — assistant in-progress or finished
                         if role == "assistant" and ct == "text":
+                            if _implicit_prefix and _was_first_envelope:
+                                # Pre-envelope patches met their envelope:
+                                # merge deterministically. The envelope wins
+                                # when it already carries the accumulation
+                                # (authoritative snapshot); the accumulation
+                                # wins when the envelope carries only its
+                                # tail; otherwise concatenate (reordered
+                                # disjoint chunks). (Devin S4 S1 residual.)
+                                parts = content.get("parts") or []
+                                env_text = (
+                                    parts[0]
+                                    if parts and isinstance(parts[0], str)
+                                    else ""
+                                )
+                                if env_text.startswith(_implicit_prefix):
+                                    merged = env_text
+                                elif _implicit_prefix.endswith(env_text):
+                                    merged = _implicit_prefix
+                                else:
+                                    merged = _implicit_prefix + env_text
+                                parts = [merged]
+                                content["parts"] = parts
+                                _implicit_prefix = ""
                             _cur_msg = msg  # later patches apply onto this
                             _cur_status = status
                             parts = content.get("parts") or []

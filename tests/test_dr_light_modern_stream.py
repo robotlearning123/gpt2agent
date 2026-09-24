@@ -376,6 +376,41 @@ def test_patch_before_envelope_keeps_text(
     assert not dones[-1].get("terminated_abnormally")
 
 
+# When pre-envelope patches meet their (reordered) envelope, the merge is
+# deterministic: authoritative snapshot wins if it already carries the
+# accumulation; the accumulation wins when the envelope carries only its
+# tail; disjoint chunks concatenate. (Devin S4 S1 residual.)
+def _patch_then_envelope_frames(envelope_parts: list[str]) -> list[str]:
+    return [
+        _patch_line("/message/content/parts/0", "append", "Hel"),
+        _patch_line("/message/content/parts/0", "append", "lo"),
+        _msg_line("a1", "assistant", envelope_parts, "in_progress"),
+        _patch_line("/message/status", "replace", "finished_successfully"),
+        "data: [DONE]",
+    ]
+
+
+@pytest.mark.parametrize(
+    "envelope_parts,expected",
+    [
+        (["Hello"], "Hello"),       # authoritative snapshot — no duplicate
+        (["lo"], "Hello"),          # tail only — accumulation wins
+        ([" world"], "Hello world"),  # disjoint — concatenate
+    ],
+)
+def test_reordered_envelope_merge_deterministic(
+    monkeypatch: pytest.MonkeyPatch,
+    envelope_parts: list[str],
+    expected: str,
+) -> None:
+    events = _run_light_dr(
+        monkeypatch, _patch_then_envelope_frames(envelope_parts)
+    )
+    dones = [e for e in events if e.get("type") == "done"]
+    assert dones, f"no done event: {events}"
+    assert dones[-1]["text"] == expected, dones[-1]["text"]
+
+
 def test_light_dr_payload_drops_research_hint() -> None:
     from gpt2agent.sse import LIGHT_DR_MODEL, _build_dr_payload
 
