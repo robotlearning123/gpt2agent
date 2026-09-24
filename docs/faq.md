@@ -53,8 +53,9 @@ Measured billing model (2026-09-24, two Pro accounts; receipts in
   backend reports it under a `deep_research_*` variant when it exposes it);
   two full heavy reports left the light bucket unmoved. The authoritative
   exhaustion signal is the in-stream `usage_limit` frame.
-- **Conversation posts** share a paced window (~100 per 3 h, 15 s min
-  interval, enforced client-side across processes).
+- **Conversation posts**: upstream reports no fixed message window for Pro —
+  gpt2agent self-paces client-side (default ≤100 posts per 3 h, 15 s min
+  interval, shared across processes; see `gpt2agent/ratelimit.py`).
 
 Live remaining/reset numbers: `gpt2agent usage`.
 

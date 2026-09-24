@@ -130,7 +130,8 @@ gpt2agent usage       # plan, per-feature quota remaining + reset times, rate wi
 
 **Quotas:** light DR bills 1 per completed search turn from the account's
 monthly `deep_research` bucket (aborted turns cost 0); heavy DR draws an
-independent monthly cap; conversation posts share a paced window. Live numbers:
+independent monthly cap; conversation posts are paced client-side (no fixed
+upstream window is reported for Pro). Live numbers:
 `gpt2agent usage`. Full measured model → **[FAQ](./docs/faq.md#how-much-deep-research-can-i-run)**.
 
 ### Image, code & files
