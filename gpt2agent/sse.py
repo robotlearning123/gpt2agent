@@ -2082,6 +2082,13 @@ class ConversationClient:
                     if not isinstance(msg, dict) and isinstance(v, dict):
                         msg = v.get("message")
                     if isinstance(msg, dict):
+                        # An envelope resets the patch-continuation context
+                        # (_MessageDelta.reset, chat stream()'s envelope
+                        # branch): a later bare {"v": str} must NOT append
+                        # onto the previous message's patched path — that
+                        # mis-attributed stray text onto the new message
+                        # (Devin S1 reproduction, 2026-09-23).
+                        _last_patch_path = None
                         role = (msg.get("author") or {}).get("role", "")
                         content = msg.get("content") or {}
                         ct = content.get("content_type", "")
@@ -2142,8 +2149,10 @@ class ConversationClient:
                             _text_update(new, status)
                         return
 
-                    # Bare {"v": str} — classic delta, or a continuation of
-                    # the last patched path on the f/ encoding.
+                    # Bare {"v": str} — a continuation of the last patched
+                    # path on the f/ encoding, or a CLASSIC delta chunk on
+                    # the legacy endpoint (append semantics, like chat
+                    # stream()'s no-path branch — not a full snapshot).
                     if isinstance(v, str) and v:
                         if (
                             _last_patch_path
@@ -2157,7 +2166,10 @@ class ConversationClient:
                                 _cur_text(), _cur_status or "in_progress"
                             )
                         else:
-                            _text_update(v, "in_progress")
+                            round_completed_successfully = False
+                            done_text = ""
+                            last_text += v
+                            emit.append({"type": "progress", "text": v})
 
                 try:
                     async for raw_line in resp.aiter_lines():

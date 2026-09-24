@@ -302,6 +302,59 @@ def test_bare_list_batch_frame_completes_turn(
     assert not dones[0].get("terminated_abnormally")
 
 
+# Envelope → parts/0 patch → NEW envelope → bare {"v": str}: the stray chunk
+# must NOT append onto the new message's text (Devin S1 execution
+# reproduction 2026-09-23: done text became "newSTRAY" before the envelope
+# reset the continuation path).
+_STRAY_CHUNK_FRAMES = [
+    _msg_line("a1", "assistant", ["old"], "in_progress"),
+    _patch_line("/message/content/parts/0", "append", "-text"),
+    # New envelope for a second assistant message — resets the context.
+    _msg_line("a2", "assistant", ["new"], "in_progress"),
+    "data: " + json.dumps({"v": "STRAY"}),
+    # The first message completes via its own status patch.
+    _patch_line("/message/status", "replace", "finished_successfully"),
+    "data: [DONE]",
+]
+
+
+def test_bare_chunk_after_envelope_not_misattributed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = _run_light_dr(monkeypatch, _STRAY_CHUNK_FRAMES)
+    dones = [e for e in events if e.get("type") == "done"]
+    assert dones, f"no done event: {events}"
+    # The stray chunk must not glue itself onto the new envelope's text
+    # ("newSTRAY") — with the context reset it can only surface as its own
+    # progress chunk; the completing message's text stays intact.
+    assert "newSTRAY" not in dones[0]["text"], dones[0]["text"]
+    assert dones[0]["text"].startswith("new"), dones[0]["text"]
+
+
+# Classic-endpoint delta chunks ({"v": str} with no patch context) are
+# APPEND chunks, not full snapshots — chat stream()'s no-path branch.
+_CLASSIC_CHUNK_FRAMES = [
+    _msg_line("a1", "assistant", [""], "in_progress"),
+    "data: " + json.dumps({"v": "Hel"}),
+    "data: " + json.dumps({"v": "lo "}),
+    "data: " + json.dumps({"v": "world"}),
+    _msg_line("a1", "assistant", ["Hello world"], "finished_successfully"),
+    "data: [DONE]",
+]
+
+
+def test_classic_bare_chunks_accumulate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = _run_light_dr(monkeypatch, _CLASSIC_CHUNK_FRAMES)
+    progress = "".join(
+        e["text"] for e in events if e.get("type") == "progress"
+    )
+    assert progress == "Hello world", f"chunks lost: {progress!r}"
+    dones = [e for e in events if e.get("type") == "done"]
+    assert dones and dones[0]["text"] == "Hello world"
+
+
 def test_light_dr_payload_drops_research_hint() -> None:
     from gpt2agent.sse import LIGHT_DR_MODEL, _build_dr_payload
 
