@@ -28,11 +28,35 @@ $CODEX_HOME/auth.json (default ~/.codex/auth.json) ← bearer, auto-refreshed by
 ## The Sentinel challenge
 
 ChatGPT's backend is protected by OpenAI's "Sentinel" anti-bot system (a
-proof-of-work plus a Cloudflare Turnstile token). gpt2agent solves these with
-vendored solvers (`gpt2agent/_vendored/`, MIT, attributed in
-[NOTICES.md](../NOTICES.md)) and aligns its TLS fingerprint + User-Agent with a real
-Chrome build so Cloudflare's bot manager doesn't 403 the request. **This is the part
-that carries ToS/account-ban risk** — see the README's Security & risk section.
+proof-of-work plus a Cloudflare Turnstile token). The vendored solvers
+(`gpt2agent/_vendored/`, MIT, attributed in [NOTICES.md](../NOTICES.md)) still
+handle the PoW, but since 2026-09-08 the Turnstile stage demands a
+bytecode-VM token they cannot produce — the legacy gate fails there, which
+blocks every conversation tool over REST.
+
+The working path is the **sentinel bridge**: an owner-supplied solver
+directory that mints the full header set (fingerprint-config `p` + PoW + VM
+Turnstile token) in one consistent browser-identity session, with retry and
+backoff for transient failures.
+
+**Setup** (one time):
+
+```bash
+mkdir -p ~/.gpt2agent/sentinel-bridge
+touch ~/.gpt2agent/sentinel-bridge/ENABLED   # marker enables it persistently
+```
+
+The directory must contain `wrapper/reverse/vm.py` (bytecode-VM turnstile
+solver); bridge-internal deps: `pip install esprima pillow colorama`. It is
+**not part of this distribution** — the from-scratch replacement spec is
+[dev/specs/sentinel-vm.md](./dev/specs/sentinel-vm.md). Controls:
+`GPT2AGENT_SENTINEL_BRIDGE=<dir>`, `GPT2AGENT_SENTINEL_BRIDGE_OFF=1` (see
+[configuration.md](./configuration.md#environment-variables)).
+
+Without the bridge, use the browser lane (`browser=True`, one-time Chrome
+login) or `manual=True` handoffs; read-only tools are unaffected. **This
+challenge is the part that carries ToS/account-ban risk** — see the README's
+Security & risk section.
 
 ## Token handling
 

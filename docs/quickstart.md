@@ -52,6 +52,13 @@ Then **restart your MCP client** (Claude Code spawns the server fresh on restart
 Codex picks it up on next run). Ask your agent to call `account_status` — it should
 return your plan and feature count.
 
+> **Lane reality:** `account_status` and the other read-only tools work with no
+> further setup. Conversation tools (`chat`, `deep_research`, …) need a lane:
+> the sentinel bridge for REST (owner-supplied, see
+> [how-it-works.md](./how-it-works.md#the-sentinel-challenge)), or
+> `browser=True`, or `manual=True`. `gpt2agent doctor` shows which lane each
+> tool has.
+
 ## 5. First calls
 
 - `chat` — talk to any model on your account (`model="gpt-6-pro"`, `o3-pro`, …).
