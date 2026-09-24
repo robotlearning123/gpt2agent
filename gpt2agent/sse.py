@@ -1943,14 +1943,39 @@ class ConversationClient:
                 srg_latest: list = []
                 emit: list[dict] = []
 
+                def _flatten_ref_list(value: object) -> list:
+                    """Refs arrive via envelope metadata AND via append
+                    patches; ``_append_value`` appends a patch's list payload
+                    as ONE element, so envelope-then-patch ordering nests
+                    lists (``[dict, [dict, dict]]`` — live capture
+                    PROD-frames.jsonl frames 38-39). Flatten one level,
+                    keep dict items only."""
+                    if not isinstance(value, list):
+                        return []
+                    out: list = []
+                    for item in value:
+                        if isinstance(item, dict):
+                            out.append(item)
+                        elif isinstance(item, list):
+                            out.extend(
+                                d for d in item if isinstance(d, dict)
+                            )
+                    return out
+
                 def _capture_refs(meta: dict | None) -> None:
                     nonlocal refs_latest, srg_latest
                     if not isinstance(meta, dict):
                         return
-                    if meta.get("content_references"):
-                        refs_latest = meta["content_references"]
-                    if meta.get("search_result_groups"):
-                        srg_latest = meta["search_result_groups"]
+                    flat_refs = _flatten_ref_list(
+                        meta.get("content_references")
+                    )
+                    if flat_refs:
+                        refs_latest = flat_refs
+                    flat_srg = _flatten_ref_list(
+                        meta.get("search_result_groups")
+                    )
+                    if flat_srg:
+                        srg_latest = flat_srg
 
                 def _text_update(new: str, status: str) -> None:
                     """Assistant text snapshot — envelope or patch-applied."""
@@ -2015,8 +2040,14 @@ class ConversationClient:
                     nonlocal round_completed_successfully, done_text, last_text
                     p, o, v = f.get("p"), f.get("o"), f.get("v")
 
-                    # Batch patch — p may be "" or absent entirely
-                    if o == "patch" and isinstance(v, list) and p in (None, ""):
+                    # Batch patch — the wire usually tags these
+                    # ``o: "patch"``, but some frames carry no ``o`` at all
+                    # (light-DR capture 2026-09-23, PROD-frames.jsonl frame
+                    # 39: the finished_successfully status flip rides such a
+                    # frame; cf. _MessageDelta.apply, canvas capture). Treat
+                    # both as the same batch, otherwise the frame's ops
+                    # (status flips included) are silently dropped.
+                    if isinstance(v, list) and p in (None, ""):
                         for sub in v:
                             if isinstance(sub, dict):
                                 _frame(sub)

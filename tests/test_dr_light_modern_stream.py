@@ -204,6 +204,104 @@ def test_batch_patch_frame_completes_turn(
     assert not dones[0].get("terminated_abnormally")
 
 
+# A batch frame that carries NO p/o at all — {"v": [sub-ops]} — carries the
+# finished_successfully flip in the wild (PROD-frames.jsonl frame 39,
+# 2026-09-23). Dropping it reports a complete turn as terminated_abnormally.
+_BARE_LIST_FRAMES = [
+    _msg_line("a1", "assistant", [""], "in_progress"),
+    "data: "
+    + json.dumps(
+        {
+            "v": [
+                {
+                    "p": "/message/content/parts/0",
+                    "o": "append",
+                    "v": "bare list answer",
+                },
+                {
+                    "p": "/message/status",
+                    "o": "replace",
+                    "v": "finished_successfully",
+                },
+            ]
+        }
+    ),
+    "data: [DONE]",
+]
+
+
+# Envelope metadata carries the first ref, then a batch patch APPENDS more
+# refs — _append_value appends the patch's list as ONE element, producing a
+# nested [dict, [dict, dict]] that must be flattened before citations render
+# (live capture PROD-frames.jsonl frames 38-39: "'list' object has no
+# attribute 'get'" without the flatten).
+_NESTED_REFS_FRAMES = [
+    _msg_line(
+        "a1",
+        "assistant",
+        [""],
+        "in_progress",
+        metadata={"content_references": REFS},
+    ),
+    "data: "
+    + json.dumps(
+        {
+            "p": "",
+            "o": "patch",
+            "v": [
+                {
+                    "p": "/message/content/parts/0",
+                    "o": "append",
+                    "v": "nested refs answer",
+                },
+                {
+                    "p": "/message/metadata/content_references",
+                    "o": "append",
+                    "v": [
+                        {
+                            "matched_text": "t",
+                            "safe_urls": ["https://x/"],
+                            "items": [
+                                {"title": "X", "url": "https://x/"}
+                            ],
+                            "type": "webpage",
+                        }
+                    ],
+                },
+                {
+                    "p": "/message/status",
+                    "o": "replace",
+                    "v": "finished_successfully",
+                },
+            ],
+        }
+    ),
+    "data: [DONE]",
+]
+
+
+def test_envelope_then_patch_refs_flattened(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = _run_light_dr(monkeypatch, _NESTED_REFS_FRAMES)
+    dones = [e for e in events if e.get("type") == "done"]
+    assert len(dones) == 1, f"expected 1 done, got {len(dones)}: {events}"
+    refs = dones[0]["content_references"]
+    assert len(refs) == 2, f"nested refs not flattened: {refs!r}"
+    assert all(isinstance(r, dict) for r in refs)
+    assert not dones[0].get("terminated_abnormally")
+
+
+def test_bare_list_batch_frame_completes_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events = _run_light_dr(monkeypatch, _BARE_LIST_FRAMES)
+    dones = [e for e in events if e.get("type") == "done"]
+    assert len(dones) == 1, f"expected 1 done, got {len(dones)}: {events}"
+    assert dones[0]["text"] == "bare list answer"
+    assert not dones[0].get("terminated_abnormally")
+
+
 def test_light_dr_payload_drops_research_hint() -> None:
     from gpt2agent.sse import LIGHT_DR_MODEL, _build_dr_payload
 
