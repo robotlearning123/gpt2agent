@@ -5,8 +5,7 @@ MCP server exposing full ChatGPT Plus/Pro account features to any MCP client.
 ## Build & Test
 
 ```bash
-pytest                              # full suite must pass (513+; live auto-skip via SKIP_LIVE)
-python -m ruff check gpt2agent tests
+bash .claude/verify.sh              # full offline suite + ruff (uv --extra dev)
 python -m gpt2agent run             # start MCP server (stdio)
 ```
 
@@ -36,7 +35,8 @@ python -m gpt2agent run             # start MCP server (stdio)
 
 ## Testing
 
-- Offline: `pytest` (513+ unit/contract tests)
+- Offline: `bash .claude/verify.sh` (full unit/contract suite + ruff; live auto-skip via SKIP_LIVE)
+- Evidence trail: verification receipts in `artifacts/verify/`; raw frame captures under `taskruns/`
 - Live matrix: `scripts/agent-user-journey.sh <worktree>` (15 cases)
 - Release gate: `scripts/release-emulation-test.sh <worktree>` (11 checks)
 - Parameter contracts: `tests/test_param_matrix.py` (34 cases)

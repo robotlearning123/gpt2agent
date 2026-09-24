@@ -453,7 +453,7 @@ class _RecordConv:
                                     "github_repos": github_repos})
         return self.reply
 
-    def deep_research(self, q, connectors=None):
+    def deep_research(self, q, connectors=None, model=None):
         self._last_dr_query = q
         async def gen():
             for e in self.dr_events:

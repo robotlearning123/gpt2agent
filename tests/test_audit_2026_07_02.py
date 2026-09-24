@@ -88,6 +88,26 @@ def test_deep_research_clean_done_has_no_incomplete_note(monkeypatch) -> None:
     assert "incomplete" not in out
 
 
+def test_deep_research_prefers_clean_done_over_later_abnormal(monkeypatch) -> None:
+    """A completed answer survives a later lifecycle that never finished.
+
+    Devin S3 S6b (executed): done('first answer', clean) followed by
+    done('partial2', terminated_abnormally) used to show the user
+    'partial2' + the truncation note — the legit answer was discarded by
+    last-done-wins.
+    """
+    conv = _RecordConv()
+    conv.dr_events = [
+        {"type": "done", "text": "first answer", "content_references": []},
+        {"type": "done", "text": "partial2", "content_references": [],
+         "terminated_abnormally": True},
+    ]
+    tools = _build_with_conv(monkeypatch, conv)
+    out = asyncio.run(tools["deep_research"].fn("topic"))
+    assert out.startswith("first answer")
+    assert "Report may be incomplete" not in out
+
+
 def test_deep_research_heavy_flags_poll_timeout(monkeypatch) -> None:
     conv = _RecordConv()
     conv.heavy_events = [{"type": "done", "text": "Partial report",

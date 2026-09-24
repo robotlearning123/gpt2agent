@@ -320,6 +320,14 @@ def test_deep_research_heavy_model_propagates(monkeypatch) -> None:
     assert conv.calls[0]["model"] == CFG["models"]["heavy_dr"]
 
 
+def test_deep_research_model_propagates(monkeypatch) -> None:
+    """Light DR rides the configured chat model (retired 'research' lane)."""
+    conv = _RecordingConv()
+    tools = _server_tools(monkeypatch, conv)
+    _run(tools["deep_research"].fn, "topic")
+    assert conv.calls[0]["model"] == CFG["models"]["chat"]
+
+
 def test_gpt_chat_byte_identical_and_gizmo(monkeypatch) -> None:
     conv = _RecordingConv()
     tools = _server_tools(monkeypatch, conv)

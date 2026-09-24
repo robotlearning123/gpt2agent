@@ -1,18 +1,31 @@
 """Integration test: BackendClient.account_status() against live chatgpt.com.
 
-Skipped automatically when ~/.codex/auth.json is absent.
+Skipped automatically when ~/.codex/auth.json is absent or SKIP_LIVE=1 (the
+default): this is a REAL network call, and an unguarded live test inside the
+offline suite made the pre-commit gate fail randomly on network flakes
+(2026-09-24: 20 s curl timeout on a docs-only commit; rerun passed in 6.8 s).
+Run live with SKIP_LIVE=0.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
 
+_AUTH_EXISTS = (Path.home() / ".codex" / "auth.json").exists()
+_SKIP_LIVE = os.environ.get("SKIP_LIVE", "1") == "1"
+
+
 @pytest.mark.skipif(
-    not (Path.home() / ".codex" / "auth.json").exists(),
+    not _AUTH_EXISTS,
     reason="~/.codex/auth.json not present",
+)
+@pytest.mark.skipif(
+    _SKIP_LIVE,
+    reason="SKIP_LIVE=1 — set SKIP_LIVE=0 to run live",
 )
 def test_account_status_has_subscription() -> None:
     from gpt2agent.backend import BackendClient

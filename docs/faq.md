@@ -44,6 +44,21 @@ Limits and reset timing are account-reported and can change. Run the bundled
 `deep-research/bin/quota.sh` to inspect the current account before heavy work,
 and run heavy Deep Research serially.
 
+Measured billing model (2026-09-24, two Pro accounts; receipts in
+`artifacts/verify/dr-2acct-recovery-2026-09-23.md`):
+
+- **Light DR** (`deep_research`): 1 per **completed** search turn from the
+  account's monthly `deep_research` bucket — turns that abort in-band cost 0.
+- **Heavy DR** (`deep_research_heavy`): an **independent** monthly cap (the
+  backend reports it under a `deep_research_*` variant when it exposes it);
+  two full heavy reports left the light bucket unmoved. The authoritative
+  exhaustion signal is the in-stream `usage_limit` frame.
+- **Conversation posts**: upstream reports no fixed message window for Pro —
+  gpt2agent self-paces client-side (default ≤100 posts per 3 h, 15 s min
+  interval, shared across processes; see `gpt2agent/ratelimit.py`).
+
+Live remaining/reset numbers: `gpt2agent usage`.
+
 ### Is `gpt_chat` (Custom GPTs) stable?
 
 It's **experimental**. Pass the `short_url` returned by `list_custom_gpts` as the

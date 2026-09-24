@@ -427,7 +427,7 @@ def test_connectors_become_system_hints() -> None:
     ]
 
     dr = _build_dr_payload("q", connectors=["connector_openai_pubmed"])
-    assert dr["system_hints"] == ["research", "connector:connector_openai_pubmed"]
+    assert dr["system_hints"] == ["connector:connector_openai_pubmed"]
 
     heavy = _build_heavy_dr_payload("q", connectors=["connector_openai_pubmed"])
     assert heavy["system_hints"][0] == "connector:connector_openai_deep_research"

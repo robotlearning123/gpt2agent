@@ -111,8 +111,14 @@ def _raise_for_sse_error(obj: dict) -> None:
 # Required for Deep Research heavy path; regular /conversation also works for normal chat.
 _F_CONV_URL = _BASE + "/backend-api/f/conversation"
 
-#: Model slug for legacy Deep Research (resolves to i-mini-m / web-search backend)
-DR_MODEL = "research"
+#: Model slug for light Deep Research. The legacy "research" slug lane was
+#: retired upstream in the 2026-09-22 GPT-6 rollout — the turn is accepted,
+#: the system preamble streams, then the server aborts in-band with
+#: "Error in message stream" on both Pro accounts, and no payload variant
+#: recovers it (11 live probes, taskruns/20260923-dr-2acct/). Light DR rides
+#: the default chat model with NO research hint: the model auto-searches the
+#: web and streams citeturn markers + content_references like the old lane.
+LIGHT_DR_MODEL = "gpt-5-6"
 
 #: Model slug for heavy Deep Research — gpt-6-pro with extended thinking + DR connector
 HEAVY_DR_MODEL = "gpt-6-pro"
@@ -608,29 +614,34 @@ def _build_payload(
 def _build_dr_payload(
     query: str,
     *,
+    model: str | None = None,
     conversation_id: str | None = None,
     parent_message_id: str | None = None,
     connectors: list[str] | None = None,
 ) -> dict:
-    """Build payload for legacy Deep Research: model=research + system_hints=['research'].
+    """Build payload for light Deep Research.
 
-    This resolves to i-mini-m (web-search/SearchGPT backend), NOT the Pro-tier
-    multi-section deep research.  Use _build_heavy_dr_payload() for the full DR.
+    Since the 2026-09-22 GPT-6 rollout the legacy ``model="research"`` +
+    ``system_hints=["research"]`` lane aborts upstream ("Error in message
+    stream"); light DR rides the default chat model and relies on its
+    automatic web search, which streams citeturn markers +
+    content_references the same way. Use _build_heavy_dr_payload() for the
+    full Pro-tier DR.
 
     NOTE: history_and_training_disabled must be False here. ChatGPT refuses
-    Deep Research in "temporary chats" (the True setting), returning
-    "Research is not currently supported in temporary chats". DR requires a
-    persistent conversation so the connector can poll for the final report.
+    research in "temporary chats" (the True setting), returning
+    "Research is not currently supported in temporary chats". Research
+    requires a persistent conversation so citations can round-trip.
 
     When ``conversation_id`` + ``parent_message_id`` are supplied, the payload
     continues an existing conversation — used by multi-turn clarification
     handling in ``ConversationClient.deep_research``.
     """
-    payload = _build_payload(DR_MODEL, [{"role": "user", "content": query}])
-    # "research" activates the DR backend; connected-app hints select sources.
-    payload["system_hints"] = ["research"] + [
-        _connector_hint(c) for c in (connectors or [])
-    ]
+    payload = _build_payload(
+        model or LIGHT_DR_MODEL,
+        [{"role": "user", "content": query}],
+        connectors=connectors,
+    )
     payload["history_and_training_disabled"] = False
     if conversation_id:
         payload["conversation_id"] = conversation_id
@@ -1820,6 +1831,7 @@ class ConversationClient:
         self,
         query: str,
         *,
+        model: str | None = None,
         max_clarification_rounds: int = 2,
         connectors: list[str] | None = None,
     ) -> AsyncIterator[dict]:
@@ -1835,9 +1847,12 @@ class ConversationClient:
               wrapper auto-replied with a "proceed with best interpretation"
               follow-up. Real DR continues on the next round.
 
-        Uses model='research' + system_hints=['research'] which triggers the
-        ChatGPT web-search deep-research backend (confirmed working 2026-04-24).
-        Timeout is 1800 s per round to accommodate multi-minute research runs.
+        Rides ``model`` (default LIGHT_DR_MODEL) with no research hint: the
+        model auto-searches the web and streams citeturn markers +
+        content_references. The legacy model='research' +
+        system_hints=['research'] lane (confirmed working 2026-04-24) was
+        retired upstream in the 2026-09-22 GPT-6 rollout. Timeout is 1800 s
+        per round to accommodate multi-minute research runs.
 
         ChatGPT's research mode often opens with a clarifying question instead
         of starting research immediately. ``max_clarification_rounds`` caps how
@@ -1865,10 +1880,12 @@ class ConversationClient:
             # backend.get/post; the sentinel is single-use and short-lived,
             # so reusing the round-1 sentinel for a later auto-proceed POST
             # silently 403s ("token may have expired").
-            headers, conv_url = await self._request_setup(DR_MODEL)
+            resolved_model = model or LIGHT_DR_MODEL
+            headers, conv_url = await self._request_setup(resolved_model)
 
             payload = _build_dr_payload(
                 current_query,
+                model=resolved_model,
                 conversation_id=conversation_id,
                 parent_message_id=last_assistant_msg_id,
                 connectors=connectors,
@@ -1916,6 +1933,293 @@ class ConversationClient:
                 done_text = ""
                 round_completed_successfully = False
                 stream_succeeded = False
+                # v1-delta state: patches apply onto the last seen assistant
+                # envelope; refs/srg may ride ANY message's metadata (live
+                # capture E10a3: refs on system + tool messages too).
+                _cur_msg: dict = {}
+                _cur_status: str = ""
+                _last_patch_path: str | None = None
+                _implicit_prefix: str = ""
+                _envelope_seen: bool = False
+                refs_latest: list = []
+                srg_latest: list = []
+                emit: list[dict] = []
+
+                def _flatten_ref_list(value: object) -> list:
+                    """Refs arrive via envelope metadata AND via append
+                    patches; ``_append_value`` appends a patch's list payload
+                    as ONE element, so envelope-then-patch ordering nests
+                    lists (``[dict, [dict, dict]]`` — live capture
+                    PROD-frames.jsonl frames 38-39). Flatten one level,
+                    keep dict items only."""
+                    if not isinstance(value, list):
+                        return []
+                    out: list = []
+                    for item in value:
+                        if isinstance(item, dict):
+                            out.append(item)
+                        elif isinstance(item, list):
+                            out.extend(
+                                d for d in item if isinstance(d, dict)
+                            )
+                    return out
+
+                def _capture_refs(meta: dict | None) -> None:
+                    nonlocal refs_latest, srg_latest
+                    if not isinstance(meta, dict):
+                        return
+                    flat_refs = _flatten_ref_list(
+                        meta.get("content_references")
+                    )
+                    if flat_refs:
+                        refs_latest = flat_refs
+                    flat_srg = _flatten_ref_list(
+                        meta.get("search_result_groups")
+                    )
+                    if flat_srg:
+                        srg_latest = flat_srg
+
+                def _text_update(new: str, status: str) -> None:
+                    """Assistant text snapshot — envelope or patch-applied."""
+                    nonlocal last_text, done_text
+                    nonlocal round_completed_successfully
+                    if status == "finished_successfully":
+                        emit.append(
+                            {
+                                "type": "done",
+                                "text": apply_inline_citations(
+                                    new, refs_latest
+                                ),
+                                "content_references": refs_latest,
+                                "search_result_groups": srg_latest,
+                            }
+                        )
+                        round_completed_successfully = True
+                        last_text = new
+                        done_text = new
+                        return
+                    # Even an empty newer in-progress snapshot supersedes an
+                    # earlier completed candidate.
+                    _invalidate()
+                    if status != "in_progress":
+                        last_text = new
+                        return
+                    if new:
+                        # Emit incremental text delta
+                        if new.startswith(last_text):
+                            delta = new[len(last_text):]
+                            if delta:
+                                emit.append(
+                                    {"type": "progress", "text": delta}
+                                )
+                        else:
+                            emit.append({"type": "progress", "text": new})
+                        last_text = new
+                    else:
+                        last_text = ""
+
+                def _invalidate() -> None:
+                    """A later lifecycle invalidates the done candidate."""
+                    nonlocal round_completed_successfully, done_text
+                    round_completed_successfully = False
+                    done_text = ""
+
+                def _text_of(msg: dict) -> str:
+                    parts = (msg.get("content") or {}).get("parts") or []
+                    return (
+                        parts[0]
+                        if parts and isinstance(parts[0], str)
+                        else ""
+                    )
+
+                def _cur_text() -> str:
+                    return _text_of(_cur_msg)
+
+                def _append_delta(chunk: str) -> None:
+                    """Append exactly *chunk* — the patch payload already
+                    states the delta, so skip re-deriving it from the full
+                    snapshot (O(n²) on long streams; simplify efficiency #1,
+                    measured 31-93 ms per 200KB report)."""
+                    nonlocal last_text
+                    _invalidate()
+                    last_text += chunk
+                    emit.append({"type": "progress", "text": chunk})
+
+                def _frame(f: dict) -> None:
+                    """Dispatch one frame across both wire formats.
+
+                    Classic ``/conversation``: Format-B ``{"message": ...}``
+                    frames. Frontend ``/f/conversation`` (v1 delta encoding):
+                    ``{"v": {"message": ...}}`` envelopes, batch ``{"p": "",
+                    "o": "patch", "v": [...]}``, path ops ``{"p": "/message/
+                    content/parts/0", "o": "append", "v": str}``, and bare
+                    ``{"v": str}`` continuations of the last patched path.
+                    """
+                    nonlocal _cur_msg, _cur_status, _last_patch_path
+                    nonlocal _implicit_prefix, _envelope_seen
+                    nonlocal last_assistant_msg_id
+                    nonlocal round_completed_successfully, done_text, last_text
+                    p, o, v = f.get("p"), f.get("o"), f.get("v")
+
+                    # Batch patch — the wire usually tags these
+                    # ``o: "patch"``, but some frames carry no ``o`` at all
+                    # (light-DR capture 2026-09-23, PROD-frames.jsonl frame
+                    # 39: the finished_successfully status flip rides such a
+                    # frame; cf. _MessageDelta.apply, canvas capture). Treat
+                    # both as the same batch, otherwise the frame's ops
+                    # (status flips included) are silently dropped.
+                    if isinstance(v, list) and p in (None, ""):
+                        for sub in v:
+                            if isinstance(sub, dict):
+                                _frame(sub)
+                        return
+
+                    # Path-scoped patch — applies onto the last envelope seen
+                    if isinstance(p, str) and p:
+                        _last_patch_path = p
+                        if not _cur_msg and not _envelope_seen and (
+                            p.endswith("/content/parts/0")
+                            or p == "/message/status"
+                        ):
+                            # Patches before any envelope (wire reordering):
+                            # seed an implicit assistant-text anchor instead
+                            # of silently dropping the text (Devin S3 S1 —
+                            # done text was 'lo', losing 'Hel').
+                            _cur_msg = {
+                                "author": {"role": "assistant"},
+                                "content": {
+                                    "content_type": "text",
+                                    "parts": [""],
+                                },
+                                "metadata": {},
+                            }
+                        if _cur_msg:
+                            _apply_message_patch(_cur_msg, p, o, v)
+                        if (
+                            p.endswith("/content/parts/0")
+                            and not _envelope_seen
+                        ):
+                            _implicit_prefix = _cur_text()
+                        if p == "/message/status" and isinstance(v, str):
+                            _cur_status = v
+                            if (_cur_msg.get("author") or {}).get(
+                                "role"
+                            ) == "assistant" and (
+                                _cur_msg.get("content") or {}
+                            ).get("content_type") == "text":
+                                _text_update(_cur_text(), v)
+                        elif p.endswith("/content/parts/0") and isinstance(v, str):
+                            if (_cur_msg.get("author") or {}).get(
+                                "role"
+                            ) == "assistant" and o in (None, "append"):
+                                # o=="append": the payload IS the delta.
+                                _append_delta(v)
+                            elif (_cur_msg.get("author") or {}).get(
+                                "role"
+                            ) == "assistant":
+                                # replace/other ops carry a new snapshot.
+                                _text_update(
+                                    _cur_text(), _cur_status or "in_progress"
+                                )
+                        elif p.startswith("/message/metadata"):
+                            _capture_refs(_cur_msg.get("metadata"))
+                        return
+
+                    # Full message envelope (either encoding)
+                    msg = f.get("message")
+                    if not isinstance(msg, dict) and isinstance(v, dict):
+                        msg = v.get("message")
+                    if isinstance(msg, dict):
+                        # An envelope resets the patch-continuation context
+                        # (_MessageDelta.reset, chat stream()'s envelope
+                        # branch): a later bare {"v": str} must NOT append
+                        # onto the previous message's patched path — that
+                        # mis-attributed stray text onto the new message
+                        # (Devin S1 reproduction, 2026-09-23).
+                        _last_patch_path = None
+                        _was_first_envelope = not _envelope_seen
+                        _envelope_seen = True
+                        role = (msg.get("author") or {}).get("role", "")
+                        content = msg.get("content") or {}
+                        ct = content.get("content_type", "")
+                        status = msg.get("status", "")
+                        meta = msg.get("metadata") or {}
+                        recipient = msg.get("recipient")
+
+                        # Capture latest assistant message id so the next
+                        # turn (auto-proceed reply) can use it as
+                        # parent_message_id.
+                        msg_id = msg.get("id")
+                        if msg_id and role == "assistant":
+                            last_assistant_msg_id = msg_id
+
+                        _capture_refs(meta)
+
+                        # Completion belongs to the latest relevant
+                        # lifecycle, not to any earlier clean `done`. A later
+                        # tool response proves the round continued and
+                        # invalidates that candidate.
+                        if role == "tool":
+                            _invalidate()
+                            last_text = ""
+
+                        # Tool invocation events (search/browse). Assistant
+                        # messages addressed to a tool are dispatch
+                        # envelopes, even when the backend represents them
+                        # as plain text.
+                        if role == "assistant" and (
+                            ct == "code" or recipient not in (None, "all")
+                        ):
+                            _invalidate()
+                            last_text = ""
+                            call_text = content.get("text", "") or _text_of(msg)
+                            if call_text:
+                                emit.append(
+                                    {"type": "tool", "call": call_text}
+                                )
+                            return
+
+                        # Text streaming — assistant in-progress or finished
+                        if role == "assistant" and ct == "text":
+                            if _implicit_prefix and _was_first_envelope:
+                                # Pre-envelope patches met their envelope:
+                                # merge deterministically. The envelope wins
+                                # when it already carries the accumulation
+                                # (authoritative snapshot); the accumulation
+                                # wins when the envelope carries only its
+                                # tail; otherwise concatenate (reordered
+                                # disjoint chunks). (Devin S4 S1 residual.)
+                                env_text = _text_of(msg)
+                                if env_text.startswith(_implicit_prefix):
+                                    merged = env_text
+                                elif _implicit_prefix.endswith(env_text):
+                                    merged = _implicit_prefix
+                                else:
+                                    merged = _implicit_prefix + env_text
+                                content["parts"] = [merged]
+                                _implicit_prefix = ""
+                            _cur_msg = msg  # later patches apply onto this
+                            _cur_status = status
+                            _text_update(_text_of(msg), status)
+                        return
+
+                    # Bare {"v": str} — a continuation of the last patched
+                    # path on the f/ encoding, or a CLASSIC delta chunk on
+                    # the legacy endpoint (append semantics, like chat
+                    # stream()'s no-path branch — not a full snapshot).
+                    if isinstance(v, str) and v:
+                        if (
+                            _last_patch_path
+                            and _last_patch_path.endswith("/content/parts/0")
+                            and _cur_msg
+                        ):
+                            _apply_message_patch(
+                                _cur_msg, _last_patch_path, "append", v
+                            )
+                        # Either way the payload is the delta — append it
+                        # directly instead of re-deriving from the snapshot.
+                        _append_delta(v)
+
                 try:
                     async for raw_line in resp.aiter_lines():
                         if isinstance(raw_line, bytes):
@@ -1939,100 +2243,10 @@ class ConversationClient:
                         if cid and not conversation_id:
                             conversation_id = cid
 
-                        # Format-B {"message": ...} on the classic endpoint,
-                        # {"v": {"message": ...}} envelopes on f/ encoding.
-                        msg = obj.get("message")
-                        _v = obj.get("v")
-                        if not isinstance(msg, dict) and isinstance(_v, dict):
-                            msg = _v.get("message")
-                        if not isinstance(msg, dict):
-                            continue
-
-                        role = (msg.get("author") or {}).get("role", "")
-                        content = msg.get("content") or {}
-                        ct = content.get("content_type", "")
-                        status = msg.get("status", "")
-                        meta = msg.get("metadata") or {}
-                        recipient = msg.get("recipient")
-
-                        # Capture latest assistant message id so the next turn
-                        # (auto-proceed reply) can use it as parent_message_id.
-                        msg_id = msg.get("id")
-                        if msg_id and role == "assistant":
-                            last_assistant_msg_id = msg_id
-
-                        # Completion belongs to the latest relevant lifecycle,
-                        # not to any earlier clean `done`. A later tool response
-                        # proves the round continued and invalidates that candidate.
-                        if role == "tool":
-                            round_completed_successfully = False
-                            done_text = ""
-                            last_text = ""
-
-                        # Tool invocation events (search/browse). Assistant
-                        # messages addressed to a tool are dispatch envelopes,
-                        # even when the backend represents them as plain text.
-                        if role == "assistant" and (
-                            ct == "code" or recipient not in (None, "all")
-                        ):
-                            round_completed_successfully = False
-                            done_text = ""
-                            last_text = ""
-                            parts = content.get("parts") or []
-                            call_text = content.get("text", "") or (
-                                parts[0]
-                                if parts and isinstance(parts[0], str)
-                                else ""
-                            )
-                            if call_text:
-                                yield {"type": "tool", "call": call_text}
-                            continue
-
-                        # Text streaming — assistant in-progress or finished
-                        if role == "assistant" and ct == "text":
-                            parts = content.get("parts") or []
-                            new = (
-                                parts[0]
-                                if parts and isinstance(parts[0], str)
-                                else ""
-                            )
-
-                            if status == "finished_successfully":
-                                _refs_done = meta.get(
-                                    "content_references", []
-                                )
-                                yield {
-                                    "type": "done",
-                                    "text": apply_inline_citations(
-                                        new, _refs_done
-                                    ),
-                                    "content_references": _refs_done,
-                                    "search_result_groups": meta.get(
-                                        "search_result_groups", []
-                                    ),
-                                }
-                                round_completed_successfully = True
-                                last_text = new
-                                done_text = new
-                            else:
-                                # Even an empty newer in-progress snapshot
-                                # supersedes an earlier completed candidate.
-                                round_completed_successfully = False
-                                done_text = ""
-                                if status != "in_progress":
-                                    last_text = new
-                                    continue
-                            if status == "in_progress" and new:
-                                # Emit incremental text delta
-                                if new.startswith(last_text):
-                                    delta = new[len(last_text) :]
-                                    if delta:
-                                        yield {"type": "progress", "text": delta}
-                                else:
-                                    yield {"type": "progress", "text": new}
-                                last_text = new
-                            elif status == "in_progress":
-                                last_text = ""
+                        emit.clear()
+                        _frame(obj)
+                        for ev in emit:
+                            yield ev
                     stream_succeeded = True
                 finally:
                     # Emit a synthetic abnormal terminal whenever normal EOF

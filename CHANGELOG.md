@@ -4,6 +4,43 @@ All notable changes to this project will be documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **`deep_research` (light) restored on both accounts** — the legacy
+  `model="research"` + `system_hints=["research"]` lane was retired upstream
+  in the 2026-09-22 GPT-6 rollout: the turn was accepted, the system preamble
+  streamed, then the server aborted in-band with `Error in message stream`
+  (both Pro accounts; 11 live payload probes found no variant that recovers
+  it — evidence in `taskruns/20260923-dr-2acct/`). Light DR now rides the
+  configured chat model (default `gpt-5-6`) with NO research hint: the model
+  auto-searches the web and streams `citeturn` markers +
+  `content_references` exactly like the old lane. Verified via fresh stdio
+  MCP on both accounts (A 15.1 s / 1486 chars, B 15.9 s / 1274 chars, real
+  python.org citations).
+- **Light-DR stream parser unified with the v1 delta encoding** — the loop
+  only read full message envelopes, so on `/f/conversation` it silently
+  dropped text append patches, status flips, and metadata patches (chat and
+  heavy were unified in 0.0.23; light was missed): a healthy modern stream
+  yielded empty text. Now applies envelopes, batch patches (including
+  `{"v":[…]}` frames that carry no `o` flag — the finished-status flip rides
+  those), path patches, and bare `{"v": str}` continuations via the shared
+  `_apply_message_patch`. Refs are flattened one level at the consumer
+  (`_append_value` nests envelope-then-patch ref lists, which crashed
+  citation rendering with `'list' object has no attribute 'get'`).
+- `.claude/verify.sh`: uv's default sync skips the `dev` extra, so the
+  pre-commit gate's plain `uv run python -m pytest` failed with
+  `No module named pytest` (suite: 612 passed / 13 skipped via the new
+  command).
+
+### Changed
+
+- `deep_research` tool: light DR takes the configured chat model
+  (`[models] chat`) instead of the retired `research` slug; connector hints
+  are preserved. `docs/clients.md` now documents running two ChatGPT
+  accounts side by side in one MCP client via per-entry `CODEX_HOME`.
+
 ## [0.0.23] - 2026-09-23
 
 ### Fixed
