@@ -22,8 +22,12 @@ Python: /home/robot/.local/share/gpt2agent-venv/bin/python (editable → this wo
 - [x] 3. Heavy on A — PASS 144.6s real report (A-heavy.md)
 - [x] 4. Heavy on B — PASS 152.8s real report (B-heavy.md)
 - [x] 5. Receipts + summary matrix in this dir; committed incrementally
-- [ ] 6. /my-review on the diff (running)
-- [ ] 7. Final report to owner (zh)
+- [x] 6. /my-review on the diff — Devin S1→fix; S3 substitute FIX-FIRST→2
+      fix commits; S4 round 2 SHIP; /simplify 3/4 agents applied
+      (altitude 429-died, covered by reuse analysis); receipt
+      artifacts/verify/dr-2acct-recovery-2026-09-23.md
+- [x] 7. Final report to owner (zh) + dr-escalation-log audit of the
+      "404" claim (does not reproduce; serial probes logged)
 
 ## Root cause (evidence: E0-E10 probes + PROD-frames.jsonl + workflow analysts)
 
