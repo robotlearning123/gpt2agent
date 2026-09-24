@@ -2000,8 +2000,7 @@ class ConversationClient:
                         return
                     # Even an empty newer in-progress snapshot supersedes an
                     # earlier completed candidate.
-                    round_completed_successfully = False
-                    done_text = ""
+                    _invalidate()
                     if status != "in_progress":
                         last_text = new
                         return
@@ -2019,13 +2018,32 @@ class ConversationClient:
                     else:
                         last_text = ""
 
-                def _cur_text() -> str:
-                    parts = (_cur_msg.get("content") or {}).get("parts") or []
+                def _invalidate() -> None:
+                    """A later lifecycle invalidates the done candidate."""
+                    nonlocal round_completed_successfully, done_text
+                    round_completed_successfully = False
+                    done_text = ""
+
+                def _text_of(msg: dict) -> str:
+                    parts = (msg.get("content") or {}).get("parts") or []
                     return (
                         parts[0]
                         if parts and isinstance(parts[0], str)
                         else ""
                     )
+
+                def _cur_text() -> str:
+                    return _text_of(_cur_msg)
+
+                def _append_delta(chunk: str) -> None:
+                    """Append exactly *chunk* — the patch payload already
+                    states the delta, so skip re-deriving it from the full
+                    snapshot (O(n²) on long streams; simplify efficiency #1,
+                    measured 31-93 ms per 200KB report)."""
+                    nonlocal last_text
+                    _invalidate()
+                    last_text += chunk
+                    emit.append({"type": "progress", "text": chunk})
 
                 def _frame(f: dict) -> None:
                     """Dispatch one frame across both wire formats.
@@ -2093,7 +2111,13 @@ class ConversationClient:
                         elif p.endswith("/content/parts/0") and isinstance(v, str):
                             if (_cur_msg.get("author") or {}).get(
                                 "role"
+                            ) == "assistant" and o in (None, "append"):
+                                # o=="append": the payload IS the delta.
+                                _append_delta(v)
+                            elif (_cur_msg.get("author") or {}).get(
+                                "role"
                             ) == "assistant":
+                                # replace/other ops carry a new snapshot.
                                 _text_update(
                                     _cur_text(), _cur_status or "in_progress"
                                 )
@@ -2136,8 +2160,7 @@ class ConversationClient:
                         # tool response proves the round continued and
                         # invalidates that candidate.
                         if role == "tool":
-                            round_completed_successfully = False
-                            done_text = ""
+                            _invalidate()
                             last_text = ""
 
                         # Tool invocation events (search/browse). Assistant
@@ -2147,15 +2170,9 @@ class ConversationClient:
                         if role == "assistant" and (
                             ct == "code" or recipient not in (None, "all")
                         ):
-                            round_completed_successfully = False
-                            done_text = ""
+                            _invalidate()
                             last_text = ""
-                            parts = content.get("parts") or []
-                            call_text = content.get("text", "") or (
-                                parts[0]
-                                if parts and isinstance(parts[0], str)
-                                else ""
-                            )
+                            call_text = content.get("text", "") or _text_of(msg)
                             if call_text:
                                 emit.append(
                                     {"type": "tool", "call": call_text}
@@ -2172,30 +2189,18 @@ class ConversationClient:
                                 # wins when the envelope carries only its
                                 # tail; otherwise concatenate (reordered
                                 # disjoint chunks). (Devin S4 S1 residual.)
-                                parts = content.get("parts") or []
-                                env_text = (
-                                    parts[0]
-                                    if parts and isinstance(parts[0], str)
-                                    else ""
-                                )
+                                env_text = _text_of(msg)
                                 if env_text.startswith(_implicit_prefix):
                                     merged = env_text
                                 elif _implicit_prefix.endswith(env_text):
                                     merged = _implicit_prefix
                                 else:
                                     merged = _implicit_prefix + env_text
-                                parts = [merged]
-                                content["parts"] = parts
+                                content["parts"] = [merged]
                                 _implicit_prefix = ""
                             _cur_msg = msg  # later patches apply onto this
                             _cur_status = status
-                            parts = content.get("parts") or []
-                            new = (
-                                parts[0]
-                                if parts and isinstance(parts[0], str)
-                                else ""
-                            )
-                            _text_update(new, status)
+                            _text_update(_text_of(msg), status)
                         return
 
                     # Bare {"v": str} — a continuation of the last patched
@@ -2211,14 +2216,9 @@ class ConversationClient:
                             _apply_message_patch(
                                 _cur_msg, _last_patch_path, "append", v
                             )
-                            _text_update(
-                                _cur_text(), _cur_status or "in_progress"
-                            )
-                        else:
-                            round_completed_successfully = False
-                            done_text = ""
-                            last_text += v
-                            emit.append({"type": "progress", "text": v})
+                        # Either way the payload is the delta — append it
+                        # directly instead of re-deriving from the snapshot.
+                        _append_delta(v)
 
                 try:
                     async for raw_line in resp.aiter_lines():
